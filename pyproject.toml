@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepomics"
+version = "0.3.0"
+description = "Transcriptome-metabolome integration for key-gene prioritization, GRN construction, and WGCNA analysis"
+readme = "README.md"
+authors = [
+    { name = "Your Name", email = "your.email@example.com" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+keywords = [
+    "bioinformatics",
+    "multi-omics",
+    "transcriptomics",
+    "metabolomics",
+    "gene regulatory network",
+    "WGCNA",
+    "machine learning"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+dependencies = [
+    "anndata>=0.8.0",
+    "click>=8.1.0",
+    "matplotlib>=3.7.0",
+    "numpy>=1.23.0",
+    "pandas>=1.5.0",
+    "scikit-learn>=1.2.0",
+    "scipy>=1.10.0",
+    "seaborn>=0.12.0",
+    "statsmodels>=0.14.0",
+    "tqdm>=4.66.0",
+    "upsetplot>=0.8.0",
+    "xgboost>=1.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourname/deepomics"
+Repository = "https://github.com/yourname/deepomics"
+Issues = "https://github.com/yourname/deepomics/issues"
+
+[project.scripts]
+deepomics = "deepomics.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["deepomics*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
