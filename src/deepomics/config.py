@@ -26,8 +26,17 @@ class AnalysisConfig:
     xgb_subsample: float = 0.80
     xgb_colsample_bytree: float = 0.80
 
-    lasso_alpha_search: bool = True
-    lasso_fixed_alpha: float = 0.01
+    elastic_net_alpha_search: bool = True
+    elastic_net_fixed_alpha: float = 0.01
+    elastic_net_l1_ratio: float = 0.50
+    elastic_net_l1_ratio_grid: Tuple[float, ...] = field(
+        default_factory=lambda: (0.10, 0.30, 0.50, 0.70, 0.90, 0.95, 0.99)
+    )
+    elastic_net_max_iter: int = 20000
+
+    # Backward-compatible aliases retained for existing user code/config files.
+    lasso_alpha_search: Optional[bool] = None
+    lasso_fixed_alpha: Optional[float] = None
 
     svm_kernel: str = "linear"
 
@@ -71,6 +80,11 @@ class AnalysisConfig:
 
     def __post_init__(self) -> None:
         """Validate and normalize configuration values."""
+        if self.lasso_alpha_search is not None:
+            self.elastic_net_alpha_search = bool(self.lasso_alpha_search)
+        if self.lasso_fixed_alpha is not None:
+            self.elastic_net_fixed_alpha = float(self.lasso_fixed_alpha)
+
         if not self.project_name.strip():
             raise ValueError("project_name must not be empty.")
         if not (0 < self.pcc_r_threshold <= 1):
@@ -113,6 +127,20 @@ class AnalysisConfig:
             raise ValueError("grn_primary_strategy must be one of: intersection, borda, rra.")
         if not all(fmt in {"md", "html"} for fmt in self.report_formats):
             raise ValueError("report_formats only supports 'md' and 'html'.")
+        if self.elastic_net_fixed_alpha <= 0:
+            raise ValueError("elastic_net_fixed_alpha must be positive.")
+        if not (0 < self.elastic_net_l1_ratio <= 1):
+            raise ValueError("elastic_net_l1_ratio must be within (0, 1].")
+        if self.elastic_net_max_iter < 1000:
+            raise ValueError("elastic_net_max_iter must be at least 1000.")
+        if not self.elastic_net_l1_ratio_grid:
+            raise ValueError("elastic_net_l1_ratio_grid must not be empty.")
+
+        cleaned_l1_ratio_grid = sorted({float(v) for v in self.elastic_net_l1_ratio_grid if 0 < float(v) <= 1})
+        if not cleaned_l1_ratio_grid:
+            raise ValueError("elastic_net_l1_ratio_grid values must be within (0, 1].")
+        self.elastic_net_l1_ratio_grid = tuple(cleaned_l1_ratio_grid)
+
         safe_mkdir(self.output_dir)
 
     def resolved_threads(self) -> int:
