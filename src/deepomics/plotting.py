@@ -85,9 +85,9 @@ def _pick_display_features(engine, top_genes: int, top_metabolites: int) -> tupl
     gene_df = _gene_expression_df(engine.adata)
     metab_df = _metabolomics_df(engine.adata)
 
-    rra_df = engine.ml_results.get("key_genes_rra", pd.DataFrame())
-    if isinstance(rra_df, pd.DataFrame) and not rra_df.empty:
-        gene_candidates = [g for g in rra_df["Gene"].astype(str).tolist() if g in gene_df.columns]
+    primary_df = _get_primary_key_gene_df(engine.ml_results, engine.config)
+    if isinstance(primary_df, pd.DataFrame) and not primary_df.empty:
+        gene_candidates = [g for g in primary_df["Gene"].astype(str).tolist() if g in gene_df.columns]
     else:
         gene_candidates = []
     if len(gene_candidates) < top_genes:
@@ -108,6 +108,18 @@ def _pick_display_features(engine, top_genes: int, top_metabolites: int) -> tupl
 
     return selected_genes, selected_metabs
 
+
+
+
+def _primary_strategy_label(cfg) -> str:
+    """Return the display label of the configured primary key-gene strategy."""
+    return str(getattr(cfg, "grn_primary_strategy", "rra")).upper()
+
+
+def _get_primary_key_gene_df(ml_results: dict, cfg) -> pd.DataFrame:
+    """Return the key-gene table for the configured primary strategy."""
+    strategy = str(getattr(cfg, "grn_primary_strategy", "rra")).lower()
+    return ml_results.get(f"key_genes_{strategy}", pd.DataFrame())
 
 def _text_rotation_for_angle(angle_deg: float) -> tuple[float, str]:
     """Return readable label rotation and alignment for circular layouts."""
@@ -432,9 +444,48 @@ def plot_metabolite_selection_summary(ml_results: dict, save_stem: str | Path, c
     _save_figure(fig, save_stem, cfg)
 
 
-# [Change #6] plot_gene_metabolite_heatmap has been REMOVED.
-# The complex version (plot_complex_gene_metabolite_heatmap) is strictly superior
-# and now serves as the sole gene-metabolite heatmap.
+def plot_gene_metabolite_heatmap(ml_results: dict, save_stem: str | Path, cfg) -> None:
+    """Plot a correlation heatmap for the strongest gene-metabolite pairs."""
+    edge_df = ml_results.get("grn_edges_df")
+    if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
+        return
+
+    ranked = edge_df.assign(AbsPCC=edge_df["PCC_R"].abs()).sort_values(
+        ["Support_Count", "AbsPCC"], ascending=[False, False]
+    )
+    top_edges = ranked.head(80)
+    if top_edges.empty:
+        return
+
+    top_genes = top_edges["Gene"].astype(str).value_counts().head(25).index.tolist()
+    top_metabs = top_edges["Metabolite"].astype(str).value_counts().head(12).index.tolist()
+
+    heat_df = (
+        top_edges.loc[
+            top_edges["Gene"].astype(str).isin(top_genes) & top_edges["Metabolite"].astype(str).isin(top_metabs),
+            ["Gene", "Metabolite", "PCC_R"],
+        ]
+        .drop_duplicates(subset=["Gene", "Metabolite"])
+        .pivot(index="Gene", columns="Metabolite", values="PCC_R")
+        .reindex(index=top_genes, columns=top_metabs)
+        .fillna(0.0)
+    )
+    if heat_df.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(max(8, 0.6 * heat_df.shape[1]), max(6, 0.35 * heat_df.shape[0])))
+    sns.heatmap(
+        heat_df,
+        cmap="RdBu_r",
+        center=0,
+        ax=ax,
+        cbar_kws={"label": "Pearson r"},
+        linewidths=0.2,
+    )
+    ax.set_title("Strong Gene-Metabolite Associations")
+    ax.set_xlabel("Metabolites")
+    ax.set_ylabel("Genes")
+    _save_figure(fig, save_stem, cfg)
 
 
 def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int = 6) -> None:
@@ -577,23 +628,38 @@ def plot_module_trait_heatmap(wgcna_results: dict, save_stem: str | Path, cfg) -
     _save_figure(fig, save_stem, cfg)
 
 
-# [Change #7] plot_module_eigengene_heatmap has been REMOVED.
-# This was a pure diagnostic figure (module-module eigengene correlation)
-# with limited biological interpretive value for end users.  The
-# information is already implicit in the module-trait heatmap and merge
-# process.
-
-
-def plot_top_rra_genes(ml_results: dict, save_stem: str | Path, cfg, top_n: int = 20) -> None:
-    """Plot the most recurrent RRA-prioritized genes."""
-    rra_df = ml_results.get("key_genes_rra")
-    if not isinstance(rra_df, pd.DataFrame) or rra_df.empty:
+def plot_module_eigengene_heatmap(wgcna_results: dict, save_stem: str | Path, cfg) -> None:
+    """Plot a module eigengene correlation heatmap."""
+    me_df = wgcna_results.get("ME_df")
+    if not isinstance(me_df, pd.DataFrame) or me_df.empty or me_df.shape[1] < 2:
         return
 
-    top_df = rra_df.head(top_n).iloc[::-1]
+    corr_df = me_df.corr()
+    fig, ax = plt.subplots(figsize=(max(6, 0.8 * corr_df.shape[1]), max(6, 0.8 * corr_df.shape[0])))
+    sns.heatmap(
+        corr_df,
+        cmap="vlag",
+        center=0,
+        annot=True,
+        fmt=".2f",
+        ax=ax,
+        cbar_kws={"label": "Eigengene correlation"},
+    )
+    ax.set_title("Module Eigengene Correlation")
+    _save_figure(fig, save_stem, cfg)
+
+
+def plot_top_primary_key_genes(ml_results: dict, save_stem: str | Path, cfg, top_n: int = 20) -> None:
+    """Plot the highest-priority genes from the configured primary strategy."""
+    primary_df = _get_primary_key_gene_df(ml_results, cfg)
+    if not isinstance(primary_df, pd.DataFrame) or primary_df.empty:
+        return
+
+    strategy_label = _primary_strategy_label(cfg)
+    top_df = primary_df.head(top_n).iloc[::-1]
     fig, ax = plt.subplots(figsize=(10, max(5, 0.35 * len(top_df))))
     ax.barh(top_df["Gene"], top_df["Associated_Metabolites_Count"])
-    ax.set_title("Top RRA-Prioritized Genes")
+    ax.set_title(f"Top {strategy_label}-Prioritized Genes")
     ax.set_xlabel("Associated Metabolite Count")
     ax.set_ylabel("Gene")
     _save_figure(fig, save_stem, cfg)
@@ -619,10 +685,10 @@ def _df_to_markdown(df: pd.DataFrame, max_rows: int = 20) -> str:
 def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
     """Generate a Markdown analysis report."""
     ml_summary = engine.ml_results.get("metabolite_summary", pd.DataFrame())
-    rra_df = engine.ml_results.get("key_genes_rra", pd.DataFrame())
+    primary_df = _get_primary_key_gene_df(engine.ml_results, cfg)
+    strategy_label = _primary_strategy_label(cfg)
     module_summary = engine.wgcna_results.get("Module_Summary", pd.DataFrame())
     hub_df = engine.wgcna_results.get("Hub_Genes", pd.DataFrame())
-    power_df = engine.wgcna_results.get("Power_Selection", pd.DataFrame())
 
     lines = [
         f"# DeepOmics Report: {cfg.project_name}",
@@ -637,26 +703,20 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         "",
         "## Main Tables",
         "- `GRN_Edges_Full.csv`: full gene-metabolite edge table with support indicators.",
-        "- `Key_Genes_Consolidated.csv`: consolidated key-gene summary (primary strategy with cross-strategy membership flags).",
+        "- `Key_Genes_Consolidated.csv`: key-gene summary for the configured primary strategy.",
         "- `ML_Metabolite_Summary.csv`: metabolite-level screening and selection counts.",
-        "- `WGCNA_Module_Trait_Association.csv`: long-format module-trait correlation, p-value, and FDR.",
+        "- `WGCNA_Module_Trait_Association.csv`: long-format module-trait association table with correlation, p-value, and FDR.",
         "- `WGCNA_Gene_Statistics.csv`: module membership, connectivity and top-trait gene significance.",
         "- `WGCNA_Hub_Genes.csv`: top hub genes per module.",
-        "",
-        "### Cytoscape Import",
-        "To import the GRN into Cytoscape, load `GRN_Edges_Full.csv` and use the `Source`, `Target`, and `Interaction` columns.",
         "",
         "## Metabolite-Level Summary",
         _df_to_markdown(ml_summary, max_rows=20),
         "",
-        "## Top RRA Genes",
-        _df_to_markdown(rra_df, max_rows=20),
+        f"## Top {strategy_label} Genes",
+        _df_to_markdown(primary_df, max_rows=20),
         "",
         "## WGCNA Module Summary",
         _df_to_markdown(module_summary, max_rows=20),
-        "",
-        "## WGCNA Power Selection",
-        _df_to_markdown(power_df, max_rows=20),
         "",
         "## WGCNA Hub Genes",
         _df_to_markdown(hub_df, max_rows=20),
@@ -668,10 +728,9 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         "- `plots/key_genes_overlap_upset.pdf|svg`",
         "- `plots/metabolite_selection_summary.pdf|svg`",
         "- `plots/top_gene_metabolite_pairs.pdf|svg`",
-        "- `plots/wgcna_soft_threshold_diagnostics.pdf|svg`",
         "- `plots/wgcna_gene_dendrogram_modules.pdf|svg`",
         "- `plots/wgcna_module_trait_heatmap.pdf|svg`",
-        "- `plots/top_rra_genes.pdf|svg`",
+        "- `plots/top_primary_key_genes.pdf|svg`",
         "- `plots/correlation_circle.pdf|svg`",
         "- `plots/circos_grn.pdf|svg`",
         "- `plots/complex_gene_metabolite_heatmap.pdf|svg`",
@@ -685,10 +744,10 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
 def generate_html_report(engine, cfg, report_path: str | Path) -> None:
     """Generate an HTML summary report with links to interactive editors."""
     ml_summary = engine.ml_results.get("metabolite_summary", pd.DataFrame()).head(50)
-    rra_df = engine.ml_results.get("key_genes_rra", pd.DataFrame()).head(50)
+    primary_df = _get_primary_key_gene_df(engine.ml_results, cfg).head(50)
+    strategy_label = _primary_strategy_label(cfg)
     module_summary = engine.wgcna_results.get("Module_Summary", pd.DataFrame()).head(50)
     hub_df = engine.wgcna_results.get("Hub_Genes", pd.DataFrame()).head(50)
-    power_df = engine.wgcna_results.get("Power_Selection", pd.DataFrame()).head(50)
 
     interactive_html = ""
     if "html" in cfg.report_formats:
@@ -755,23 +814,15 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
     Open <a href="DeepOmics_Interactive_Report.html"><code>DeepOmics_Interactive_Report.html</code></a>
     to drag labels or nodes, remove distracting elements, add annotations, and save the edited figures as SVG or PNG.
   </div>
-
-  <div class="link-card">
-    <strong>Cytoscape import:</strong>
-    Load <code>GRN_Edges_Full.csv</code> and use the <code>Source</code>, <code>Target</code>, and <code>Interaction</code> columns.
-  </div>
 {interactive_html}
   <h2>Metabolite-Level Summary</h2>
   {ml_summary.to_html(index=False, escape=True)}
 
-  <h2>Top RRA Genes</h2>
-  {rra_df.to_html(index=False, escape=True)}
+  <h2>Top {html.escape(strategy_label)} Genes</h2>
+  {primary_df.to_html(index=False, escape=True)}
 
   <h2>WGCNA Module Summary</h2>
   {module_summary.to_html(index=False, escape=True)}
-
-  <h2>WGCNA Power Selection</h2>
-  {power_df.to_html(index=False, escape=True)}
 
   <h2>WGCNA Hub Genes</h2>
   {hub_df.to_html(index=False, escape=True)}
@@ -792,25 +843,25 @@ def generate_report_plots(engine, cfg) -> None:
 
     plot_key_genes_upset(engine.ml_results, plots_dir / "key_genes_overlap_upset", cfg)
     plot_metabolite_selection_summary(engine.ml_results, plots_dir / "metabolite_selection_summary", cfg)
-    # [Change #6] Simple heatmap removed; only complex version is generated.
     plot_complex_gene_metabolite_heatmap(engine, plots_dir / "complex_gene_metabolite_heatmap", cfg)
     plot_correlation_circle(engine, plots_dir / "correlation_circle", cfg)
     plot_circos_grn(engine, plots_dir / "circos_grn", cfg)
     plot_top_edge_scatter_panels(engine, plots_dir / "top_gene_metabolite_pairs", cfg)
-    plot_top_rra_genes(engine.ml_results, plots_dir / "top_rra_genes", cfg)
+    plot_top_primary_key_genes(engine.ml_results, plots_dir / "top_primary_key_genes", cfg)
 
-    plot_wgcna_soft_threshold(engine.wgcna_results, plots_dir / "wgcna_soft_threshold_diagnostics", cfg)
+    if cfg.diagnostics_enabled():
+        plot_wgcna_soft_threshold(engine.wgcna_results, plots_dir / "wgcna_soft_threshold_diagnostics", cfg)
     plot_wgcna_gene_dendrogram_modules(engine.wgcna_results, plots_dir / "wgcna_gene_dendrogram_modules", cfg)
     plot_module_trait_heatmap(engine.wgcna_results, plots_dir / "wgcna_module_trait_heatmap", cfg)
-    # [Change #7] Module eigengene heatmap removed — pure diagnostic with
-    # limited biological value for end users.
+    if cfg.diagnostics_enabled():
+        plot_module_eigengene_heatmap(engine.wgcna_results, plots_dir / "wgcna_module_eigengene_heatmap", cfg)
 
     notes = (
         "Recommended downstream usage:\n"
-        "1. Use WGCNA_Power_Selection.csv (verbose-only) and the power diagnostic figure to report how the soft threshold was chosen.\n"
+        "1. Use analysis_metadata.json to report the selected WGCNA power and other run settings.\n"
         "2. Use WGCNA_Hub_Genes.csv together with Key_Genes_Consolidated.csv to highlight convergent candidates.\n"
-        "3. Use the FDR column in WGCNA_Module_Trait_Association.csv rather than raw p-values for manuscript-level claims.\n"
-        "4. Import GRN_Edges_Full.csv into Cytoscape (Source/Target/Interaction columns) for final network rendering.\n"
+        "3. Filter WGCNA_Module_Trait_Association.csv directly by FDR for manuscript-level claims.\n"
+        "4. Import source/target/interaction columns from GRN_Edges_Full.csv into Cytoscape when needed.\n"
         "5. Use DeepOmics_Interactive_Report.html for final figure polishing without modifying model outputs.\n"
     )
     (plots_dir / "visualization_notes.txt").write_text(notes, encoding="utf-8")

@@ -219,61 +219,43 @@ class MultiOmicsEngine:
         )
         return summary
 
-    # ------------------------------------------------------------------
-    # [Change #1] Build a consolidated key-gene table across all strategies.
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _build_consolidated_key_gene_table(
-        key_genes_intersection: pd.DataFrame,
-        key_genes_borda: pd.DataFrame,
-        key_genes_rra: pd.DataFrame,
-        primary_strategy: str,
-    ) -> pd.DataFrame:
-        """Merge the three per-strategy key-gene tables into one consolidated table.
 
-        The primary strategy's table is used as the base.  Membership in
-        each strategy is indicated by boolean columns
-        ``In_Intersection`` / ``In_Borda`` / ``In_RRA``.
-        """
-        strategy_map = {
-            "intersection": key_genes_intersection,
-            "borda": key_genes_borda,
-            "rra": key_genes_rra,
-        }
-        primary_df = strategy_map.get(primary_strategy, key_genes_rra)
-        if primary_df.empty:
-            # Fallback: pick the first non-empty table
-            for df in strategy_map.values():
-                if not df.empty:
-                    primary_df = df
-                    break
-        if primary_df.empty:
-            return pd.DataFrame(
-                columns=[
-                    "Gene",
-                    "Strategy",
-                    "Associated_Metabolites_Count",
-                    "Associated_Metabolites",
-                    "Median_Rank",
-                    "Best_Rank",
-                    "In_Intersection",
-                    "In_Borda",
-                    "In_RRA",
-                ]
-            )
+def _get_primary_key_gene_df(self) -> pd.DataFrame:
+    """Return the key-gene table for the configured primary strategy."""
+    return self.ml_results.get(f"key_genes_{self.config.grn_primary_strategy}", pd.DataFrame())
 
-        result = primary_df.copy()
-        result["Strategy"] = primary_strategy
+@staticmethod
+def _build_wgcna_module_trait_association_table(
+    corr_df: pd.DataFrame,
+    pvalue_df: pd.DataFrame,
+    fdr_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Convert module-trait statistics into a long-format association table."""
+    if (
+        not isinstance(corr_df, pd.DataFrame)
+        or corr_df.empty
+        or not isinstance(pvalue_df, pd.DataFrame)
+        or pvalue_df.empty
+        or not isinstance(fdr_df, pd.DataFrame)
+        or fdr_df.empty
+    ):
+        return pd.DataFrame(columns=["Module", "Metabolite", "Correlation", "PValue", "FDR"])
 
-        inter_genes = set(key_genes_intersection["Gene"].astype(str)) if not key_genes_intersection.empty else set()
-        borda_genes = set(key_genes_borda["Gene"].astype(str)) if not key_genes_borda.empty else set()
-        rra_genes = set(key_genes_rra["Gene"].astype(str)) if not key_genes_rra.empty else set()
+    corr_long = corr_df.stack(dropna=False).rename("Correlation").reset_index()
+    corr_long.columns = ["Metabolite", "Module", "Correlation"]
+    pval_long = pvalue_df.stack(dropna=False).rename("PValue").reset_index()
+    pval_long.columns = ["Metabolite", "Module", "PValue"]
+    fdr_long = fdr_df.stack(dropna=False).rename("FDR").reset_index()
+    fdr_long.columns = ["Metabolite", "Module", "FDR"]
 
-        result["In_Intersection"] = result["Gene"].astype(str).isin(inter_genes)
-        result["In_Borda"] = result["Gene"].astype(str).isin(borda_genes)
-        result["In_RRA"] = result["Gene"].astype(str).isin(rra_genes)
-
-        return result
+    assoc_df = corr_long.merge(pval_long, on=["Metabolite", "Module"], how="left").merge(
+        fdr_long, on=["Metabolite", "Module"], how="left"
+    )
+    return assoc_df.loc[:, ["Module", "Metabolite", "Correlation", "PValue", "FDR"]].sort_values(
+        ["FDR", "PValue", "Module", "Metabolite"],
+        ascending=[True, True, True, True],
+        na_position="last",
+    ).reset_index(drop=True)
 
     def _run_wgcna_pipeline(self) -> None:
         """Run an optimized WGCNA workflow for publication-oriented analyses."""
@@ -360,21 +342,11 @@ class MultiOmicsEngine:
         module_trait_corr, module_trait_p = self._correlate_modules_to_traits(me_df, metab_df)
         module_trait_fdr = self._adjust_pvalue_df(module_trait_p)
 
-        # [Change #3] Build ordered gene-module table and merge Dendrogram_Order
-        # into the main Gene_Modules table.
         ordered_gene_modules = self._build_ordered_gene_module_table(
             gene_names=wgcna_gene_names,
             linkage_matrix=linkage_mat,
             gene_module_df=gene_module_df,
         )
-        # Merge Dendrogram_Order into gene_module_df so we do not need a
-        # separate file.
-        if not ordered_gene_modules.empty:
-            order_map = ordered_gene_modules.set_index("Gene")["Dendrogram_Order"]
-            gene_module_df = gene_module_df.copy()
-            gene_module_df["Dendrogram_Order"] = (
-                gene_module_df["Gene"].map(order_map).fillna(-1).astype(int)
-            )
 
         module_summary = (
             gene_module_df.groupby("Module")
@@ -394,6 +366,12 @@ class MultiOmicsEngine:
             module_trait_corr=module_trait_corr,
         )
 
+        gene_module_df = gene_module_df.merge(
+            ordered_gene_modules.loc[:, ["Gene", "Dendrogram_Order"]],
+            on="Gene",
+            how="left",
+        )
+
         selected_power_row = power_table.loc[power_table["Chosen"]].head(1)
         self.wgcna_results = {
             "ME_df": me_df,
@@ -407,7 +385,6 @@ class MultiOmicsEngine:
             "Selected_Power_Summary": selected_power_row.reset_index(drop=True),
             "Adjacency_Used_TOM": bool(use_tom),
             "Merge_Map": merge_map,
-            # Ordered_Gene_Modules kept internally for dendrogram plotting
             "Ordered_Gene_Modules": ordered_gene_modules,
             "Linkage_Matrix": linkage_mat,
             "Gene_Statistics": gene_stats_df,
@@ -812,105 +789,68 @@ class MultiOmicsEngine:
         ]
         return pd.DataFrame(rows)
 
-    # ------------------------------------------------------------------
-    # [Change #2] Helper to build long-format module-trait association table.
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _build_module_trait_association_long(
-        corr_df: pd.DataFrame,
-        pval_df: pd.DataFrame,
-        fdr_df: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """Melt three wide matrices into a single long-format association table.
-
-        Columns: Module | Metabolite | Correlation | PValue | FDR
-        """
-        if corr_df.empty:
-            return pd.DataFrame(columns=["Module", "Metabolite", "Correlation", "PValue", "FDR"])
-
-        corr_long = corr_df.stack().rename("Correlation").reset_index()
-        corr_long.columns = ["Metabolite", "Module", "Correlation"]
-
-        pval_long = pval_df.stack().rename("PValue").reset_index()
-        pval_long.columns = ["Metabolite", "Module", "PValue"]
-
-        fdr_long = fdr_df.stack().rename("FDR").reset_index()
-        fdr_long.columns = ["Metabolite", "Module", "FDR"]
-
-        merged = corr_long.merge(pval_long, on=["Metabolite", "Module"], how="left")
-        merged = merged.merge(fdr_long, on=["Metabolite", "Module"], how="left")
-        merged = merged[["Module", "Metabolite", "Correlation", "PValue", "FDR"]]
-        merged = merged.sort_values(["Module", "PValue"]).reset_index(drop=True)
-        return merged
-
     def save_results(self) -> None:
-        """Export tables, Cytoscape edges, metadata, and optional AnnData state."""
+        """Export tables, metadata, and optional AnnData state."""
         out_dir = safe_mkdir(self.config.output_dir)
-        is_verbose = self.config._is_verbose_or_debug
+        verbose_outputs = self.config.diagnostics_enabled()
 
-        # ----- GRN Edges -----
         grn_edges_df = self.ml_results.get("grn_edges_df", pd.DataFrame())
         if isinstance(grn_edges_df, pd.DataFrame) and not grn_edges_df.empty:
-            grn_edges_df.assign(Abs_PCC_R=grn_edges_df["PCC_R"].abs()).sort_values(
+            grn_edges_export = grn_edges_df.assign(Abs_PCC_R=grn_edges_df["PCC_R"].abs()).sort_values(
                 ["Support_Count", "In_RRA", "Abs_PCC_R"],
                 ascending=[False, False, False],
-            ).drop(columns=["Abs_PCC_R"]).to_csv(out_dir / "GRN_Edges_Full.csv", index=False)
+            ).drop(columns=["Abs_PCC_R"])
+            grn_edges_export.to_csv(out_dir / "GRN_Edges_Full.csv", index=False)
 
-            # [Change #4] Cytoscape export is now controlled by config flag.
             if self.config.export_cytoscape:
-                grn_edges_df.loc[
+                grn_edges_export.loc[
                     :,
                     ["Source", "Target", "Interaction", "Support_Count", "PCC_R", "PCC_P"],
                 ].rename(
                     columns={"Source": "source", "Target": "target", "Interaction": "interaction"}
                 ).to_csv(out_dir / "GRN_Edges_Cytoscape.csv", index=False)
 
-        # ----- Key Genes -----
-        # [Change #1] Output a single consolidated Key_Genes table instead
-        # of three separate files.
-        consolidated_kg = self._build_consolidated_key_gene_table(
-            key_genes_intersection=self.ml_results.get("key_genes_intersection", pd.DataFrame()),
-            key_genes_borda=self.ml_results.get("key_genes_borda", pd.DataFrame()),
-            key_genes_rra=self.ml_results.get("key_genes_rra", pd.DataFrame()),
-            primary_strategy=self.config.grn_primary_strategy,
-        )
-        if not consolidated_kg.empty:
-            consolidated_kg.to_csv(out_dir / "Key_Genes_Consolidated.csv", index=False)
+        primary_key_genes = self._get_primary_key_gene_df()
+        if isinstance(primary_key_genes, pd.DataFrame) and not primary_key_genes.empty:
+            primary_key_genes.assign(
+                Strategy=self.config.grn_primary_strategy.upper()
+            ).loc[
+                :,
+                [
+                    "Strategy",
+                    "Gene",
+                    "Associated_Metabolites_Count",
+                    "Associated_Metabolites",
+                    "Median_Rank",
+                    "Best_Rank",
+                ],
+            ].to_csv(out_dir / "Key_Genes_Consolidated.csv", index=False)
 
-        # ----- Metabolite Summary -----
         metabolite_summary = self.ml_results.get("metabolite_summary", pd.DataFrame())
         if isinstance(metabolite_summary, pd.DataFrame) and not metabolite_summary.empty:
             metabolite_summary.to_csv(out_dir / "ML_Metabolite_Summary.csv", index=False)
 
-        # ----- WGCNA -----
         if self.wgcna_results:
-            # Gene_Modules now includes Dendrogram_Order column (Change #3)
-            self.wgcna_results["Gene_Modules"].to_csv(out_dir / "WGCNA_Gene_Modules.csv", index=False)
+            gene_modules_df = self.wgcna_results["Gene_Modules"]
+            if isinstance(gene_modules_df, pd.DataFrame) and not gene_modules_df.empty:
+                gene_modules_df.to_csv(out_dir / "WGCNA_Gene_Modules.csv", index=False)
+
             self.wgcna_results["ME_df"].to_csv(out_dir / "WGCNA_Module_Eigengenes.csv")
 
-            # [Change #2] Single long-format module-trait association table
-            # replaces three separate wide matrices.
-            trait_assoc = self._build_module_trait_association_long(
-                corr_df=self.wgcna_results["Trait_Correlation"],
-                pval_df=self.wgcna_results["Trait_PValue"],
-                fdr_df=self.wgcna_results["Trait_FDR"],
+            association_df = self._build_wgcna_module_trait_association_table(
+                self.wgcna_results["Trait_Correlation"],
+                self.wgcna_results["Trait_PValue"],
+                self.wgcna_results["Trait_FDR"],
             )
-            trait_assoc.to_csv(out_dir / "WGCNA_Module_Trait_Association.csv", index=False)
+            association_df.to_csv(out_dir / "WGCNA_Module_Trait_Association.csv", index=False)
 
             self.wgcna_results["Module_Summary"].to_csv(out_dir / "WGCNA_Module_Summary.csv", index=False)
             self.wgcna_results["Gene_Statistics"].to_csv(out_dir / "WGCNA_Gene_Statistics.csv", index=False)
             self.wgcna_results["Hub_Genes"].to_csv(out_dir / "WGCNA_Hub_Genes.csv", index=False)
 
-            # [Change #3] Diagnostic files are verbose-only.
-            if is_verbose:
-                self.wgcna_results["Power_Selection"].to_csv(
-                    out_dir / "WGCNA_Power_Selection.csv", index=False
-                )
-                self.wgcna_results["Merge_Map"].to_csv(
-                    out_dir / "WGCNA_Module_Merge_Map.csv", index=False
-                )
-            # Ordered_Gene_Modules no longer exported as a separate file;
-            # its Dendrogram_Order column is merged into Gene_Modules.
+            if verbose_outputs:
+                self.wgcna_results["Power_Selection"].to_csv(out_dir / "WGCNA_Power_Selection.csv", index=False)
+                self.wgcna_results["Merge_Map"].to_csv(out_dir / "WGCNA_Module_Merge_Map.csv", index=False)
 
         self.run_metadata["n_grn_edges"] = int(len(grn_edges_df)) if isinstance(grn_edges_df, pd.DataFrame) else 0
         self.run_metadata["n_wgcna_modules"] = int(

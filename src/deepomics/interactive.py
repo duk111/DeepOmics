@@ -42,9 +42,9 @@ def _pick_display_features(engine, top_genes: int, top_metabolites: int) -> tupl
     gene_df = _gene_expression_df(engine.adata)
     metab_df = _metabolomics_df(engine.adata)
 
-    rra_df = engine.ml_results.get("key_genes_rra", pd.DataFrame())
-    if isinstance(rra_df, pd.DataFrame) and not rra_df.empty:
-        gene_candidates = [g for g in rra_df["Gene"].astype(str).tolist() if g in gene_df.columns]
+    primary_df = _get_primary_key_gene_df(engine)
+    if isinstance(primary_df, pd.DataFrame) and not primary_df.empty:
+        gene_candidates = [g for g in primary_df["Gene"].astype(str).tolist() if g in gene_df.columns]
     else:
         gene_candidates = []
     if len(gene_candidates) < top_genes:
@@ -65,6 +65,13 @@ def _pick_display_features(engine, top_genes: int, top_metabolites: int) -> tupl
 
     return selected_genes, selected_metabs
 
+
+
+
+def _get_primary_key_gene_df(engine) -> pd.DataFrame:
+    """Return the key-gene table for the configured primary strategy."""
+    strategy = str(getattr(engine.config, "grn_primary_strategy", "rra")).lower()
+    return engine.ml_results.get(f"key_genes_{strategy}", pd.DataFrame())
 
 def _module_color_map(modules: list[str]) -> Dict[str, str]:
     """Create a stable module-to-color mapping."""

@@ -68,13 +68,15 @@ class AnalysisConfig:
     complex_heatmap_top_genes: int = 30
     complex_heatmap_top_metabolites: int = 15
 
-    verbose: bool = True
+    verbose: bool = False
     n_threads: int = -1
     cv_folds: int = 5
     generate_reports: bool = True
-    report_formats: Tuple[str, ...] = field(default_factory=lambda: ("md", "html"))
+    report_formats: Tuple[str, ...] = field(default_factory=lambda: ("html",))
     export_pdf: bool = True
     export_svg: bool = True
+    export_cytoscape: bool = True
+    verbose_outputs: bool = False
     save_h5ad: bool = True
     log_level: str = "INFO"
 
@@ -159,6 +161,10 @@ class AnalysisConfig:
         if self.wgcna_tree_cut_height is not None:
             return self.wgcna_tree_cut_height
         return 0.25 if use_tom else 0.90
+
+    def diagnostics_enabled(self) -> bool:
+        """Return whether verbose-only diagnostic artifacts should be exported."""
+        return bool(self.verbose_outputs or self.log_level.upper() == "DEBUG")
 
     def to_dict(self) -> Dict[str, object]:
         """Convert configuration to a serializable dictionary."""
