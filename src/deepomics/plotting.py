@@ -733,6 +733,7 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         "- `plots/correlation_circle.pdf|svg`",
         "- `plots/circos_grn.pdf|svg`",
         "- `plots/complex_gene_metabolite_heatmap.pdf|svg`",
+        "- `DeepOmics_Interactive_Report.html`",
     ]
 
     report_path = Path(report_path)
@@ -740,29 +741,63 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
 
 
 def generate_html_report(engine, cfg, report_path: str | Path) -> None:
-    """Generate a lightweight HTML analysis report."""
+    """Generate an HTML summary report with links to interactive editors."""
     ml_summary = engine.ml_results.get("metabolite_summary", pd.DataFrame()).head(50)
     rra_df = engine.ml_results.get("key_genes_rra", pd.DataFrame()).head(50)
     module_summary = engine.wgcna_results.get("Module_Summary", pd.DataFrame()).head(50)
     hub_df = engine.wgcna_results.get("Hub_Genes", pd.DataFrame()).head(50)
     power_df = engine.wgcna_results.get("Power_Selection", pd.DataFrame()).head(50)
 
+    interactive_html = ""
+    if "html" in cfg.report_formats:
+        interactive_html = """
+  <h2>Interactive Figure Studio</h2>
+  <p>
+    Open <a href="DeepOmics_Interactive_Report.html"><code>DeepOmics_Interactive_Report.html</code></a>
+    for browser-native figure editing. The interactive page focuses on:
+  </p>
+  <ul>
+    <li>Correlation circle polishing via draggable endpoints and labels.</li>
+    <li>Prioritized GRN layout editing via draggable nodes, edge deletion, edge addition, note insertion, and SVG/PNG export.</li>
+    <li>Standalone offline usage without external JavaScript dependencies.</li>
+  </ul>
+"""
     html_text = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <title>DeepOmics Report - {html.escape(cfg.project_name)}</title>
   <style>
-    body {{ font-family: Arial, sans-serif; margin: 32px; line-height: 1.5; }}
+    body {{ font-family: Arial, sans-serif; margin: 32px; line-height: 1.5; color: #111827; }}
     h1, h2 {{ color: #1f2937; }}
+    .hero {{
+      background: #f8fafc;
+      border: 1px solid #d1d5db;
+      border-radius: 14px;
+      padding: 20px 24px;
+      margin-bottom: 24px;
+    }}
+    .link-card {{
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 24px;
+    }}
     table {{ border-collapse: collapse; width: 100%; margin-bottom: 24px; }}
-    th, td {{ border: 1px solid #d1d5db; padding: 8px; text-align: left; }}
+    th, td {{ border: 1px solid #d1d5db; padding: 8px; text-align: left; vertical-align: top; }}
     th {{ background: #f3f4f6; }}
-    code {{ background: #f3f4f6; padding: 2px 6px; }}
+    code {{ background: #f3f4f6; padding: 2px 6px; border-radius: 6px; }}
+    a {{ color: #1d4ed8; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
   </style>
 </head>
 <body>
-  <h1>DeepOmics Report: {html.escape(cfg.project_name)}</h1>
+  <div class="hero">
+    <h1>DeepOmics Report: {html.escape(cfg.project_name)}</h1>
+    <p>This page summarizes structured result tables. For manual figure polishing, use the standalone interactive editor linked below.</p>
+  </div>
+
   <h2>Run Summary</h2>
   <ul>
     <li>Samples: {engine.adata.n_obs}</li>
@@ -773,6 +808,12 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
     <li>TOM enabled for WGCNA: <code>{html.escape(str(engine.wgcna_results.get("Adjacency_Used_TOM", False)))}</code></li>
   </ul>
 
+  <div class="link-card">
+    <strong>Figure editing:</strong>
+    Open <a href="DeepOmics_Interactive_Report.html"><code>DeepOmics_Interactive_Report.html</code></a>
+    to drag labels or nodes, remove distracting elements, add annotations, and save the edited figures as SVG or PNG.
+  </div>
+{interactive_html}
   <h2>Metabolite-Level Summary</h2>
   {ml_summary.to_html(index=False, escape=True)}
 
@@ -794,7 +835,7 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
 
 
 def generate_report_plots(engine, cfg) -> None:
-    """Generate vector figures and summary reports."""
+    """Generate vector figures, summary reports, and interactive HTML editors."""
     set_academic_style()
     plots_dir = safe_mkdir(Path(cfg.output_dir) / "plots")
 
@@ -822,6 +863,7 @@ def generate_report_plots(engine, cfg) -> None:
         "2. Use WGCNA_Hub_Genes.csv together with Key_Genes_Rra.csv to highlight convergent candidates.\n"
         "3. Use WGCNA_Module_Trait_FDR.csv rather than raw p-values for manuscript-level claims.\n"
         "4. Import GRN_Edges_Cytoscape.csv into Cytoscape for final network rendering.\n"
+        "5. Use DeepOmics_Interactive_Report.html for final figure polishing without modifying model outputs.\n"
     )
     (plots_dir / "visualization_notes.txt").write_text(notes, encoding="utf-8")
 
@@ -830,3 +872,10 @@ def generate_report_plots(engine, cfg) -> None:
             generate_markdown_report(engine, cfg, Path(cfg.output_dir) / "DeepOmics_Report.md")
         if "html" in cfg.report_formats:
             generate_html_report(engine, cfg, Path(cfg.output_dir) / "DeepOmics_Report.html")
+            from .interactive import generate_interactive_visual_report
+
+            generate_interactive_visual_report(
+                engine,
+                cfg,
+                Path(cfg.output_dir) / "DeepOmics_Interactive_Report.html",
+            )

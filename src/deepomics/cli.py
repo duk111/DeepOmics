@@ -26,7 +26,7 @@ def main() -> None:
 @click.option("--project", default="Analysis_v1", show_default=True, help="Project name.")
 @click.option("--threads", type=int, default=-1, show_default=True, help="Number of CPU threads for XGBoost (-1 uses all cores).")
 @click.option("--log-level", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False), default="INFO", show_default=True, help="Logging level.")
-@click.option("--report-format", "report_formats", type=click.Choice(["md", "html"], case_sensitive=False), multiple=True, help="Optional report formats. Defaults to both when not set.")
+@click.option("--report-format", "report_formats", type=click.Choice(["md", "html"], case_sensitive=False), multiple=True, help="Optional report formats. Defaults to both when not set. HTML additionally emits the interactive figure studio.")
 @click.option("--wgcna-network-type", type=click.Choice(["unsigned", "signed"], case_sensitive=False), default="unsigned", show_default=True, help="Adjacency type used for WGCNA.")
 @click.option("--wgcna-soft-power", type=int, default=None, help="Fixed WGCNA soft-threshold power. By default, the package auto-selects it.")
 @click.option("--no-wgcna-tom", is_flag=True, help="Disable TOM-based module detection and use adjacency directly.")
