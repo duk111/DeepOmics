@@ -219,43 +219,42 @@ class MultiOmicsEngine:
         )
         return summary
 
+    def _get_primary_key_gene_df(self) -> pd.DataFrame:
+        """Return the key-gene table for the configured primary strategy."""
+        return self.ml_results.get(f"key_genes_{self.config.grn_primary_strategy}", pd.DataFrame())
 
-def _get_primary_key_gene_df(self) -> pd.DataFrame:
-    """Return the key-gene table for the configured primary strategy."""
-    return self.ml_results.get(f"key_genes_{self.config.grn_primary_strategy}", pd.DataFrame())
+    @staticmethod
+    def _build_wgcna_module_trait_association_table(
+        corr_df: pd.DataFrame,
+        pvalue_df: pd.DataFrame,
+        fdr_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Convert module-trait statistics into a long-format association table."""
+        if (
+            not isinstance(corr_df, pd.DataFrame)
+            or corr_df.empty
+            or not isinstance(pvalue_df, pd.DataFrame)
+            or pvalue_df.empty
+            or not isinstance(fdr_df, pd.DataFrame)
+            or fdr_df.empty
+        ):
+            return pd.DataFrame(columns=["Module", "Metabolite", "Correlation", "PValue", "FDR"])
 
-@staticmethod
-def _build_wgcna_module_trait_association_table(
-    corr_df: pd.DataFrame,
-    pvalue_df: pd.DataFrame,
-    fdr_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """Convert module-trait statistics into a long-format association table."""
-    if (
-        not isinstance(corr_df, pd.DataFrame)
-        or corr_df.empty
-        or not isinstance(pvalue_df, pd.DataFrame)
-        or pvalue_df.empty
-        or not isinstance(fdr_df, pd.DataFrame)
-        or fdr_df.empty
-    ):
-        return pd.DataFrame(columns=["Module", "Metabolite", "Correlation", "PValue", "FDR"])
+        corr_long = corr_df.stack(dropna=False).rename("Correlation").reset_index()
+        corr_long.columns = ["Metabolite", "Module", "Correlation"]
+        pval_long = pvalue_df.stack(dropna=False).rename("PValue").reset_index()
+        pval_long.columns = ["Metabolite", "Module", "PValue"]
+        fdr_long = fdr_df.stack(dropna=False).rename("FDR").reset_index()
+        fdr_long.columns = ["Metabolite", "Module", "FDR"]
 
-    corr_long = corr_df.stack(dropna=False).rename("Correlation").reset_index()
-    corr_long.columns = ["Metabolite", "Module", "Correlation"]
-    pval_long = pvalue_df.stack(dropna=False).rename("PValue").reset_index()
-    pval_long.columns = ["Metabolite", "Module", "PValue"]
-    fdr_long = fdr_df.stack(dropna=False).rename("FDR").reset_index()
-    fdr_long.columns = ["Metabolite", "Module", "FDR"]
-
-    assoc_df = corr_long.merge(pval_long, on=["Metabolite", "Module"], how="left").merge(
-        fdr_long, on=["Metabolite", "Module"], how="left"
-    )
-    return assoc_df.loc[:, ["Module", "Metabolite", "Correlation", "PValue", "FDR"]].sort_values(
-        ["FDR", "PValue", "Module", "Metabolite"],
-        ascending=[True, True, True, True],
-        na_position="last",
-    ).reset_index(drop=True)
+        assoc_df = corr_long.merge(pval_long, on=["Metabolite", "Module"], how="left").merge(
+            fdr_long, on=["Metabolite", "Module"], how="left"
+        )
+        return assoc_df.loc[:, ["Module", "Metabolite", "Correlation", "PValue", "FDR"]].sort_values(
+            ["FDR", "PValue", "Module", "Metabolite"],
+            ascending=[True, True, True, True],
+            na_position="last",
+        ).reset_index(drop=True)
 
     def _run_wgcna_pipeline(self) -> None:
         """Run an optimized WGCNA workflow for publication-oriented analyses."""
