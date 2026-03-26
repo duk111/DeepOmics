@@ -26,7 +26,7 @@ def main() -> None:
 @click.option("--project", default="Analysis_v1", show_default=True, help="Project name.")
 @click.option("--threads", type=int, default=-1, show_default=True, help="Number of CPU threads for XGBoost (-1 uses all cores).")
 @click.option("--log-level", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False), default="INFO", show_default=True, help="Logging level.")
-@click.option("--report-format", "report_formats", type=click.Choice(["md", "html"], case_sensitive=False), multiple=True, help="Optional report formats. Defaults to both when not set. HTML additionally emits the interactive figure studio.")
+@click.option("--report-format", "report_formats", type=click.Choice(["md", "html"], case_sensitive=False), multiple=True, help="Optional report formats. Defaults to HTML only when not set.")
 @click.option("--wgcna-network-type", type=click.Choice(["unsigned", "signed"], case_sensitive=False), default="unsigned", show_default=True, help="Adjacency type used for WGCNA.")
 @click.option("--wgcna-soft-power", type=int, default=None, help="Fixed WGCNA soft-threshold power. By default, the package auto-selects it.")
 @click.option("--no-wgcna-tom", is_flag=True, help="Disable TOM-based module detection and use adjacency directly.")
@@ -40,6 +40,7 @@ def main() -> None:
 @click.option("--complex-heatmap-top-metabs", type=int, default=15, show_default=True, help="Number of metabolites displayed in the complex heatmap.")
 @click.option("--no-plots", is_flag=True, help="Skip plot and report generation.")
 @click.option("--no-save-state", is_flag=True, help="Do not save the final H5AD state file.")
+@click.option("--no-cytoscape", is_flag=True, help="Do not export the Cytoscape-ready edge file.")
 def run(
     genes: str,
     metabs: str,
@@ -64,6 +65,7 @@ def run(
     complex_heatmap_top_metabs: int,
     no_plots: bool,
     no_save_state: bool,
+    no_cytoscape: bool,
 ) -> None:
     """Run the end-to-end DeepOmics workflow."""
     output_dir = safe_mkdir(output)
@@ -88,9 +90,12 @@ def run(
         complex_heatmap_top_metabolites=complex_heatmap_top_metabs,
         n_threads=threads,
         log_level=log_level.upper(),
-        report_formats=tuple(fmt.lower() for fmt in report_formats) if report_formats else ("md", "html"),
+        # [Change #8] Default to HTML only when user does not specify.
+        report_formats=tuple(fmt.lower() for fmt in report_formats) if report_formats else ("html",),
         save_h5ad=not no_save_state,
         generate_reports=not no_plots,
+        # [Change #4] Cytoscape export controlled by CLI flag.
+        export_cytoscape=not no_cytoscape,
     )
 
     logger.info("Launching DeepOmics project: %s", cfg.project_name)

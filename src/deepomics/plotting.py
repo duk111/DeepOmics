@@ -432,48 +432,9 @@ def plot_metabolite_selection_summary(ml_results: dict, save_stem: str | Path, c
     _save_figure(fig, save_stem, cfg)
 
 
-def plot_gene_metabolite_heatmap(ml_results: dict, save_stem: str | Path, cfg) -> None:
-    """Plot a correlation heatmap for the strongest gene-metabolite pairs."""
-    edge_df = ml_results.get("grn_edges_df")
-    if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
-        return
-
-    ranked = edge_df.assign(AbsPCC=edge_df["PCC_R"].abs()).sort_values(
-        ["Support_Count", "AbsPCC"], ascending=[False, False]
-    )
-    top_edges = ranked.head(80)
-    if top_edges.empty:
-        return
-
-    top_genes = top_edges["Gene"].astype(str).value_counts().head(25).index.tolist()
-    top_metabs = top_edges["Metabolite"].astype(str).value_counts().head(12).index.tolist()
-
-    heat_df = (
-        top_edges.loc[
-            top_edges["Gene"].astype(str).isin(top_genes) & top_edges["Metabolite"].astype(str).isin(top_metabs),
-            ["Gene", "Metabolite", "PCC_R"],
-        ]
-        .drop_duplicates(subset=["Gene", "Metabolite"])
-        .pivot(index="Gene", columns="Metabolite", values="PCC_R")
-        .reindex(index=top_genes, columns=top_metabs)
-        .fillna(0.0)
-    )
-    if heat_df.empty:
-        return
-
-    fig, ax = plt.subplots(figsize=(max(8, 0.6 * heat_df.shape[1]), max(6, 0.35 * heat_df.shape[0])))
-    sns.heatmap(
-        heat_df,
-        cmap="RdBu_r",
-        center=0,
-        ax=ax,
-        cbar_kws={"label": "Pearson r"},
-        linewidths=0.2,
-    )
-    ax.set_title("Strong Gene-Metabolite Associations")
-    ax.set_xlabel("Metabolites")
-    ax.set_ylabel("Genes")
-    _save_figure(fig, save_stem, cfg)
+# [Change #6] plot_gene_metabolite_heatmap has been REMOVED.
+# The complex version (plot_complex_gene_metabolite_heatmap) is strictly superior
+# and now serves as the sole gene-metabolite heatmap.
 
 
 def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int = 6) -> None:
@@ -616,25 +577,11 @@ def plot_module_trait_heatmap(wgcna_results: dict, save_stem: str | Path, cfg) -
     _save_figure(fig, save_stem, cfg)
 
 
-def plot_module_eigengene_heatmap(wgcna_results: dict, save_stem: str | Path, cfg) -> None:
-    """Plot a module eigengene correlation heatmap."""
-    me_df = wgcna_results.get("ME_df")
-    if not isinstance(me_df, pd.DataFrame) or me_df.empty or me_df.shape[1] < 2:
-        return
-
-    corr_df = me_df.corr()
-    fig, ax = plt.subplots(figsize=(max(6, 0.8 * corr_df.shape[1]), max(6, 0.8 * corr_df.shape[0])))
-    sns.heatmap(
-        corr_df,
-        cmap="vlag",
-        center=0,
-        annot=True,
-        fmt=".2f",
-        ax=ax,
-        cbar_kws={"label": "Eigengene correlation"},
-    )
-    ax.set_title("Module Eigengene Correlation")
-    _save_figure(fig, save_stem, cfg)
+# [Change #7] plot_module_eigengene_heatmap has been REMOVED.
+# This was a pure diagnostic figure (module-module eigengene correlation)
+# with limited biological interpretive value for end users.  The
+# information is already implicit in the module-trait heatmap and merge
+# process.
 
 
 def plot_top_rra_genes(ml_results: dict, save_stem: str | Path, cfg, top_n: int = 20) -> None:
@@ -690,17 +637,14 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         "",
         "## Main Tables",
         "- `GRN_Edges_Full.csv`: full gene-metabolite edge table with support indicators.",
-        "- `GRN_Edges_Cytoscape.csv`: Cytoscape-ready network table.",
-        "- `Key_Genes_Intersection.csv`: strict overlap genes across all three models.",
-        "- `Key_Genes_Borda.csv`: Borda-aggregated key-gene summary.",
-        "- `Key_Genes_Rra.csv`: robust rank aggregation summary.",
+        "- `Key_Genes_Consolidated.csv`: consolidated key-gene summary (primary strategy with cross-strategy membership flags).",
         "- `ML_Metabolite_Summary.csv`: metabolite-level screening and selection counts.",
-        "- `WGCNA_Power_Selection.csv`: power scan diagnostics and chosen power.",
-        "- `WGCNA_Module_Trait_Correlation.csv`: module-trait correlation matrix.",
-        "- `WGCNA_Module_Trait_PValue.csv`: module-trait p-value matrix.",
-        "- `WGCNA_Module_Trait_FDR.csv`: FDR-adjusted module-trait p-value matrix.",
+        "- `WGCNA_Module_Trait_Association.csv`: long-format module-trait correlation, p-value, and FDR.",
         "- `WGCNA_Gene_Statistics.csv`: module membership, connectivity and top-trait gene significance.",
         "- `WGCNA_Hub_Genes.csv`: top hub genes per module.",
+        "",
+        "### Cytoscape Import",
+        "To import the GRN into Cytoscape, load `GRN_Edges_Full.csv` and use the `Source`, `Target`, and `Interaction` columns.",
         "",
         "## Metabolite-Level Summary",
         _df_to_markdown(ml_summary, max_rows=20),
@@ -723,12 +667,10 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         "- `plots/metabolome_pca.pdf|svg`",
         "- `plots/key_genes_overlap_upset.pdf|svg`",
         "- `plots/metabolite_selection_summary.pdf|svg`",
-        "- `plots/gene_metabolite_correlation_heatmap.pdf|svg`",
         "- `plots/top_gene_metabolite_pairs.pdf|svg`",
         "- `plots/wgcna_soft_threshold_diagnostics.pdf|svg`",
         "- `plots/wgcna_gene_dendrogram_modules.pdf|svg`",
         "- `plots/wgcna_module_trait_heatmap.pdf|svg`",
-        "- `plots/wgcna_module_eigengene_heatmap.pdf|svg`",
         "- `plots/top_rra_genes.pdf|svg`",
         "- `plots/correlation_circle.pdf|svg`",
         "- `plots/circos_grn.pdf|svg`",
@@ -813,6 +755,11 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
     Open <a href="DeepOmics_Interactive_Report.html"><code>DeepOmics_Interactive_Report.html</code></a>
     to drag labels or nodes, remove distracting elements, add annotations, and save the edited figures as SVG or PNG.
   </div>
+
+  <div class="link-card">
+    <strong>Cytoscape import:</strong>
+    Load <code>GRN_Edges_Full.csv</code> and use the <code>Source</code>, <code>Target</code>, and <code>Interaction</code> columns.
+  </div>
 {interactive_html}
   <h2>Metabolite-Level Summary</h2>
   {ml_summary.to_html(index=False, escape=True)}
@@ -845,7 +792,7 @@ def generate_report_plots(engine, cfg) -> None:
 
     plot_key_genes_upset(engine.ml_results, plots_dir / "key_genes_overlap_upset", cfg)
     plot_metabolite_selection_summary(engine.ml_results, plots_dir / "metabolite_selection_summary", cfg)
-    plot_gene_metabolite_heatmap(engine.ml_results, plots_dir / "gene_metabolite_correlation_heatmap", cfg)
+    # [Change #6] Simple heatmap removed; only complex version is generated.
     plot_complex_gene_metabolite_heatmap(engine, plots_dir / "complex_gene_metabolite_heatmap", cfg)
     plot_correlation_circle(engine, plots_dir / "correlation_circle", cfg)
     plot_circos_grn(engine, plots_dir / "circos_grn", cfg)
@@ -855,14 +802,15 @@ def generate_report_plots(engine, cfg) -> None:
     plot_wgcna_soft_threshold(engine.wgcna_results, plots_dir / "wgcna_soft_threshold_diagnostics", cfg)
     plot_wgcna_gene_dendrogram_modules(engine.wgcna_results, plots_dir / "wgcna_gene_dendrogram_modules", cfg)
     plot_module_trait_heatmap(engine.wgcna_results, plots_dir / "wgcna_module_trait_heatmap", cfg)
-    plot_module_eigengene_heatmap(engine.wgcna_results, plots_dir / "wgcna_module_eigengene_heatmap", cfg)
+    # [Change #7] Module eigengene heatmap removed — pure diagnostic with
+    # limited biological value for end users.
 
     notes = (
         "Recommended downstream usage:\n"
-        "1. Use WGCNA_Power_Selection.csv and the power diagnostic figure to report how the soft threshold was chosen.\n"
-        "2. Use WGCNA_Hub_Genes.csv together with Key_Genes_Rra.csv to highlight convergent candidates.\n"
-        "3. Use WGCNA_Module_Trait_FDR.csv rather than raw p-values for manuscript-level claims.\n"
-        "4. Import GRN_Edges_Cytoscape.csv into Cytoscape for final network rendering.\n"
+        "1. Use WGCNA_Power_Selection.csv (verbose-only) and the power diagnostic figure to report how the soft threshold was chosen.\n"
+        "2. Use WGCNA_Hub_Genes.csv together with Key_Genes_Consolidated.csv to highlight convergent candidates.\n"
+        "3. Use the FDR column in WGCNA_Module_Trait_Association.csv rather than raw p-values for manuscript-level claims.\n"
+        "4. Import GRN_Edges_Full.csv into Cytoscape (Source/Target/Interaction columns) for final network rendering.\n"
         "5. Use DeepOmics_Interactive_Report.html for final figure polishing without modifying model outputs.\n"
     )
     (plots_dir / "visualization_notes.txt").write_text(notes, encoding="utf-8")
