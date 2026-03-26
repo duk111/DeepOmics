@@ -13,6 +13,7 @@ import pandas as pd
 from scipy.stats import zscore
 from sklearn.decomposition import PCA
 
+from .plotting import PALETTE
 from .utils import safe_mkdir
 
 
@@ -139,7 +140,7 @@ def _build_correlation_circle_payload(engine, cfg) -> dict[str, Any] | None:
     corr_coords = (Xz.T @ score_z) / max(1, Xz.shape[0] - 1)
     var_exp = pca.explained_variance_ratio_ * 100.0
 
-    palette = {"Gene": "#2563eb", "Metabolite": "#dc2626"}
+    palette = {"Gene": PALETTE["gene"], "Metabolite": PALETTE["metabolite"]}
     items = []
     feature_types = ["Gene"] * len(gene_names) + ["Metabolite"] * len(metabolite_names)
     for idx, (name, feature_type) in enumerate(zip(combined.columns.astype(str), feature_types), start=1):
@@ -254,7 +255,7 @@ def _build_grn_editor_payload(engine, cfg) -> dict[str, Any] | None:
                 "support": support,
                 "width": 1.2 + 3.0 * abs_corr,
                 "opacity": min(0.92, 0.28 + 0.16 * support),
-                "color": "#dc2626" if corr >= 0 else "#2563eb",
+                "color": PALETTE["edge_positive"] if corr >= 0 else PALETTE["edge_negative"],
                 "custom": False,
             }
         )

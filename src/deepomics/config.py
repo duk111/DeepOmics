@@ -75,6 +75,7 @@ class AnalysisConfig:
     report_formats: Tuple[str, ...] = field(default_factory=lambda: ("html",))
     export_pdf: bool = True
     export_svg: bool = True
+    export_png: bool = True
     export_cytoscape: bool = True
     verbose_outputs: bool = False
     save_h5ad: bool = True

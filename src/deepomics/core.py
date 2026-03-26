@@ -17,6 +17,22 @@ from .utils import get_logger, log_step, safe_mkdir, write_json
 logger = get_logger()
 
 
+TABLE_FILE_PREFIXES = {
+    "grn_edges_full": "T01_GRN_Edges_Full.csv",
+    "grn_edges_cytoscape": "T02_GRN_Edges_Cytoscape.csv",
+    "key_genes_consolidated": "T03_Key_Genes_Consolidated.csv",
+    "ml_metabolite_summary": "T04_ML_Metabolite_Summary.csv",
+    "wgcna_gene_modules": "T05_WGCNA_Gene_Modules.csv",
+    "wgcna_module_eigengenes": "T06_WGCNA_Module_Eigengenes.csv",
+    "wgcna_module_trait_association": "T07_WGCNA_Module_Trait_Association.csv",
+    "wgcna_module_summary": "T08_WGCNA_Module_Summary.csv",
+    "wgcna_gene_statistics": "T09_WGCNA_Gene_Statistics.csv",
+    "wgcna_hub_genes": "T10_WGCNA_Hub_Genes.csv",
+    "wgcna_power_selection": "T11_WGCNA_Power_Selection.csv",
+    "wgcna_module_merge_map": "T12_WGCNA_Module_Merge_Map.csv",
+}
+
+
 class MultiOmicsEngine:
     """Core analysis engine for transcriptome-metabolome integration."""
 
@@ -799,7 +815,7 @@ class MultiOmicsEngine:
                 ["Support_Count", "In_RRA", "Abs_PCC_R"],
                 ascending=[False, False, False],
             ).drop(columns=["Abs_PCC_R"])
-            grn_edges_export.to_csv(out_dir / "GRN_Edges_Full.csv", index=False)
+            grn_edges_export.to_csv(out_dir / TABLE_FILE_PREFIXES["grn_edges_full"], index=False)
 
             if self.config.export_cytoscape:
                 grn_edges_export.loc[
@@ -807,7 +823,7 @@ class MultiOmicsEngine:
                     ["Source", "Target", "Interaction", "Support_Count", "PCC_R", "PCC_P"],
                 ].rename(
                     columns={"Source": "source", "Target": "target", "Interaction": "interaction"}
-                ).to_csv(out_dir / "GRN_Edges_Cytoscape.csv", index=False)
+                ).to_csv(out_dir / TABLE_FILE_PREFIXES["grn_edges_cytoscape"], index=False)
 
         primary_key_genes = self._get_primary_key_gene_df()
         if isinstance(primary_key_genes, pd.DataFrame) and not primary_key_genes.empty:
@@ -823,33 +839,33 @@ class MultiOmicsEngine:
                     "Median_Rank",
                     "Best_Rank",
                 ],
-            ].to_csv(out_dir / "Key_Genes_Consolidated.csv", index=False)
+            ].to_csv(out_dir / TABLE_FILE_PREFIXES["key_genes_consolidated"], index=False)
 
         metabolite_summary = self.ml_results.get("metabolite_summary", pd.DataFrame())
         if isinstance(metabolite_summary, pd.DataFrame) and not metabolite_summary.empty:
-            metabolite_summary.to_csv(out_dir / "ML_Metabolite_Summary.csv", index=False)
+            metabolite_summary.to_csv(out_dir / TABLE_FILE_PREFIXES["ml_metabolite_summary"], index=False)
 
         if self.wgcna_results:
             gene_modules_df = self.wgcna_results["Gene_Modules"]
             if isinstance(gene_modules_df, pd.DataFrame) and not gene_modules_df.empty:
-                gene_modules_df.to_csv(out_dir / "WGCNA_Gene_Modules.csv", index=False)
+                gene_modules_df.to_csv(out_dir / TABLE_FILE_PREFIXES["wgcna_gene_modules"], index=False)
 
-            self.wgcna_results["ME_df"].to_csv(out_dir / "WGCNA_Module_Eigengenes.csv")
+            self.wgcna_results["ME_df"].to_csv(out_dir / TABLE_FILE_PREFIXES["wgcna_module_eigengenes"])
 
             association_df = self._build_wgcna_module_trait_association_table(
                 self.wgcna_results["Trait_Correlation"],
                 self.wgcna_results["Trait_PValue"],
                 self.wgcna_results["Trait_FDR"],
             )
-            association_df.to_csv(out_dir / "WGCNA_Module_Trait_Association.csv", index=False)
+            association_df.to_csv(out_dir / TABLE_FILE_PREFIXES["wgcna_module_trait_association"], index=False)
 
-            self.wgcna_results["Module_Summary"].to_csv(out_dir / "WGCNA_Module_Summary.csv", index=False)
-            self.wgcna_results["Gene_Statistics"].to_csv(out_dir / "WGCNA_Gene_Statistics.csv", index=False)
-            self.wgcna_results["Hub_Genes"].to_csv(out_dir / "WGCNA_Hub_Genes.csv", index=False)
+            self.wgcna_results["Module_Summary"].to_csv(out_dir / TABLE_FILE_PREFIXES["wgcna_module_summary"], index=False)
+            self.wgcna_results["Gene_Statistics"].to_csv(out_dir / TABLE_FILE_PREFIXES["wgcna_gene_statistics"], index=False)
+            self.wgcna_results["Hub_Genes"].to_csv(out_dir / TABLE_FILE_PREFIXES["wgcna_hub_genes"], index=False)
 
             if verbose_outputs:
-                self.wgcna_results["Power_Selection"].to_csv(out_dir / "WGCNA_Power_Selection.csv", index=False)
-                self.wgcna_results["Merge_Map"].to_csv(out_dir / "WGCNA_Module_Merge_Map.csv", index=False)
+                self.wgcna_results["Power_Selection"].to_csv(out_dir / TABLE_FILE_PREFIXES["wgcna_power_selection"], index=False)
+                self.wgcna_results["Merge_Map"].to_csv(out_dir / TABLE_FILE_PREFIXES["wgcna_module_merge_map"], index=False)
 
         self.run_metadata["n_grn_edges"] = int(len(grn_edges_df)) if isinstance(grn_edges_df, pd.DataFrame) else 0
         self.run_metadata["n_wgcna_modules"] = int(
