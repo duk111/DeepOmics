@@ -277,19 +277,28 @@ def plot_sample_dendrogram(adata, save_stem: str | Path, cfg) -> None:
     if adata.n_obs < 2:
         return
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = plt.subplots(figsize=(max(12, adata.n_obs * 0.12), 6))
     linkage_matrix = linkage(np.asarray(adata.X, dtype=np.float32), method="average")
+
+    # 根据合并距离的分布自动选择 color_threshold，使着色能区分主要亚群
+    merge_distances = linkage_matrix[:, 2]
+    # 取第 70 百分位作为切割阈值（通常能产生 3~6 个颜色簇）
+    color_threshold = float(np.percentile(merge_distances, 50))
+
     dendrogram(
         linkage_matrix,
         labels=adata.obs_names.tolist(),
         leaf_rotation=90,
-        leaf_font_size=9,
+        leaf_font_size=max(4, min(9, 800 // max(1, adata.n_obs))),
+        color_threshold=color_threshold,
+        above_threshold_color="#aaaaaa",
         ax=ax,
     )
     ax.set_title("Sample Clustering Dendrogram")
     ax.set_xlabel("Sample")
     ax.set_ylabel("Euclidean Distance")
     _save_figure(fig, save_stem, cfg)
+
 
 
 def plot_transcriptome_pca(adata, save_stem: str | Path, cfg) -> None:
@@ -705,7 +714,12 @@ def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int 
     n_panels = len(top_edges)
     n_cols = 2
     n_rows = int(np.ceil(n_panels / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(10, 4.2 * n_rows))
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(11, 4.8 * n_rows),
+    )
+    # 增大子图间距，避免标题和相邻子图的轴标签重叠
+    fig.subplots_adjust(hspace=0.50, wspace=0.35)
     axes = np.atleast_1d(axes).ravel()
 
     for ax, (_, row) in zip(axes, top_edges.iterrows()):
@@ -725,19 +739,31 @@ def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int 
             line_kws={"linewidth": 1.6},
             ci=95,
         )
+
+        # 标题只放基因 vs 代谢物名称，字号缩小
+        ax.set_title(f"{gene} vs {metab}", fontsize=10, pad=8)
+
+        # Support / r / p 信息改为子图内部右下角注释，不再放标题
         p_value = float(row["PCC_P"]) if pd.notna(row["PCC_P"]) else np.nan
         p_text = f"{p_value:.2e}" if np.isfinite(p_value) else "NA"
-        ax.set_title(
-            f"{gene} vs {metab}\nSupport={int(row['Support_Count'])}, r={row['PCC_R']:.2f}, p={p_text}"
+        stat_text = f"Support={int(row['Support_Count'])}, r={row['PCC_R']:.2f}\np={p_text}"
+        ax.text(
+            0.97, 0.05, stat_text,
+            transform=ax.transAxes,
+            fontsize=8,
+            ha="right", va="bottom",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="#cccccc", alpha=0.85),
         )
-        ax.set_xlabel(gene)
-        ax.set_ylabel(metab)
+
+        ax.set_xlabel(gene, fontsize=9)
+        ax.set_ylabel(metab, fontsize=9)
 
     for ax in axes[n_panels:]:
         ax.axis("off")
 
-    fig.suptitle("Top Gene-Metabolite Pair Scatter Plots", y=1.01)
+    fig.suptitle("Top Gene-Metabolite Pair Scatter Plots", y=1.005, fontsize=13)
     _save_figure(fig, save_stem, cfg)
+
 
 
 def plot_wgcna_soft_threshold(wgcna_results: dict, save_stem: str | Path, cfg) -> None:
@@ -795,39 +821,45 @@ def plot_wgcna_gene_dendrogram_modules(wgcna_results: dict, save_stem: str | Pat
 
 
 def plot_module_trait_heatmap(wgcna_results: dict, save_stem: str | Path, cfg) -> None:
-    """Plot a module-trait correlation heatmap with significance-star annotations."""
+    """Plot a module-trait correlation heatmap with FDR values beneath r values."""
     corr_df = wgcna_results.get("Trait_Correlation")
     fdr_df = wgcna_results.get("Trait_FDR")
     if not isinstance(corr_df, pd.DataFrame) or corr_df.empty:
         return
 
-    annot = None
-    if isinstance(fdr_df, pd.DataFrame) and not fdr_df.empty:
-        annot = np.empty(corr_df.shape, dtype=object)
-        for i in range(corr_df.shape[0]):
-            for j in range(corr_df.shape[1]):
-                fdr = float(fdr_df.iloc[i, j]) if pd.notna(fdr_df.iloc[i, j]) else np.nan
-                stars = ""
-                if np.isfinite(fdr):
-                    if fdr < 0.001:
-                        stars = "***"
-                    elif fdr < 0.01:
-                        stars = "**"
-                    elif fdr < 0.05:
-                        stars = "*"
-                annot[i, j] = f"{corr_df.iloc[i, j]:.2f}{stars}"
+    # 构建双行注释矩阵：第一行 r 值，第二行 FDR 值
+    annot = np.empty(corr_df.shape, dtype=object)
+    for i in range(corr_df.shape[0]):
+        for j in range(corr_df.shape[1]):
+            r_val = corr_df.iloc[i, j]
+            r_text = f"{r_val:.2f}" if pd.notna(r_val) and np.isfinite(r_val) else "NA"
 
+            if isinstance(fdr_df, pd.DataFrame) and not fdr_df.empty:
+                fdr_val = float(fdr_df.iloc[i, j]) if pd.notna(fdr_df.iloc[i, j]) else np.nan
+                if np.isfinite(fdr_val):
+                    if fdr_val < 0.001:
+                        fdr_text = f"({fdr_val:.1e})"
+                    else:
+                        fdr_text = f"({fdr_val:.3f})"
+                else:
+                    fdr_text = ""
+            else:
+                fdr_text = ""
+
+            annot[i, j] = f"{r_text}\n{fdr_text}" if fdr_text else r_text
+
+    # 自适应格子尺寸，为双行文字留出空间
     fig, ax = plt.subplots(
         figsize=_adaptive_figsize(
             corr_df.shape[0],
             corr_df.shape[1],
-            cell_width=0.70,
-            cell_height=0.40,
+            cell_width=0.80,
+            cell_height=0.50,
             min_width=8.0,
-            min_height=6.0,
-            max_width=20.0,
-            max_height=18.0,
-            margin_width=3.0,
+            min_height=7.0,
+            max_width=22.0,
+            max_height=20.0,
+            margin_width=3.5,
             margin_height=2.5,
         )
     )
@@ -840,12 +872,13 @@ def plot_module_trait_heatmap(wgcna_results: dict, save_stem: str | Path, cfg) -
         ax=ax,
         linewidths=0.3,
         cbar_kws={"label": "Pearson r"},
-        annot_kws={"fontsize": 9},
+        annot_kws={"fontsize": 7, "linespacing": 1.4},
     )
     ax.set_title("Module-Trait Correlation Heatmap")
     ax.set_xlabel("Modules")
     ax.set_ylabel("Metabolites")
     _save_figure(fig, save_stem, cfg)
+
 
 
 def plot_module_eigengene_heatmap(wgcna_results: dict, save_stem: str | Path, cfg) -> None:
