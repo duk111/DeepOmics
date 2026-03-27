@@ -1,8 +1,8 @@
-
 from __future__ import annotations
 
 import html
 import json
+import random
 from pathlib import Path
 from typing import Any, Dict
 
@@ -48,17 +48,21 @@ def _pick_display_features(engine, top_genes: int, top_metabolites: int) -> tupl
         gene_candidates = [g for g in primary_df["Gene"].astype(str).tolist() if g in gene_df.columns]
     else:
         gene_candidates = []
+
     if len(gene_candidates) < top_genes:
         variance_rank = gene_df.var(axis=0).sort_values(ascending=False).index.astype(str).tolist()
         gene_candidates.extend([g for g in variance_rank if g not in gene_candidates])
     selected_genes = gene_candidates[:top_genes]
 
     summary_df = engine.ml_results.get("metabolite_summary", pd.DataFrame())
-    if isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
-        summary_df = summary_df.sort_values(["RRA_Genes", "Candidate_Genes_PCC"], ascending=[False, False])
+    if isinstance(summary_df, pd.DataFrame) and not summary_df.empty and "Metabolite" in summary_df.columns:
+        sort_cols = [col for col in ["RRA_Genes", "Candidate_Genes_PCC"] if col in summary_df.columns]
+        if sort_cols:
+            summary_df = summary_df.sort_values(sort_cols, ascending=[False] * len(sort_cols))
         metabolite_candidates = [m for m in summary_df["Metabolite"].astype(str).tolist() if m in metab_df.columns]
     else:
         metabolite_candidates = []
+
     if len(metabolite_candidates) < top_metabolites:
         variance_rank = metab_df.var(axis=0).sort_values(ascending=False).index.astype(str).tolist()
         metabolite_candidates.extend([m for m in variance_rank if m not in metabolite_candidates])
@@ -67,12 +71,11 @@ def _pick_display_features(engine, top_genes: int, top_metabolites: int) -> tupl
     return selected_genes, selected_metabs
 
 
-
-
 def _get_primary_key_gene_df(engine) -> pd.DataFrame:
     """Return the key-gene table for the configured primary strategy."""
     strategy = str(getattr(engine.config, "grn_primary_strategy", "rra")).lower()
     return engine.ml_results.get(f"key_genes_{strategy}", pd.DataFrame())
+
 
 def _module_color_map(modules: list[str]) -> Dict[str, str]:
     """Create a stable module-to-color mapping."""
@@ -113,6 +116,42 @@ def _build_summary_payload(engine, cfg) -> dict[str, Any]:
         "grnEdges": int(len(grn_edges_df)) if isinstance(grn_edges_df, pd.DataFrame) else 0,
         "wgcnaModules": int(len(module_summary)) if isinstance(module_summary, pd.DataFrame) else 0,
         "selectedPower": engine.wgcna_results.get("Selected_Power", "NA"),
+    }
+
+
+def _build_pca_payload(matrix, sample_names, title: str, cfg) -> dict[str, Any] | None:
+    """Prepare a lightweight PCA scatter payload for the browser."""
+    if isinstance(matrix, pd.DataFrame):
+        values = matrix.to_numpy(dtype=float, copy=False)
+    else:
+        values = np.asarray(matrix, dtype=float)
+
+    if values.ndim != 2 or values.shape[0] < 2 or values.shape[1] < 2:
+        return None
+
+    sample_names = [str(name) for name in sample_names]
+    if len(sample_names) != values.shape[0]:
+        return None
+
+    X = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+    pca = PCA(n_components=2, random_state=cfg.random_state)
+    coords = pca.fit_transform(X)
+    var_exp = pca.explained_variance_ratio_ * 100.0
+
+    return {
+        "title": title,
+        "width": 940,
+        "height": 680,
+        "xLabel": f"PC1 ({var_exp[0]:.1f}%)",
+        "yLabel": f"PC2 ({var_exp[1]:.1f}%)",
+        "points": [
+            {
+                "name": name,
+                "x": float(x),
+                "y": float(y),
+            }
+            for name, (x, y) in zip(sample_names, coords)
+        ],
     }
 
 
@@ -170,15 +209,15 @@ def _build_correlation_circle_payload(engine, cfg) -> dict[str, Any] | None:
     }
 
 
-def _build_grn_editor_payload(engine, cfg) -> dict[str, Any] | None:
-    """Prepare a draggable GRN editor payload for the browser."""
+def _build_network_payload(engine, cfg) -> dict[str, Any] | None:
+    """Prepare a force-layout GRN payload for the browser."""
     edge_df = engine.ml_results.get("grn_edges_df")
     if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         return None
 
     ranked = edge_df.assign(AbsPCC=edge_df["PCC_R"].abs()).sort_values(
-        ["Support_Count", "In_RRA", "AbsPCC"],
-        ascending=[False, False, False],
+        ["Support_Count", "AbsPCC"],
+        ascending=[False, False],
     )
     top_edges = ranked.head(cfg.circos_top_edges).copy()
     if top_edges.empty:
@@ -190,26 +229,22 @@ def _build_grn_editor_payload(engine, cfg) -> dict[str, Any] | None:
         return None
 
     module_df = engine.wgcna_results.get("Gene_Modules", pd.DataFrame())
-    if isinstance(module_df, pd.DataFrame) and not module_df.empty:
+    if isinstance(module_df, pd.DataFrame) and not module_df.empty and {"Gene", "Module"}.issubset(module_df.columns):
         gene_to_module = dict(zip(module_df["Gene"].astype(str), module_df["Module"].astype(str)))
     else:
         gene_to_module = {}
+
     used_modules = [gene_to_module.get(gene, "Unassigned") for gene in genes]
     module_colors = _module_color_map(used_modules)
+    rng = random.Random(int(cfg.random_state))
 
-    width = 1240
-    height = max(860, 120 + 28 * max(len(genes), len(metabolites)))
-
-    def _lane_positions(n_items: int, lane_top: float, lane_bottom: float) -> np.ndarray:
-        if n_items <= 1:
-            return np.array([(lane_top + lane_bottom) / 2.0], dtype=float)
-        return np.linspace(lane_top, lane_bottom, num=n_items, dtype=float)
-
-    gene_y = _lane_positions(len(genes), 140.0, float(height) - 120.0)
-    metab_y = _lane_positions(len(metabolites), 140.0, float(height) - 120.0)
+    width = 1100
+    height = 750
+    y_min = 70.0
+    y_max = float(height - 70)
 
     nodes = []
-    for gene, y in zip(genes, gene_y):
+    for gene in genes:
         module = gene_to_module.get(gene, "Unassigned")
         nodes.append(
             {
@@ -217,30 +252,31 @@ def _build_grn_editor_payload(engine, cfg) -> dict[str, Any] | None:
                 "label": gene,
                 "type": "Gene",
                 "module": module,
-                "x": 260.0,
-                "y": float(y),
                 "color": module_colors.get(module, "#bdbdbd"),
-            }
-        )
-    for metab, y in zip(metabolites, metab_y):
-        nodes.append(
-            {
-                "id": f"metab::{metab}",
-                "label": metab,
-                "type": "Metabolite",
-                "module": "Metabolite",
-                "x": 980.0,
-                "y": float(y),
-                "color": "#111827",
+                "x": float(rng.uniform(100.0, 500.0)),
+                "y": float(rng.uniform(y_min, y_max)),
             }
         )
 
-    node_set = {node["id"] for node in nodes}
+    for metabolite in metabolites:
+        nodes.append(
+            {
+                "id": f"metab::{metabolite}",
+                "label": metabolite,
+                "type": "Metabolite",
+                "module": "Metabolite",
+                "color": "#111827",
+                "x": float(rng.uniform(600.0, 1000.0)),
+                "y": float(rng.uniform(y_min, y_max)),
+            }
+        )
+
+    node_ids = {node["id"] for node in nodes}
     edges = []
     for edge_idx, (_, row) in enumerate(top_edges.reset_index(drop=True).iterrows(), start=1):
         source = f"gene::{str(row['Gene'])}"
         target = f"metab::{str(row['Metabolite'])}"
-        if source not in node_set or target not in node_set:
+        if source not in node_ids or target not in node_ids:
             continue
 
         corr = float(row["PCC_R"]) if pd.notna(row["PCC_R"]) else 0.0
@@ -253,12 +289,14 @@ def _build_grn_editor_payload(engine, cfg) -> dict[str, Any] | None:
                 "target": target,
                 "correlation": corr,
                 "support": support,
-                "width": 1.2 + 3.0 * abs_corr,
-                "opacity": min(0.92, 0.28 + 0.16 * support),
                 "color": PALETTE["edge_positive"] if corr >= 0 else PALETTE["edge_negative"],
-                "custom": False,
+                "width": 1.0 + 2.0 * abs_corr,
+                "opacity": min(0.95, 0.25 + 0.18 * support),
             }
         )
+
+    if not edges:
+        return None
 
     module_legend = [
         {"label": module, "color": module_colors[module]}
@@ -267,13 +305,11 @@ def _build_grn_editor_payload(engine, cfg) -> dict[str, Any] | None:
     ]
 
     return {
-        "title": "Prioritized GRN Editor",
-        "subtitle": "Drag nodes, delete distracting edges, connect two selected nodes, and export the refined network as SVG or PNG.",
-        "width": width,
-        "height": height,
         "nodes": nodes,
         "edges": edges,
         "moduleLegend": module_legend,
+        "width": width,
+        "height": height,
     }
 
 
@@ -296,8 +332,10 @@ def _interactive_html_template() -> str:
       --danger: #dc2626;
       --success: #059669;
       --shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+      --tab-shadow: 0 6px 16px rgba(15, 23, 42, 0.06);
     }
     * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
     body {
       margin: 0;
       font-family: "Inter", "Segoe UI", Arial, sans-serif;
@@ -305,10 +343,63 @@ def _interactive_html_template() -> str:
       color: var(--text);
       line-height: 1.5;
     }
+    .tab-nav {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      background: rgba(255, 255, 255, 0.96);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border);
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+    }
+    .tab-nav-inner {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 0 28px;
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+    }
+    .tab-btn {
+      appearance: none;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      padding: 18px 14px 14px 14px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      border-bottom: 2.5px solid transparent;
+      border-radius: 0;
+      box-shadow: none;
+      transform: none;
+      white-space: nowrap;
+    }
+    .tab-btn:hover {
+      color: var(--text);
+      border-color: #bfdbfe;
+      box-shadow: none;
+      transform: none;
+    }
+    .tab-btn.active {
+      color: var(--accent);
+      border-color: var(--accent);
+    }
     .page {
       max-width: 1440px;
       margin: 0 auto;
       padding: 28px;
+    }
+    .tab-panel {
+      display: none;
+      animation: fadeIn 0.16s ease-out;
+    }
+    .tab-panel.active {
+      display: block;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(3px); }
+      to { opacity: 1; transform: translateY(0); }
     }
     .hero {
       background: linear-gradient(135deg, #eff6ff 0%, #ffffff 100%);
@@ -351,6 +442,11 @@ def _interactive_html_template() -> str:
       padding: 14px 16px;
       color: var(--muted);
     }
+    .guide {
+      margin-top: 14px;
+      color: #1e3a8a;
+      font-weight: 600;
+    }
     .grid {
       display: grid;
       gap: 24px;
@@ -374,8 +470,22 @@ def _interactive_html_template() -> str:
     .toolbar {
       display: flex;
       flex-wrap: wrap;
+      align-items: center;
       gap: 10px;
       margin-bottom: 14px;
+    }
+    .toolbar-group {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding-right: 10px;
+      margin-right: 2px;
+      border-right: 1px solid var(--border);
+    }
+    .toolbar-group:last-child {
+      border-right: none;
+      padding-right: 0;
+      margin-right: 0;
     }
     button {
       appearance: none;
@@ -404,11 +514,21 @@ def _interactive_html_template() -> str:
       border-color: #fecaca;
       color: #b91c1c;
     }
+    input[type="color"] {
+      width: 42px;
+      height: 36px;
+      padding: 0;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #ffffff;
+      cursor: pointer;
+    }
     .canvas-shell {
       background: #ffffff;
       border: 1px solid var(--border);
       border-radius: 18px;
       overflow: hidden;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65);
     }
     svg {
       width: 100%;
@@ -446,12 +566,6 @@ def _interactive_html_template() -> str:
       border: 1px solid rgba(15, 23, 42, 0.15);
       flex: none;
     }
-    .help-list {
-      margin: 8px 0 0 0;
-      padding-left: 18px;
-      color: var(--muted);
-      font-size: 14px;
-    }
     .fallback {
       border: 1px dashed var(--border);
       border-radius: 14px;
@@ -459,38 +573,146 @@ def _interactive_html_template() -> str:
       background: #f8fafc;
       color: var(--muted);
     }
-    a.inline-link {
-      color: #1d4ed8;
-      text-decoration: none;
-      font-weight: 600;
+    .floating-tooltip {
+      position: fixed;
+      left: 0;
+      top: 0;
+      z-index: 120;
+      max-width: 320px;
+      pointer-events: none;
+      opacity: 0;
+      transform: translate(0, 0);
+      transition: opacity 0.08s ease;
+      background: rgba(15, 23, 42, 0.96);
+      color: #f8fafc;
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.45;
+      box-shadow: 0 14px 32px rgba(15, 23, 42, 0.22);
     }
-    a.inline-link:hover {
-      text-decoration: underline;
+    .floating-tooltip.visible {
+      opacity: 1;
+    }
+    .empty-state {
+      color: var(--muted);
+      padding: 14px 4px 0 4px;
+      font-size: 14px;
+    }
+    @media (max-width: 880px) {
+      .page { padding: 18px; }
+      .tab-nav-inner { padding: 0 18px; }
+      .hero { padding: 20px; }
+      .card { padding: 16px; }
+      .toolbar-group {
+        border-right: none;
+        padding-right: 0;
+        margin-right: 0;
+      }
     }
   </style>
 </head>
 <body>
+  <nav class="tab-nav" aria-label="Interactive analysis navigation">
+    <div class="tab-nav-inner">
+      <button class="tab-btn active" data-tab="overviewPanel" type="button">Overview</button>
+      <button class="tab-btn" data-tab="txPcaPanel" type="button">Transcriptome PCA</button>
+      <button class="tab-btn" data-tab="metabPcaPanel" type="button">Metabolome PCA</button>
+      <button class="tab-btn" data-tab="networkPanel" type="button">GRN Network</button>
+      <button class="tab-btn" data-tab="circlePanel" type="button">Correlation Circle</button>
+    </div>
+  </nav>
+
   <div class="page">
-    <section class="hero">
-      <h1>DeepOmics Interactive Figure Studio</h1>
-      <p>This standalone HTML report keeps the underlying DeepOmics model outputs untouched while exposing an editable figure layer for publication polishing. It is intentionally focused on the most annotation-heavy figures: the multi-omics correlation circle and the prioritized gene-metabolite network.</p>
-      <div class="chip-row" id="summaryChips"></div>
-      <div class="callout">
-        Recommended workflow: keep the package-generated CSV / H5AD / static SVG outputs as the reproducible record, then use this page only for final presentation edits such as label deconfliction, node movement, edge pruning, and figure export.
-      </div>
+    <section class="tab-panel active" id="overviewPanel">
+      <section class="hero">
+        <h1>DeepOmics Interactive Figure Studio</h1>
+        <p>This standalone HTML report keeps the underlying DeepOmics model outputs untouched while exposing an editable figure layer for publication polishing. It is intentionally focused on the most annotation-heavy figures: multi-omics ordination panels, the force-directed gene-metabolite network, and the correlation circle editor.</p>
+        <div class="chip-row" id="summaryChips"></div>
+        <div class="callout">
+          Recommended workflow: keep the package-generated CSV / H5AD / static SVG outputs as the reproducible record, then use this page only for final presentation edits such as label deconfliction, node movement, edge pruning, recoloring, and figure export.
+        </div>
+        <p class="guide">Click the tabs above to explore interactive analysis panels.</p>
+      </section>
     </section>
 
-    <div class="grid">
+    <section class="tab-panel" id="txPcaPanel">
+      <section class="card">
+        <h2>Transcriptome PCA</h2>
+        <p class="desc">Inspect transcriptome sample separation in two dimensions, recolor the scatter interactively, and export the figure as SVG or PNG.</p>
+        <div class="toolbar">
+          <div class="toolbar-group">
+            <input type="color" id="txPcaColor" value="#4c78a8" aria-label="Transcriptome PCA point color" />
+            <button class="primary" id="txPcaApplyColor" type="button">Apply Color</button>
+          </div>
+          <div class="toolbar-group">
+            <button id="txPcaSvgBtn" type="button">Save SVG</button>
+            <button id="txPcaPngBtn" type="button">Save PNG</button>
+          </div>
+        </div>
+        <div class="canvas-shell">
+          <svg id="txPcaSvg" viewBox="0 0 940 680" role="img" aria-label="Transcriptome PCA scatter plot"></svg>
+        </div>
+        <div class="status" id="txPcaStatus"></div>
+        <div class="fallback" id="txPcaFallback" hidden>No transcriptome PCA payload was generated. This usually means the matrix did not contain enough samples or features for a 2D PCA projection.</div>
+      </section>
+    </section>
+
+    <section class="tab-panel" id="metabPcaPanel">
+      <section class="card">
+        <h2>Metabolome PCA</h2>
+        <p class="desc">Inspect metabolome sample separation in two dimensions, recolor the scatter interactively, and export the figure as SVG or PNG.</p>
+        <div class="toolbar">
+          <div class="toolbar-group">
+            <input type="color" id="metabPcaColor" value="#4c78a8" aria-label="Metabolome PCA point color" />
+            <button class="primary" id="metabPcaApplyColor" type="button">Apply Color</button>
+          </div>
+          <div class="toolbar-group">
+            <button id="metabPcaSvgBtn" type="button">Save SVG</button>
+            <button id="metabPcaPngBtn" type="button">Save PNG</button>
+          </div>
+        </div>
+        <div class="canvas-shell">
+          <svg id="metabPcaSvg" viewBox="0 0 940 680" role="img" aria-label="Metabolome PCA scatter plot"></svg>
+        </div>
+        <div class="status" id="metabPcaStatus"></div>
+        <div class="fallback" id="metabPcaFallback" hidden>No metabolome PCA payload was generated. This usually means the matrix did not contain enough samples or features for a 2D PCA projection.</div>
+      </section>
+    </section>
+
+    <section class="tab-panel" id="networkPanel">
+      <section class="card">
+        <h2>GRN Network</h2>
+        <p class="desc">Explore the top prioritized gene-metabolite associations as a force-directed network. Drag a node to pin it, click a node or edge to select it, remove distracting elements, and export the current layout.</p>
+        <div class="toolbar">
+          <div class="toolbar-group">
+            <button class="primary" id="networkRelayoutBtn" type="button">Re-layout</button>
+            <button class="warn" id="networkDeleteBtn" type="button">Delete Selected</button>
+          </div>
+          <div class="toolbar-group">
+            <button id="networkSvgBtn" type="button">Save SVG</button>
+            <button id="networkPngBtn" type="button">Save PNG</button>
+          </div>
+        </div>
+        <div class="canvas-shell">
+          <svg id="networkSvg" viewBox="0 0 1100 750" role="img" aria-label="GRN force-directed network"></svg>
+        </div>
+        <div class="status" id="networkStatus"></div>
+        <div class="fallback" id="networkFallback" hidden>No GRN network payload was generated. This usually means the current run did not produce enough prioritized gene-metabolite edges.</div>
+      </section>
+    </section>
+
+    <section class="tab-panel" id="circlePanel">
       <section class="card" id="circleCard">
         <h2>Correlation circle editor</h2>
         <p class="desc">Best suited for fixing crowded labels in PCA correlation circles. Drag feature endpoints to move vectors, drag labels independently, double-click labels to rename, add free-text notes, and export the edited figure.</p>
         <div class="toolbar">
-          <button class="primary" id="circleRenameBtn">Rename selected feature</button>
-          <button id="circleAddNoteBtn">Add note</button>
-          <button class="warn" id="circleDeleteBtn">Delete selected item</button>
-          <button id="circleResetBtn">Reset layout</button>
-          <button id="circleSvgBtn">Save SVG</button>
-          <button id="circlePngBtn">Save PNG</button>
+          <button class="primary" id="circleRenameBtn" type="button">Rename selected feature</button>
+          <button id="circleAddNoteBtn" type="button">Add note</button>
+          <button class="warn" id="circleDeleteBtn" type="button">Delete selected item</button>
+          <button id="circleResetBtn" type="button">Reset layout</button>
+          <button id="circleSvgBtn" type="button">Save SVG</button>
+          <button id="circlePngBtn" type="button">Save PNG</button>
         </div>
         <div class="canvas-shell">
           <svg id="circleSvg" viewBox="0 0 940 780" role="img" aria-label="Correlation circle editor"></svg>
@@ -503,45 +725,17 @@ def _interactive_html_template() -> str:
         <div class="status" id="circleStatus"></div>
         <div class="fallback" id="circleFallback" hidden>No correlation-circle payload was generated. This usually means the run did not produce enough prioritized features for an informative editor.</div>
       </section>
-
-      <section class="card" id="grnCard">
-        <h2>Prioritized GRN editor</h2>
-        <p class="desc">Best suited for network layout polishing before manuscript figures. Drag nodes, shift-click two nodes to create a custom edge, click an edge to edit support / correlation, delete selected edges or nodes, add notes, and export the edited result.</p>
-        <div class="toolbar">
-          <button class="primary" id="grnRenameNodeBtn">Rename selected node</button>
-          <button id="grnAddEdgeBtn">Connect two selected nodes</button>
-          <button id="grnEditEdgeBtn">Edit selected edge</button>
-          <button id="grnAddNoteBtn">Add note</button>
-          <button class="warn" id="grnDeleteBtn">Delete selection</button>
-          <button id="grnResetBtn">Reset layout</button>
-          <button id="grnSvgBtn">Save SVG</button>
-          <button id="grnPngBtn">Save PNG</button>
-        </div>
-        <div class="canvas-shell">
-          <svg id="grnSvg" viewBox="0 0 1240 860" role="img" aria-label="GRN editor"></svg>
-        </div>
-        <div class="legend" id="grnLegend"></div>
-        <div class="status" id="grnStatus"></div>
-        <div class="fallback" id="grnFallback" hidden>No GRN payload was generated. This usually means no prioritized gene-metabolite edges were available in the current run.</div>
-      </section>
-
-      <section class="card">
-        <h2>Editing guide</h2>
-        <p class="desc">These interactions are designed to stay light-weight and browser-native, so the HTML file remains fully standalone and easy to share.</p>
-        <ul class="help-list">
-          <li><strong>Correlation circle:</strong> drag the endpoint to reposition the arrow; drag the label text separately to remove overlap; delete the currently selected feature or note.</li>
-          <li><strong>GRN editor:</strong> drag any node; click an edge to edit its support count and correlation value; shift-click exactly two nodes to create a new edge; deleting a node also removes its incident edges.</li>
-          <li><strong>Export:</strong> both editors can save the current edited state as standalone SVG or rasterized PNG.</li>
-          <li><strong>Reproducibility:</strong> the page edits only the rendered figure state. Your underlying DeepOmics tables and model outputs remain unchanged.</li>
-        </ul>
-      </section>
-    </div>
+    </section>
   </div>
+
+  <div class="floating-tooltip" id="floatingTooltip"></div>
 
   <script>
     const summaryPayload = __SUMMARY_PAYLOAD__;
+    const txPcaPayload = __TRANSCRIPTOME_PCA_PAYLOAD__;
+    const metabPcaPayload = __METABOLOME_PCA_PAYLOAD__;
+    const networkPayload = __NETWORK_PAYLOAD__;
     const circlePayload = __CIRCLE_PAYLOAD__;
-    const grnPayload = __GRN_PAYLOAD__;
 
     function deepCopy(value) {
       return JSON.parse(JSON.stringify(value));
@@ -679,10 +873,27 @@ def _interactive_html_template() -> str:
       img.src = url;
     }
 
+    const tooltipEl = document.getElementById("floatingTooltip");
+
+    function showTooltip(htmlText, clientX, clientY) {
+      tooltipEl.innerHTML = htmlText;
+      tooltipEl.style.left = `${clientX + 14}px`;
+      tooltipEl.style.top = `${clientY + 14}px`;
+      tooltipEl.classList.add("visible");
+    }
+
+    function moveTooltip(clientX, clientY) {
+      tooltipEl.style.left = `${clientX + 14}px`;
+      tooltipEl.style.top = `${clientY + 14}px`;
+    }
+
+    function hideTooltip() {
+      tooltipEl.classList.remove("visible");
+    }
+
     function fillSummary() {
       const chips = document.getElementById("summaryChips");
       const rows = [
-        ["Project", summaryPayload.projectName],
         ["Samples", summaryPayload.samples],
         ["Genes", summaryPayload.genes],
         ["Metabolites", summaryPayload.metabolites],
@@ -696,6 +907,774 @@ def _interactive_html_template() -> str:
         span.textContent = `${label}: ${value}`;
         chips.appendChild(span);
       });
+    }
+
+    function setupTabs() {
+      const buttons = Array.from(document.querySelectorAll(".tab-btn"));
+      const panels = Array.from(document.querySelectorAll(".tab-panel"));
+
+      function activate(tabId) {
+        buttons.forEach((button) => {
+          button.classList.toggle("active", button.dataset.tab === tabId);
+        });
+        panels.forEach((panel) => {
+          panel.classList.toggle("active", panel.id === tabId);
+        });
+        hideTooltip();
+      }
+
+      buttons.forEach((button) => {
+        button.addEventListener("click", () => activate(button.dataset.tab));
+      });
+    }
+
+    function initPcaScatter(payload, ids) {
+      const svg = document.getElementById(ids.svgId);
+      const fallback = document.getElementById(ids.fallbackId);
+      const statusEl = document.getElementById(ids.statusId);
+      const colorInput = document.getElementById(ids.colorId);
+      const applyBtn = document.getElementById(ids.applyBtnId);
+      const svgBtn = document.getElementById(ids.svgBtnId);
+      const pngBtn = document.getElementById(ids.pngBtnId);
+
+      const setStatus = (message) => {
+        statusEl.textContent = message || "";
+      };
+
+      if (!payload || !Array.isArray(payload.points) || payload.points.length === 0) {
+        fallback.hidden = false;
+        svg.hidden = true;
+        return;
+      }
+
+      const width = Number(payload.width || 940);
+      const height = Number(payload.height || 680);
+      const margin = { top: 42, right: 34, bottom: 78, left: 88 };
+      const plotWidth = width - margin.left - margin.right;
+      const plotHeight = height - margin.top - margin.bottom;
+      const points = deepCopy(payload.points);
+      let pointColor = colorInput ? colorInput.value : "#4c78a8";
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+
+      const xValues = points.map((point) => Number(point.x) || 0);
+      const yValues = points.map((point) => Number(point.y) || 0);
+
+      const xRawMin = Math.min(0, ...xValues);
+      const xRawMax = Math.max(0, ...xValues);
+      const yRawMin = Math.min(0, ...yValues);
+      const yRawMax = Math.max(0, ...yValues);
+
+      const xSpan = Math.max(1e-6, xRawMax - xRawMin);
+      const ySpan = Math.max(1e-6, yRawMax - yRawMin);
+
+      const xMin = xRawMin - xSpan * 0.12;
+      const xMax = xRawMax + xSpan * 0.12;
+      const yMin = yRawMin - ySpan * 0.12;
+      const yMax = yRawMax + ySpan * 0.12;
+
+      const scaleX = (value) => margin.left + ((value - xMin) / Math.max(1e-6, xMax - xMin)) * plotWidth;
+      const scaleY = (value) => margin.top + ((yMax - value) / Math.max(1e-6, yMax - yMin)) * plotHeight;
+
+      function render() {
+        clearSvg(svg);
+        svg.appendChild(svgEl("rect", { x: 0, y: 0, width, height, fill: "#ffffff" }));
+
+        const chartGroup = svgEl("g");
+        svg.appendChild(chartGroup);
+
+        chartGroup.appendChild(svgEl("rect", {
+          x: margin.left,
+          y: margin.top,
+          width: plotWidth,
+          height: plotHeight,
+          rx: 18,
+          fill: "#ffffff",
+          stroke: "#e2e8f0",
+        }));
+
+        const xZero = scaleX(0);
+        const yZero = scaleY(0);
+
+        chartGroup.appendChild(svgEl("line", {
+          x1: margin.left,
+          y1: yZero,
+          x2: margin.left + plotWidth,
+          y2: yZero,
+          stroke: "#cbd5e1",
+          "stroke-width": 1.2,
+          "stroke-dasharray": "6 5",
+        }));
+        chartGroup.appendChild(svgEl("line", {
+          x1: xZero,
+          y1: margin.top,
+          x2: xZero,
+          y2: margin.top + plotHeight,
+          stroke: "#cbd5e1",
+          "stroke-width": 1.2,
+          "stroke-dasharray": "6 5",
+        }));
+
+        chartGroup.appendChild(svgEl("text", {
+          x: width / 2,
+          y: height - 24,
+          "text-anchor": "middle",
+          fill: "#334155",
+          "font-size": 14,
+          "font-weight": 600,
+        })).textContent = payload.xLabel || "PC1";
+
+        const yAxisLabel = svgEl("text", {
+          x: 24,
+          y: height / 2,
+          fill: "#334155",
+          "font-size": 14,
+          "font-weight": 600,
+          transform: `rotate(-90 24 ${height / 2})`,
+          "text-anchor": "middle",
+        });
+        yAxisLabel.textContent = payload.yLabel || "PC2";
+        chartGroup.appendChild(yAxisLabel);
+
+        const helper = svgEl("text", {
+          x: margin.left,
+          y: 24,
+          fill: "#64748b",
+          "font-size": 12.5,
+        });
+        helper.textContent = "Hover points to inspect sample names and exact PC coordinates.";
+        chartGroup.appendChild(helper);
+
+        const pointLayer = svgEl("g");
+        chartGroup.appendChild(pointLayer);
+
+        points.forEach((point) => {
+          const cx = scaleX(Number(point.x) || 0);
+          const cy = scaleY(Number(point.y) || 0);
+          const circle = svgEl("circle", {
+            cx,
+            cy,
+            r: 5,
+            fill: pointColor,
+            stroke: "#ffffff",
+            "stroke-width": 1.4,
+            opacity: 0.95,
+          });
+
+          circle.addEventListener("mouseenter", (event) => {
+            circle.setAttribute("r", "6.2");
+            showTooltip(
+              `<strong>${String(point.name)}</strong><br/>PC1: ${(Number(point.x) || 0).toFixed(3)}<br/>PC2: ${(Number(point.y) || 0).toFixed(3)}`,
+              event.clientX,
+              event.clientY
+            );
+          });
+          circle.addEventListener("mousemove", (event) => {
+            moveTooltip(event.clientX, event.clientY);
+          });
+          circle.addEventListener("mouseleave", () => {
+            circle.setAttribute("r", "5");
+            hideTooltip();
+          });
+
+          pointLayer.appendChild(circle);
+          point._circleRef = circle;
+        });
+      }
+
+      applyBtn.addEventListener("click", () => {
+        pointColor = colorInput.value || "#4c78a8";
+        points.forEach((point) => {
+          if (point._circleRef) {
+            point._circleRef.setAttribute("fill", pointColor);
+          }
+        });
+        setStatus(`Applied point color ${pointColor} to ${points.length} samples.`);
+      });
+
+      svgBtn.addEventListener("click", () => {
+        exportSvg(svg, ids.svgFilename);
+        setStatus("Saved current PCA view as SVG.");
+      });
+
+      pngBtn.addEventListener("click", () => {
+        exportPng(svg, ids.pngFilename);
+        setStatus("Saved current PCA view as PNG.");
+      });
+
+      render();
+      setStatus("Ready. Hover any point to inspect the sample coordinates.");
+    }
+
+    function initNetwork(payload) {
+      const svg = document.getElementById("networkSvg");
+      const fallback = document.getElementById("networkFallback");
+      const statusEl = document.getElementById("networkStatus");
+      const relayoutBtn = document.getElementById("networkRelayoutBtn");
+      const deleteBtn = document.getElementById("networkDeleteBtn");
+      const svgBtn = document.getElementById("networkSvgBtn");
+      const pngBtn = document.getElementById("networkPngBtn");
+
+      const setStatus = (message) => {
+        statusEl.textContent = message || "";
+      };
+
+      if (!payload || !Array.isArray(payload.nodes) || payload.nodes.length === 0 || !Array.isArray(payload.edges) || payload.edges.length === 0) {
+        fallback.hidden = false;
+        svg.hidden = true;
+        return;
+      }
+
+      const width = Number(payload.width || 1100);
+      const height = Number(payload.height || 750);
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+
+      const state = {
+        nodes: deepCopy(payload.nodes).map((node) => ({
+          ...node,
+          vx: 0,
+          vy: 0,
+          pinned: false,
+          dragging: false,
+          deleted: false,
+          visibleLabel: false,
+          initialX: Number(node.x),
+          initialY: Number(node.y),
+        })),
+        edges: deepCopy(payload.edges).map((edge) => ({
+          ...edge,
+          deleted: false,
+        })),
+        selectedNodeId: null,
+        selectedEdgeId: null,
+        rafId: null,
+        running: false,
+        iteration: 0,
+        maxIterations: 300,
+        repulsionStrength: 5000,
+        springStrength: 0.005,
+        restLength: 120,
+        centerGravity: 0.01,
+        damping: 0.85,
+        moveThreshold: 0.35,
+        showLabelsByDefault: payload.nodes.length <= 50,
+        svg,
+        refs: {
+          edgeLayer: null,
+          nodeLayer: null,
+          legendLayer: null,
+          titleLayer: null,
+        },
+      };
+
+      function activeNodes() {
+        return state.nodes.filter((node) => !node.deleted);
+      }
+
+      function activeEdges() {
+        return state.edges.filter((edge) => !edge.deleted);
+      }
+
+      function getNode(id) {
+        return state.nodes.find((node) => node.id === id);
+      }
+
+      function getEdge(id) {
+        return state.edges.find((edge) => edge.id === id);
+      }
+
+      function clearSelection() {
+        state.selectedNodeId = null;
+        state.selectedEdgeId = null;
+      }
+
+      function renderStaticFrame() {
+        clearSvg(svg);
+        svg.appendChild(svgEl("rect", { x: 0, y: 0, width, height, fill: "#ffffff" }));
+
+        const title = svgEl("text", {
+          x: 28,
+          y: 34,
+          fill: "#0f172a",
+          "font-size": 24,
+          "font-weight": 700,
+        });
+        title.textContent = "Force-Directed GRN Network";
+        svg.appendChild(title);
+
+        const subtitle = svgEl("text", {
+          x: 28,
+          y: 58,
+          fill: "#475569",
+          "font-size": 13.5,
+        });
+        subtitle.textContent = "Drag nodes to pin them, click to select, and use Re-layout to restart the simulation from the initial random state.";
+        svg.appendChild(subtitle);
+
+        svg.appendChild(svgEl("rect", {
+          x: 18,
+          y: 74,
+          width: width - 36,
+          height: height - 92,
+          rx: 18,
+          fill: "#ffffff",
+          stroke: "#e2e8f0",
+        }));
+
+        const helper = svgEl("text", {
+          x: width - 26,
+          y: 58,
+          fill: "#64748b",
+          "font-size": 12.5,
+          "text-anchor": "end",
+        });
+        helper.textContent = "Hover edges for r/support. Dragging a node pins it.";
+        svg.appendChild(helper);
+
+        state.refs.edgeLayer = svgEl("g");
+        state.refs.nodeLayer = svgEl("g");
+        state.refs.legendLayer = svgEl("g");
+        svg.appendChild(state.refs.edgeLayer);
+        svg.appendChild(state.refs.nodeLayer);
+        svg.appendChild(state.refs.legendLayer);
+      }
+
+      function updateLegend() {
+        const legendLayer = state.refs.legendLayer;
+        clearSvg(legendLayer);
+
+        const legendItems = Array.isArray(payload.moduleLegend) ? payload.moduleLegend : [];
+        if (!legendItems.length) {
+          return;
+        }
+
+        const boxWidth = 176;
+        const rowHeight = 18;
+        const boxHeight = 22 + rowHeight * legendItems.length + 10;
+        const boxX = 24;
+        const boxY = height - boxHeight - 24;
+
+        legendLayer.appendChild(svgEl("rect", {
+          x: boxX,
+          y: boxY,
+          width: boxWidth,
+          height: boxHeight,
+          rx: 14,
+          fill: "#ffffff",
+          stroke: "#dbe4f0",
+          opacity: 0.96,
+        }));
+
+        const heading = svgEl("text", {
+          x: boxX + 14,
+          y: boxY + 18,
+          fill: "#0f172a",
+          "font-size": 12.5,
+          "font-weight": 700,
+        });
+        heading.textContent = "WGCNA modules";
+        legendLayer.appendChild(heading);
+
+        legendItems.forEach((item, index) => {
+          const y = boxY + 40 + index * rowHeight;
+          legendLayer.appendChild(svgEl("rect", {
+            x: boxX + 14,
+            y: y - 9,
+            width: 12,
+            height: 12,
+            rx: 3,
+            fill: item.color,
+            stroke: "rgba(15,23,42,0.15)",
+          }));
+          const label = svgEl("text", {
+            x: boxX + 34,
+            y,
+            fill: "#334155",
+            "font-size": 12,
+          });
+          label.textContent = item.label;
+          legendLayer.appendChild(label);
+        });
+      }
+
+      function edgeDisplayState(edge) {
+        const selected = state.selectedEdgeId === edge.id;
+        const hovered = !!edge.hovered;
+        return {
+          stroke: selected ? "#f59e0b" : edge.color,
+          strokeWidth: selected ? Number(edge.width) + 2.0 : hovered ? Number(edge.width) + 1.3 : Number(edge.width),
+          opacity: selected ? 0.98 : hovered ? Math.min(0.98, Number(edge.opacity) + 0.22) : edge.opacity,
+        };
+      }
+
+      function nodeDisplayState(node) {
+        const selected = state.selectedNodeId === node.id;
+        return {
+          stroke: selected ? "#f59e0b" : "#ffffff",
+          strokeWidth: selected ? 3.0 : 1.8,
+        };
+      }
+
+      function buildGraph() {
+        renderStaticFrame();
+        updateLegend();
+
+        activeEdges().forEach((edge) => {
+          const line = svgEl("line", {
+            x1: 0,
+            y1: 0,
+            x2: 0,
+            y2: 0,
+            stroke: edge.color,
+            "stroke-width": edge.width,
+            opacity: edge.opacity,
+            "stroke-linecap": "round",
+          });
+
+          line.addEventListener("mouseenter", (event) => {
+            edge.hovered = true;
+            updateGraphPositions();
+            const source = getNode(edge.source);
+            const target = getNode(edge.target);
+            showTooltip(
+              `${source ? source.label : edge.source} → ${target ? target.label : edge.target}<br/>r=${Number(edge.correlation).toFixed(2)}, support=${edge.support}`,
+              event.clientX,
+              event.clientY
+            );
+          });
+          line.addEventListener("mousemove", (event) => {
+            moveTooltip(event.clientX, event.clientY);
+          });
+          line.addEventListener("mouseleave", () => {
+            edge.hovered = false;
+            updateGraphPositions();
+            hideTooltip();
+          });
+          line.addEventListener("click", (event) => {
+            event.stopPropagation();
+            if (state.selectedEdgeId === edge.id) {
+              state.selectedEdgeId = null;
+            } else {
+              state.selectedEdgeId = edge.id;
+              state.selectedNodeId = null;
+            }
+            updateGraphPositions();
+          });
+
+          edge.el = line;
+          state.refs.edgeLayer.appendChild(line);
+        });
+
+        activeNodes().forEach((node) => {
+          const group = svgEl("g");
+          const shape = node.type === "Gene"
+            ? svgEl("circle", { cx: node.x, cy: node.y, r: 8, fill: node.color })
+            : svgEl("rect", { x: node.x - 7, y: node.y - 7, width: 14, height: 14, rx: 3, fill: "#111827" });
+
+          const label = svgEl("text", {
+            x: node.type === "Gene" ? node.x - 12 : node.x + 12,
+            y: node.y,
+            fill: "#111827",
+            "font-size": 9,
+            "font-weight": node.type === "Metabolite" ? 700 : 600,
+            "text-anchor": node.type === "Gene" ? "end" : "start",
+            "dominant-baseline": "middle",
+            opacity: state.showLabelsByDefault ? 1 : 0,
+          });
+          label.textContent = node.label;
+
+          group.appendChild(shape);
+          group.appendChild(label);
+          state.refs.nodeLayer.appendChild(group);
+
+          const selectNode = (event) => {
+            event.stopPropagation();
+            if (state.selectedNodeId === node.id) {
+              state.selectedNodeId = null;
+            } else {
+              state.selectedNodeId = node.id;
+              state.selectedEdgeId = null;
+            }
+            updateGraphPositions();
+          };
+
+          group.addEventListener("click", selectNode);
+
+          group.addEventListener("mouseenter", (event) => {
+            node.hovered = true;
+            label.setAttribute("opacity", "1");
+            const moduleLabel = node.type === "Gene" ? node.module : "Metabolite";
+            showTooltip(
+              `类型: ${node.type} | 名称: ${node.label} | 模块: ${moduleLabel}`,
+              event.clientX,
+              event.clientY
+            );
+            updateGraphPositions();
+          });
+          group.addEventListener("mousemove", (event) => {
+            moveTooltip(event.clientX, event.clientY);
+          });
+          group.addEventListener("mouseleave", () => {
+            node.hovered = false;
+            if (!state.showLabelsByDefault) {
+              label.setAttribute("opacity", "0");
+            }
+            hideTooltip();
+            updateGraphPositions();
+          });
+
+          attachSvgDrag(group, svg, {
+            start: (event) => {
+              state.selectedNodeId = node.id;
+              state.selectedEdgeId = null;
+              node.dragging = true;
+              node.pinned = true;
+              node.vx = 0;
+              node.vy = 0;
+              const current = clientToSvg(svg, event.clientX, event.clientY);
+              node.x = clamp(current.x, 20, width - 20);
+              node.y = clamp(current.y, 20, height - 20);
+              updateGraphPositions();
+            },
+            move: (moveEvent, delta) => {
+              const current = clientToSvg(svg, moveEvent.clientX, moveEvent.clientY);
+              node.x = clamp(current.x, 20, width - 20);
+              node.y = clamp(current.y, 20, height - 20);
+              node.vx = 0;
+              node.vy = 0;
+              updateGraphPositions();
+              showTooltip(
+                `类型: ${node.type} | 名称: ${node.label} | 模块: ${node.type === "Gene" ? node.module : "Metabolite"}`,
+                moveEvent.clientX,
+                moveEvent.clientY
+              );
+            },
+            end: () => {
+              node.dragging = false;
+              node.pinned = true;
+              updateGraphPositions();
+              setStatus(`${node.label} pinned at the current position.`);
+            },
+          });
+
+          node.groupEl = group;
+          node.shapeEl = shape;
+          node.labelEl = label;
+        });
+
+        updateGraphPositions();
+      }
+
+      function updateGraphPositions() {
+        activeEdges().forEach((edge) => {
+          const source = getNode(edge.source);
+          const target = getNode(edge.target);
+          if (!source || !target || !edge.el) {
+            return;
+          }
+          edge.el.setAttribute("x1", String(source.x));
+          edge.el.setAttribute("y1", String(source.y));
+          edge.el.setAttribute("x2", String(target.x));
+          edge.el.setAttribute("y2", String(target.y));
+          const style = edgeDisplayState(edge);
+          edge.el.setAttribute("stroke", style.stroke);
+          edge.el.setAttribute("stroke-width", String(style.strokeWidth));
+          edge.el.setAttribute("opacity", String(style.opacity));
+        });
+
+        activeNodes().forEach((node) => {
+          if (!node.shapeEl || !node.labelEl) {
+            return;
+          }
+          const style = nodeDisplayState(node);
+          if (node.type === "Gene") {
+            node.shapeEl.setAttribute("cx", String(node.x));
+            node.shapeEl.setAttribute("cy", String(node.y));
+          } else {
+            node.shapeEl.setAttribute("x", String(node.x - 7));
+            node.shapeEl.setAttribute("y", String(node.y - 7));
+          }
+          node.shapeEl.setAttribute("stroke", style.stroke);
+          node.shapeEl.setAttribute("stroke-width", String(style.strokeWidth));
+
+          node.labelEl.setAttribute("x", String(node.type === "Gene" ? node.x - 12 : node.x + 12));
+          node.labelEl.setAttribute("y", String(node.y));
+          node.labelEl.setAttribute("text-anchor", node.type === "Gene" ? "end" : "start");
+          if (state.showLabelsByDefault || node.hovered || state.selectedNodeId === node.id) {
+            node.labelEl.setAttribute("opacity", "1");
+          } else {
+            node.labelEl.setAttribute("opacity", "0");
+          }
+        });
+      }
+
+      function stepSimulation() {
+        if (!state.running) {
+          return;
+        }
+        state.iteration += 1;
+        const nodes = activeNodes();
+        const edges = activeEdges();
+        let totalMotion = 0;
+
+        nodes.forEach((node) => {
+          node.fx = 0;
+          node.fy = 0;
+        });
+
+        for (let i = 0; i < nodes.length; i += 1) {
+          const a = nodes[i];
+          for (let j = i + 1; j < nodes.length; j += 1) {
+            const b = nodes[j];
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            let distSq = dx * dx + dy * dy;
+            if (distSq < 16) {
+              dx = (Math.random() - 0.5) * 4;
+              dy = (Math.random() - 0.5) * 4;
+              distSq = dx * dx + dy * dy + 1e-3;
+            }
+            const dist = Math.sqrt(distSq);
+            const force = state.repulsionStrength / distSq;
+            const fx = (force * dx) / dist;
+            const fy = (force * dy) / dist;
+            a.fx -= fx;
+            a.fy -= fy;
+            b.fx += fx;
+            b.fy += fy;
+          }
+        }
+
+        edges.forEach((edge) => {
+          const source = getNode(edge.source);
+          const target = getNode(edge.target);
+          if (!source || !target) {
+            return;
+          }
+          let dx = target.x - source.x;
+          let dy = target.y - source.y;
+          const dist = Math.max(1e-3, Math.sqrt(dx * dx + dy * dy));
+          const spring = state.springStrength * (dist - state.restLength);
+          const fx = (spring * dx) / dist;
+          const fy = (spring * dy) / dist;
+          source.fx += fx;
+          source.fy += fy;
+          target.fx -= fx;
+          target.fy -= fy;
+        });
+
+        const centerX = width / 2;
+        const centerY = height / 2;
+
+        nodes.forEach((node) => {
+          if (node.dragging || node.pinned) {
+            node.vx = 0;
+            node.vy = 0;
+            return;
+          }
+
+          node.fx += (centerX - node.x) * state.centerGravity;
+          node.fy += (centerY - node.y) * state.centerGravity;
+
+          node.vx = (node.vx + node.fx) * state.damping;
+          node.vy = (node.vy + node.fy) * state.damping;
+          node.x = clamp(node.x + node.vx, 18, width - 18);
+          node.y = clamp(node.y + node.vy, 18, height - 18);
+
+          totalMotion += Math.abs(node.vx) + Math.abs(node.vy);
+        });
+
+        updateGraphPositions();
+
+        if (state.iteration >= state.maxIterations || totalMotion < state.moveThreshold) {
+          state.running = false;
+          state.rafId = null;
+          setStatus(`Layout settled after ${state.iteration} iterations.`);
+          return;
+        }
+
+        state.rafId = requestAnimationFrame(stepSimulation);
+      }
+
+      function startSimulation() {
+        if (state.rafId) {
+          cancelAnimationFrame(state.rafId);
+          state.rafId = null;
+        }
+        state.running = true;
+        state.iteration = 0;
+        state.rafId = requestAnimationFrame(stepSimulation);
+      }
+
+      function deleteSelected() {
+        if (state.selectedNodeId) {
+          const node = getNode(state.selectedNodeId);
+          if (node) {
+            node.deleted = true;
+            state.edges.forEach((edge) => {
+              if (edge.source === node.id || edge.target === node.id) {
+                edge.deleted = true;
+              }
+            });
+            clearSelection();
+            buildGraph();
+            startSimulation();
+            setStatus(`Removed ${node.label} and its connected edges from the current view.`);
+            return;
+          }
+        }
+
+        if (state.selectedEdgeId) {
+          const edge = getEdge(state.selectedEdgeId);
+          if (edge) {
+            edge.deleted = true;
+            const source = getNode(edge.source);
+            const target = getNode(edge.target);
+            clearSelection();
+            buildGraph();
+            startSimulation();
+            setStatus(`Removed edge ${source ? source.label : edge.source} → ${target ? target.label : edge.target}.`);
+            return;
+          }
+        }
+
+        setStatus("Select a node or edge first.");
+      }
+
+      function relayout() {
+        state.nodes.forEach((node) => {
+          node.x = Number(node.initialX);
+          node.y = Number(node.initialY);
+          node.vx = 0;
+          node.vy = 0;
+          node.dragging = false;
+          node.pinned = false;
+          node.hovered = false;
+        });
+        clearSelection();
+        buildGraph();
+        startSimulation();
+        setStatus("Returned nodes to their initial random positions and restarted the force layout.");
+      }
+
+      svg.onclick = () => {
+        clearSelection();
+        updateGraphPositions();
+      };
+
+      relayoutBtn.addEventListener("click", relayout);
+      deleteBtn.addEventListener("click", deleteSelected);
+      svgBtn.addEventListener("click", () => {
+        exportSvg(svg, "deepomics_grn_network.svg");
+        setStatus("Saved current GRN network as SVG.");
+      });
+      pngBtn.addEventListener("click", () => {
+        exportPng(svg, "deepomics_grn_network.png");
+        setStatus("Saved current GRN network as PNG.");
+      });
+
+      buildGraph();
+      startSimulation();
+      setStatus("Running force layout. Drag any node to pin it in place.");
     }
 
     function initCircleEditor(payload) {
@@ -1120,544 +2099,32 @@ def _interactive_html_template() -> str:
       setStatus("Ready. Click or drag any feature to start editing.");
     }
 
-    function initGrnEditor(payload) {
-      const svg = document.getElementById("grnSvg");
-      const fallback = document.getElementById("grnFallback");
-      const legend = document.getElementById("grnLegend");
-      const statusEl = document.getElementById("grnStatus");
-      const setStatus = (message) => {
-        statusEl.textContent = message || "";
-      };
-
-      if (!payload || !Array.isArray(payload.nodes) || payload.nodes.length === 0) {
-        fallback.hidden = false;
-        svg.hidden = true;
-        return;
-      }
-
-      svg.setAttribute("viewBox", `0 0 ${payload.width} ${payload.height}`);
-
-      const state = {
-        originalNodes: deepCopy(payload.nodes),
-        originalEdges: deepCopy(payload.edges),
-        nodes: deepCopy(payload.nodes),
-        edges: deepCopy(payload.edges),
-        notes: [],
-        selectedNodeIds: [],
-        selectedEdgeId: null,
-        selectedNoteId: null,
-        nextNoteId: 1,
-        nextEdgeId: 1,
-      };
-
-      function getNode(nodeId) {
-        return state.nodes.find((node) => node.id === nodeId && !node.deleted);
-      }
-
-      function getEdge(edgeId) {
-        return state.edges.find((edge) => edge.id === edgeId && !edge.deleted);
-      }
-
-      function clearSelection() {
-        state.selectedNodeIds = [];
-        state.selectedEdgeId = null;
-        state.selectedNoteId = null;
-      }
-
-      function renderLegend() {
-        legend.innerHTML = "";
-        const fixedEntries = [
-          { label: "Positive association", color: "#dc2626" },
-          { label: "Negative association", color: "#2563eb" },
-          { label: "Metabolite node", color: "#111827" },
-        ];
-        fixedEntries.forEach((entry) => {
-          const item = document.createElement("span");
-          item.className = "legend-item";
-          item.innerHTML = `<span class="legend-swatch" style="background:${entry.color}"></span>${entry.label}`;
-          legend.appendChild(item);
-        });
-        (payload.moduleLegend || []).slice(0, 10).forEach((entry) => {
-          const item = document.createElement("span");
-          item.className = "legend-item";
-          item.innerHTML = `<span class="legend-swatch" style="background:${entry.color}"></span>${entry.label}`;
-          legend.appendChild(item);
-        });
-      }
-
-      function updateEdge(edge, path) {
-        const source = getNode(edge.source);
-        const target = getNode(edge.target);
-        if (!path || !source || !target) {
-          return;
-        }
-        const midX = (source.x + target.x) / 2.0;
-        const d = `M ${source.x} ${source.y} C ${midX} ${source.y}, ${midX} ${target.y}, ${target.x} ${target.y}`;
-        path.setAttribute("d", d);
-      }
-
-      function renderNote(note, overlayLayer) {
-        const estimatedWidth = Math.max(92, 9 * String(note.text).length + 18);
-        const isSelected = state.selectedNoteId === note.id;
-
-        const group = svgEl("g");
-        const rect = svgEl("rect", {
-          x: note.x,
-          y: note.y - 18,
-          width: estimatedWidth,
-          height: 28,
-          rx: 8,
-          fill: isSelected ? "#dcfce7" : "#ffffff",
-          stroke: isSelected ? "#059669" : "#cbd5e1",
-          "stroke-width": isSelected ? 2 : 1.2,
-        });
-        const text = svgEl("text", {
-          x: note.x + 10,
-          y: note.y,
-          fill: "#0f172a",
-          "font-size": 13,
-          "font-weight": 600,
-        });
-        text.textContent = note.text;
-        group.appendChild(rect);
-        group.appendChild(text);
-        overlayLayer.appendChild(group);
-
-        const update = () => {
-          rect.setAttribute("x", String(note.x));
-          rect.setAttribute("y", String(note.y - 18));
-          text.setAttribute("x", String(note.x + 10));
-          text.setAttribute("y", String(note.y));
-        };
-
-        group.addEventListener("click", (event) => {
-          event.stopPropagation();
-          clearSelection();
-          state.selectedNoteId = note.id;
-          render();
-        });
-
-        group.addEventListener("dblclick", (event) => {
-          event.stopPropagation();
-          const replacement = prompt("Rename annotation", note.text);
-          if (replacement !== null && replacement.trim()) {
-            note.text = replacement.trim();
-            render();
-            setStatus("Annotation updated.");
-          }
-        });
-
-        attachSvgDrag(group, svg, {
-          start: () => {
-            clearSelection();
-            state.selectedNoteId = note.id;
-          },
-          move: (_event, delta) => {
-            note.x += delta.dx;
-            note.y += delta.dy;
-            update();
-          },
-          end: () => {
-            render();
-            setStatus("Annotation moved.");
-          },
-        });
-      }
-
-      function renderEdge(edge, edgeLayer) {
-        const source = getNode(edge.source);
-        const target = getNode(edge.target);
-        if (!source || !target) {
-          return;
-        }
-        const isSelected = state.selectedEdgeId === edge.id;
-        const midX = (source.x + target.x) / 2.0;
-        const d = `M ${source.x} ${source.y} C ${midX} ${source.y}, ${midX} ${target.y}, ${target.x} ${target.y}`;
-        const path = svgEl("path", {
-          d,
-          fill: "none",
-          stroke: edge.color,
-          "stroke-width": isSelected ? edge.width + 2.0 : edge.width,
-          opacity: edge.opacity,
-          "stroke-linecap": "round",
-          "stroke-dasharray": edge.custom ? "8 5" : undefined,
-        });
-        const title = svgEl("title");
-        title.textContent = `${source.label} -> ${target.label} | r=${Number(edge.correlation).toFixed(2)} | support=${edge.support}`;
-        path.appendChild(title);
-        edgeLayer.appendChild(path);
-
-        path.addEventListener("click", (event) => {
-          event.stopPropagation();
-          state.selectedNodeIds = [];
-          state.selectedNoteId = null;
-          state.selectedEdgeId = edge.id;
-          render();
-        });
-
-        path.addEventListener("dblclick", (event) => {
-          event.stopPropagation();
-          state.selectedNodeIds = [];
-          state.selectedNoteId = null;
-          state.selectedEdgeId = edge.id;
-          editSelectedEdge();
-        });
-
-        return path;
-      }
-
-      function renderNode(node, nodeLayer, edgePaths) {
-        const isSelected = state.selectedNodeIds.includes(node.id);
-        const group = svgEl("g");
-        const circle = svgEl("circle", {
-          cx: node.x,
-          cy: node.y,
-          r: 9,
-          fill: node.color,
-          stroke: isSelected ? "#0f172a" : "#ffffff",
-          "stroke-width": isSelected ? 3 : 1.8,
-        });
-        const label = svgEl("text", {
-          x: node.x + (node.type === "Gene" ? -12 : 12),
-          y: node.y,
-          fill: "#111827",
-          "font-size": 12.5,
-          "font-weight": node.type === "Metabolite" ? 700 : 600,
-          "text-anchor": node.type === "Gene" ? "end" : "start",
-          "dominant-baseline": "middle",
-        });
-        label.textContent = node.label;
-        group.appendChild(circle);
-        group.appendChild(label);
-        nodeLayer.appendChild(group);
-
-        const update = () => {
-          const nodeSelected = state.selectedNodeIds.includes(node.id);
-          circle.setAttribute("cx", String(node.x));
-          circle.setAttribute("cy", String(node.y));
-          circle.setAttribute("stroke", nodeSelected ? "#0f172a" : "#ffffff");
-          circle.setAttribute("stroke-width", nodeSelected ? "3" : "1.8");
-          label.setAttribute("x", String(node.x + (node.type === "Gene" ? -12 : 12)));
-          label.setAttribute("y", String(node.y));
-          label.setAttribute("text-anchor", node.type === "Gene" ? "end" : "start");
-          label.textContent = node.label;
-          state.edges.filter((edge) => !edge.deleted && (edge.source === node.id || edge.target === node.id)).forEach((edge) => updateEdge(edge, edgePaths[edge.id]));
-        };
-
-        const selectNode = (event) => {
-          event.stopPropagation();
-          state.selectedEdgeId = null;
-          state.selectedNoteId = null;
-          if (event.shiftKey) {
-            if (state.selectedNodeIds.includes(node.id)) {
-              state.selectedNodeIds = state.selectedNodeIds.filter((value) => value !== node.id);
-            } else {
-              state.selectedNodeIds = [...state.selectedNodeIds, node.id].slice(-2);
-            }
-          } else {
-            state.selectedNodeIds = [node.id];
-          }
-          render();
-        };
-
-        group.addEventListener("click", selectNode);
-        group.addEventListener("dblclick", (event) => {
-          event.stopPropagation();
-          state.selectedNodeIds = [node.id];
-          renameSelectedNode();
-        });
-
-        attachSvgDrag(group, svg, {
-          start: () => {
-            state.selectedEdgeId = null;
-            state.selectedNoteId = null;
-            if (!state.selectedNodeIds.includes(node.id)) {
-              state.selectedNodeIds = [node.id];
-            }
-          },
-          move: (_event, delta) => {
-            node.x = Math.max(120, Math.min(payload.width - 120, node.x + delta.dx));
-            node.y = Math.max(100, Math.min(payload.height - 90, node.y + delta.dy));
-            update();
-          },
-          end: () => {
-            render();
-            setStatus("Node moved.");
-          },
-        });
-      }
-
-      function renameSelectedNode() {
-        if (state.selectedNodeIds.length !== 1) {
-          setStatus("Select exactly one node to rename.");
-          return;
-        }
-        const node = getNode(state.selectedNodeIds[0]);
-        if (!node) {
-          setStatus("Selected node is no longer available.");
-          return;
-        }
-        const replacement = prompt("Rename node", node.label);
-        if (replacement !== null && replacement.trim()) {
-          node.label = replacement.trim();
-          render();
-          setStatus("Node label updated.");
-        }
-      }
-
-      function editSelectedEdge() {
-        const edge = getEdge(state.selectedEdgeId);
-        if (!edge) {
-          setStatus("Select one edge first.");
-          return;
-        }
-        const corrRaw = prompt("Set correlation value between -1 and 1", String(edge.correlation ?? 0.5));
-        if (corrRaw === null) {
-          return;
-        }
-        const corr = Math.max(-1, Math.min(1, Number(corrRaw)));
-        const supportRaw = prompt("Set support count", String(edge.support ?? 1));
-        if (supportRaw === null) {
-          return;
-        }
-        const support = Math.max(1, Math.round(Number(supportRaw) || 1));
-        edge.correlation = corr;
-        edge.support = support;
-        edge.color = corr >= 0 ? "#dc2626" : "#2563eb";
-        edge.width = 1.2 + 3.0 * Math.min(1, Math.abs(corr));
-        edge.opacity = Math.min(0.92, 0.28 + 0.16 * support);
-        render();
-        setStatus("Edge style updated.");
-      }
-
-      function addEdgeFromSelection() {
-        if (state.selectedNodeIds.length !== 2) {
-          setStatus("Shift-click exactly two nodes, then use Connect two selected nodes.");
-          return;
-        }
-        const first = getNode(state.selectedNodeIds[0]);
-        const second = getNode(state.selectedNodeIds[1]);
-        if (!first || !second) {
-          setStatus("The selected nodes are not available.");
-          return;
-        }
-        if (first.type === second.type) {
-          setStatus("Custom edges must connect one gene and one metabolite node.");
-          return;
-        }
-        const geneNode = first.type === "Gene" ? first : second;
-        const metaboliteNode = first.type === "Metabolite" ? first : second;
-        const exists = state.edges.some(
-          (edge) => !edge.deleted && edge.source === geneNode.id && edge.target === metaboliteNode.id
-        );
-        if (exists) {
-          setStatus("That edge already exists in the current figure state.");
-          return;
-        }
-        const edgeId = `edge_custom_${state.nextEdgeId++}`;
-        state.edges.push({
-          id: edgeId,
-          source: geneNode.id,
-          target: metaboliteNode.id,
-          correlation: 0.5,
-          support: 1,
-          width: 2.2,
-          opacity: 0.8,
-          color: "#059669",
-          custom: true,
-        });
-        state.selectedEdgeId = edgeId;
-        state.selectedNodeIds = [];
-        render();
-        setStatus("Custom edge added. Click it to edit correlation / support if needed.");
-      }
-
-      function deleteSelection() {
-        if (state.selectedEdgeId) {
-          const edge = getEdge(state.selectedEdgeId);
-          if (edge) {
-            edge.deleted = true;
-          }
-          state.selectedEdgeId = null;
-          render();
-          setStatus("Selected edge removed from the current figure view.");
-          return;
-        }
-        if (state.selectedNoteId) {
-          state.notes = state.notes.filter((note) => note.id !== state.selectedNoteId);
-          state.selectedNoteId = null;
-          render();
-          setStatus("Selected annotation removed.");
-          return;
-        }
-        if (state.selectedNodeIds.length > 0) {
-          const selected = new Set(state.selectedNodeIds);
-          state.nodes.forEach((node) => {
-            if (selected.has(node.id)) {
-              node.deleted = true;
-            }
-          });
-          state.edges.forEach((edge) => {
-            if (selected.has(edge.source) || selected.has(edge.target)) {
-              edge.deleted = true;
-            }
-          });
-          state.selectedNodeIds = [];
-          render();
-          setStatus("Selected node(s) and their incident edges were removed.");
-          return;
-        }
-        setStatus("Select a node, edge, or note first.");
-      }
-
-      function reset() {
-        state.nodes = deepCopy(state.originalNodes);
-        state.edges = deepCopy(state.originalEdges);
-        state.notes = [];
-        state.selectedNodeIds = [];
-        state.selectedEdgeId = null;
-        state.selectedNoteId = null;
-        state.nextNoteId = 1;
-        state.nextEdgeId = 1;
-        render();
-        setStatus("GRN layout reset to the package-generated state.");
-      }
-
-      function render() {
-        clearSvg(svg);
-        renderLegend();
-
-        svg.appendChild(svgEl("rect", { x: 0, y: 0, width: payload.width, height: payload.height, fill: "#ffffff" }));
-
-        svg.appendChild(svgEl("rect", {
-          x: 90,
-          y: 110,
-          width: 260,
-          height: payload.height - 200,
-          rx: 18,
-          fill: "#f8fafc",
-          stroke: "#e2e8f0",
-        }));
-        svg.appendChild(svgEl("rect", {
-          x: payload.width - 350,
-          y: 110,
-          width: 260,
-          height: payload.height - 200,
-          rx: 18,
-          fill: "#f8fafc",
-          stroke: "#e2e8f0",
-        }));
-
-        const title = svgEl("text", {
-          x: 34,
-          y: 40,
-          fill: "#0f172a",
-          "font-size": 24,
-          "font-weight": 700,
-        });
-        title.textContent = payload.title;
-        svg.appendChild(title);
-
-        const subtitle = svgEl("text", {
-          x: 34,
-          y: 64,
-          fill: "#475569",
-          "font-size": 13.5,
-        });
-        subtitle.textContent = payload.subtitle;
-        svg.appendChild(subtitle);
-
-        const geneLane = svgEl("text", {
-          x: 220,
-          y: 98,
-          fill: "#334155",
-          "font-size": 15,
-          "font-weight": 700,
-          "text-anchor": "middle",
-        });
-        geneLane.textContent = "Genes";
-        svg.appendChild(geneLane);
-
-        const metabLane = svgEl("text", {
-          x: payload.width - 220,
-          y: 98,
-          fill: "#334155",
-          "font-size": 15,
-          "font-weight": 700,
-          "text-anchor": "middle",
-        });
-        metabLane.textContent = "Metabolites";
-        svg.appendChild(metabLane);
-
-        const helper = svgEl("text", {
-          x: payload.width / 2,
-          y: payload.height - 28,
-          fill: "#64748b",
-          "font-size": 13,
-          "text-anchor": "middle",
-        });
-        helper.textContent = "Shift-click two nodes to create a custom edge. Double-click an edge or node to edit.";
-        svg.appendChild(helper);
-
-        const edgeLayer = svgEl("g");
-        const nodeLayer = svgEl("g");
-        const overlayLayer = svgEl("g");
-        svg.appendChild(edgeLayer);
-        svg.appendChild(nodeLayer);
-        svg.appendChild(overlayLayer);
-
-        const edgePaths = {};
-        state.edges.filter((edge) => !edge.deleted).forEach((edge) => {
-          edgePaths[edge.id] = renderEdge(edge, edgeLayer);
-        });
-        state.nodes.filter((node) => !node.deleted).forEach((node) => renderNode(node, nodeLayer, edgePaths));
-        state.notes.forEach((note) => renderNote(note, overlayLayer));
-      }
-
-      svg.addEventListener("click", () => {
-        clearSelection();
-        render();
-      });
-
-      document.getElementById("grnRenameNodeBtn").addEventListener("click", renameSelectedNode);
-      document.getElementById("grnEditEdgeBtn").addEventListener("click", editSelectedEdge);
-      document.getElementById("grnAddEdgeBtn").addEventListener("click", addEdgeFromSelection);
-      document.getElementById("grnDeleteBtn").addEventListener("click", deleteSelection);
-      document.getElementById("grnResetBtn").addEventListener("click", reset);
-
-      document.getElementById("grnAddNoteBtn").addEventListener("click", () => {
-        const text = prompt("Annotation text", "Mechanistic note");
-        if (text && text.trim()) {
-          state.notes.push({
-            id: `note_${state.nextNoteId++}`,
-            text: text.trim(),
-            x: payload.width / 2 - 110,
-            y: 96 + 32 * state.notes.length,
-          });
-          clearSelection();
-          state.selectedNoteId = state.notes[state.notes.length - 1].id;
-          render();
-          setStatus("Added a draggable annotation.");
-        }
-      });
-
-      document.getElementById("grnSvgBtn").addEventListener("click", () => {
-        exportSvg(svg, "deepomics_prioritized_grn_edited.svg");
-        setStatus("Saved edited GRN as SVG.");
-      });
-
-      document.getElementById("grnPngBtn").addEventListener("click", () => {
-        exportPng(svg, "deepomics_prioritized_grn_edited.png");
-        setStatus("Saved edited GRN as PNG.");
-      });
-
-      render();
-      setStatus("Ready. Drag nodes, click edges, or shift-click two nodes to add a custom edge.");
-    }
-
     fillSummary();
+    setupTabs();
+    initPcaScatter(txPcaPayload, {
+      svgId: "txPcaSvg",
+      fallbackId: "txPcaFallback",
+      statusId: "txPcaStatus",
+      colorId: "txPcaColor",
+      applyBtnId: "txPcaApplyColor",
+      svgBtnId: "txPcaSvgBtn",
+      pngBtnId: "txPcaPngBtn",
+      svgFilename: "deepomics_transcriptome_pca.svg",
+      pngFilename: "deepomics_transcriptome_pca.png",
+    });
+    initPcaScatter(metabPcaPayload, {
+      svgId: "metabPcaSvg",
+      fallbackId: "metabPcaFallback",
+      statusId: "metabPcaStatus",
+      colorId: "metabPcaColor",
+      applyBtnId: "metabPcaApplyColor",
+      svgBtnId: "metabPcaSvgBtn",
+      pngBtnId: "metabPcaPngBtn",
+      svgFilename: "deepomics_metabolome_pca.svg",
+      pngFilename: "deepomics_metabolome_pca.png",
+    });
+    initNetwork(networkPayload);
     initCircleEditor(circlePayload);
-    initGrnEditor(grnPayload);
   </script>
 </body>
 </html>
@@ -1665,14 +2132,31 @@ def _interactive_html_template() -> str:
 
 
 def generate_interactive_visual_report(engine, cfg, report_path: str | Path) -> None:
-    """Generate a standalone interactive HTML figure studio."""
+    """Generate a standalone interactive HTML report."""
     output_path = Path(report_path)
     safe_mkdir(output_path.parent)
+
+    tx_matrix = np.asarray(engine.adata.X, dtype=np.float32)
+    metab_matrix_raw = engine.adata.obsm.get("metabolomics_scaled", engine.adata.obsm.get("metabolomics"))
+    if isinstance(metab_matrix_raw, pd.DataFrame):
+        metab_matrix = metab_matrix_raw.to_numpy(dtype=np.float32, copy=False)
+    elif metab_matrix_raw is None:
+        metab_matrix = np.empty((0, 0), dtype=np.float32)
+    else:
+        metab_matrix = np.asarray(metab_matrix_raw, dtype=np.float32)
 
     html_text = _interactive_html_template()
     html_text = html_text.replace("__PROJECT_NAME__", html.escape(str(cfg.project_name)))
     html_text = html_text.replace("__SUMMARY_PAYLOAD__", _json_dumps(_build_summary_payload(engine, cfg)))
+    html_text = html_text.replace(
+        "__TRANSCRIPTOME_PCA_PAYLOAD__",
+        _json_dumps(_build_pca_payload(tx_matrix, engine.adata.obs_names.astype(str).tolist(), "Transcriptome PCA", cfg)),
+    )
+    html_text = html_text.replace(
+        "__METABOLOME_PCA_PAYLOAD__",
+        _json_dumps(_build_pca_payload(metab_matrix, engine.adata.obs_names.astype(str).tolist(), "Metabolome PCA", cfg)),
+    )
+    html_text = html_text.replace("__NETWORK_PAYLOAD__", _json_dumps(_build_network_payload(engine, cfg)))
     html_text = html_text.replace("__CIRCLE_PAYLOAD__", _json_dumps(_build_correlation_circle_payload(engine, cfg)))
-    html_text = html_text.replace("__GRN_PAYLOAD__", _json_dumps(_build_grn_editor_payload(engine, cfg)))
 
     output_path.write_text(html_text, encoding="utf-8")
