@@ -12,7 +12,7 @@ from .utils import get_logger, safe_mkdir
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def main() -> None:
-    """DeepOmics: transcriptome-metabolome integration with ensemble ML and optimized WGCNA."""
+    """DeepOmics: transcriptome-metabolome integration with ensemble ML."""
     pass
 
 
@@ -22,17 +22,10 @@ def main() -> None:
 @click.option("--output", "-o", default="results", show_default=True, help="Output directory.")
 @click.option("--pcc-r", type=float, default=0.30, show_default=True, help="Absolute Pearson correlation threshold.")
 @click.option("--pcc-p", type=float, default=0.05, show_default=True, help="Pearson p-value threshold used when FDR is disabled.")
-@click.option("--top-n", type=int, default=3000, show_default=True, help="Number of highly variable genes used by WGCNA.")
 @click.option("--project", default="Analysis_v1", show_default=True, help="Project name.")
 @click.option("--threads", type=int, default=-1, show_default=True, help="Number of CPU threads for XGBoost (-1 uses all cores).")
 @click.option("--log-level", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False), default="INFO", show_default=True, help="Logging level.")
 @click.option("--report-format", "report_formats", type=click.Choice(["md", "html"], case_sensitive=False), multiple=True, help="Optional report formats. Defaults to HTML only when not set. HTML additionally emits the interactive figure studio.")
-@click.option("--wgcna-network-type", type=click.Choice(["unsigned", "signed"], case_sensitive=False), default="unsigned", show_default=True, help="Adjacency type used for WGCNA.")
-@click.option("--wgcna-soft-power", type=int, default=None, help="Fixed WGCNA soft-threshold power. By default, the package auto-selects it.")
-@click.option("--no-wgcna-tom", is_flag=True, help="Disable TOM-based module detection and use adjacency directly.")
-@click.option("--wgcna-tom-max-genes", type=int, default=2000, show_default=True, help="Maximum genes allowed for TOM calculation.")
-@click.option("--wgcna-tree-cut-height", type=float, default=None, help="Optional fixed tree cut height for WGCNA module detection.")
-@click.option("--wgcna-merge-height", type=float, default=0.25, show_default=True, help="Eigengene dissimilarity threshold for module merging.")
 @click.option("--corr-circle-top-genes", type=int, default=30, show_default=True, help="Number of genes displayed in the correlation circle plot.")
 @click.option("--corr-circle-top-metabs", type=int, default=20, show_default=True, help="Number of metabolites displayed in the correlation circle plot.")
 @click.option("--circos-top-edges", type=int, default=80, show_default=True, help="Number of prioritized GRN edges displayed in the Circos plot.")
@@ -48,17 +41,10 @@ def run(
     output: str,
     pcc_r: float,
     pcc_p: float,
-    top_n: int,
     project: str,
     threads: int,
     log_level: str,
     report_formats: tuple[str, ...],
-    wgcna_network_type: str,
-    wgcna_soft_power: int | None,
-    no_wgcna_tom: bool,
-    wgcna_tom_max_genes: int,
-    wgcna_tree_cut_height: float | None,
-    wgcna_merge_height: float,
     corr_circle_top_genes: int,
     corr_circle_top_metabs: int,
     circos_top_edges: int,
@@ -78,13 +64,6 @@ def run(
         output_dir=str(output_dir),
         pcc_r_threshold=pcc_r,
         pcc_p_threshold=pcc_p,
-        wgcna_top_n_genes=top_n,
-        wgcna_network_type=wgcna_network_type.lower(),
-        wgcna_soft_power=wgcna_soft_power,
-        wgcna_use_tom=not no_wgcna_tom,
-        wgcna_tom_max_genes=wgcna_tom_max_genes,
-        wgcna_tree_cut_height=wgcna_tree_cut_height,
-        wgcna_merge_cut_height=wgcna_merge_height,
         correlation_circle_top_genes=corr_circle_top_genes,
         correlation_circle_top_metabolites=corr_circle_top_metabs,
         circos_top_edges=circos_top_edges,

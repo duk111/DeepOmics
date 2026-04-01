@@ -50,18 +50,6 @@ class AnalysisConfig:
     enable_rra: bool = True
     grn_primary_strategy: str = "rra"
 
-    wgcna_top_n_genes: int = 3000
-    wgcna_soft_power: Optional[int] = None
-    wgcna_power_candidates: Tuple[int, ...] = field(default_factory=lambda: tuple(range(1, 21)))
-    wgcna_scale_free_r2_threshold: float = 0.80
-    wgcna_network_type: str = "unsigned"
-    wgcna_use_tom: bool = True
-    wgcna_tom_max_genes: int = 2000
-    wgcna_min_module_size: int = 30
-    wgcna_tree_cut_height: Optional[float] = None
-    wgcna_merge_cut_height: float = 0.25
-    wgcna_hub_genes_per_module: int = 10
-
     correlation_circle_top_genes: int = 30
     correlation_circle_top_metabolites: int = 20
     circos_top_edges: int = 80
@@ -104,22 +92,6 @@ class AnalysisConfig:
             raise ValueError("min_features cannot be larger than max_features.")
         if self.cv_folds < 2:
             raise ValueError("cv_folds must be at least 2.")
-        if self.wgcna_top_n_genes <= 1:
-            raise ValueError("wgcna_top_n_genes must be greater than 1.")
-        if self.wgcna_min_module_size < 2:
-            raise ValueError("wgcna_min_module_size must be at least 2.")
-        if self.wgcna_tom_max_genes < 2:
-            raise ValueError("wgcna_tom_max_genes must be at least 2.")
-        if not (0 < self.wgcna_scale_free_r2_threshold <= 1):
-            raise ValueError("wgcna_scale_free_r2_threshold must be within (0, 1].")
-        if self.wgcna_tree_cut_height is not None and not (0 < self.wgcna_tree_cut_height < 1):
-            raise ValueError("wgcna_tree_cut_height must be within (0, 1) when provided.")
-        if not (0 < self.wgcna_merge_cut_height < 1):
-            raise ValueError("wgcna_merge_cut_height must be within (0, 1).")
-        if self.wgcna_network_type not in {"unsigned", "signed"}:
-            raise ValueError("wgcna_network_type must be either 'unsigned' or 'signed'.")
-        if self.wgcna_hub_genes_per_module < 1:
-            raise ValueError("wgcna_hub_genes_per_module must be at least 1.")
         if self.correlation_circle_top_genes < 1 or self.correlation_circle_top_metabolites < 1:
             raise ValueError("correlation circle feature counts must be at least 1.")
         if self.circos_top_edges < 1:
@@ -156,12 +128,6 @@ class AnalysisConfig:
         """Compute the dynamic target feature count."""
         target_k = max(self.min_features, int(n_samples * self.selection_ratio))
         return min(target_k, self.max_features, n_features)
-
-    def resolved_wgcna_tree_cut_height(self, use_tom: bool) -> float:
-        """Return the effective tree-cut height for module detection."""
-        if self.wgcna_tree_cut_height is not None:
-            return self.wgcna_tree_cut_height
-        return 0.25 if use_tom else 0.90
 
     def diagnostics_enabled(self) -> bool:
         """Return whether verbose-only diagnostic artifacts should be exported."""

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deepomics"
-version = "0.4.0"
-description = "Transcriptome-metabolome integration for key-gene prioritization, GRN construction, and WGCNA analysis"
+version = "0.4.1"
+description = "Transcriptome-metabolome integration for key-gene prioritization and GRN construction"
 readme = "README.md"
 authors = [
     { name = "Your Name", email = "your.email@example.com" }
@@ -18,7 +18,6 @@ keywords = [
     "transcriptomics",
     "metabolomics",
     "gene regulatory network",
-    "WGCNA",
     "machine learning"
 ]
 classifiers = [
