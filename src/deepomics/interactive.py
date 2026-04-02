@@ -10,8 +10,16 @@ import pandas as pd
 from scipy.stats import zscore
 from sklearn.decomposition import PCA
 
-from .plotting import PALETTE
 from .utils import safe_mkdir
+
+
+PALETTE = {
+    "gene": "#2563eb",
+    "metabolite": "#dc2626",
+    "edge_positive": "#dc2626",
+    "edge_negative": "#2563eb",
+    "metabolite_node": "#111827",
+}
 
 
 def _gene_expression_df(adata) -> pd.DataFrame:
@@ -27,7 +35,7 @@ def _metabolomics_df(adata) -> pd.DataFrame:
     """Return metabolomics matrix as a sample-by-metabolite DataFrame."""
     metab_df = adata.obsm.get("metabolomics_scaled", adata.obsm.get("metabolomics"))
     if isinstance(metab_df, pd.DataFrame):
-        return metab_df.copy()
+        return metab_df.copy(deep=False)
     return pd.DataFrame(
         np.asarray(metab_df, dtype=np.float32),
         index=adata.obs_names.astype(str),
@@ -36,15 +44,13 @@ def _metabolomics_df(adata) -> pd.DataFrame:
 
 
 def _get_primary_key_gene_df(engine) -> pd.DataFrame:
-    """Return the key-gene table for the configured primary strategy."""
     strategy = str(getattr(engine.config, "grn_primary_strategy", "rra")).lower()
     return engine.ml_results.get(f"key_genes_{strategy}", pd.DataFrame())
 
 
 def _pick_display_features(engine, top_genes: int, top_metabolites: int) -> tuple[list[str], list[str]]:
-    """Choose compact feature subsets for the interactive report."""
-    gene_df = _gene_expression_df(engine.adata)
-    metab_df = _metabolomics_df(engine.adata)
+    gene_df = engine.gene_expression_df() if hasattr(engine, "gene_expression_df") else _gene_expression_df(engine.adata)
+    metab_df = engine.metabolomics_df() if hasattr(engine, "metabolomics_df") else _metabolomics_df(engine.adata)
 
     primary_df = _get_primary_key_gene_df(engine)
     if isinstance(primary_df, pd.DataFrame) and not primary_df.empty:
@@ -74,12 +80,11 @@ def _pick_display_features(engine, top_genes: int, top_metabolites: int) -> tupl
 
 
 def _json_default(obj: Any) -> Any:
-    """Convert NumPy / pandas scalars into JSON-friendly Python values."""
-    if isinstance(obj, (np.integer,)):
+    if isinstance(obj, np.integer):
         return int(obj)
-    if isinstance(obj, (np.floating,)):
+    if isinstance(obj, np.floating):
         return float(obj)
-    if isinstance(obj, (np.ndarray,)):
+    if isinstance(obj, np.ndarray):
         return obj.tolist()
     if isinstance(obj, (pd.Index, pd.Series)):
         return obj.tolist()
@@ -87,12 +92,10 @@ def _json_default(obj: Any) -> Any:
 
 
 def _json_dumps(data: Any) -> str:
-    """Serialize payloads with UTF-8-friendly JSON output."""
     return json.dumps(data, ensure_ascii=False, default=_json_default)
 
 
 def _build_summary_payload(engine, cfg) -> dict[str, Any]:
-    """Build a compact payload for the report header."""
     grn_edges_df = engine.ml_results.get("grn_edges_df", pd.DataFrame())
     return {
         "projectName": str(cfg.project_name),
@@ -105,11 +108,7 @@ def _build_summary_payload(engine, cfg) -> dict[str, Any]:
 
 
 def _build_pca_payload(matrix, sample_names, title: str, cfg) -> dict[str, Any] | None:
-    """Prepare a lightweight PCA scatter payload for the browser."""
-    if isinstance(matrix, pd.DataFrame):
-        values = matrix.to_numpy(dtype=float, copy=False)
-    else:
-        values = np.asarray(matrix, dtype=float)
+    values = matrix.to_numpy(dtype=float, copy=False) if isinstance(matrix, pd.DataFrame) else np.asarray(matrix, dtype=float)
 
     if values.ndim != 2 or values.shape[0] < 2 or values.shape[1] < 2:
         return None
@@ -134,7 +133,6 @@ def _build_pca_payload(matrix, sample_names, title: str, cfg) -> dict[str, Any] 
 
 
 def _build_correlation_circle_payload(engine, cfg) -> dict[str, Any] | None:
-    """Prepare correlation-circle data for the browser."""
     gene_names, metabolite_names = _pick_display_features(
         engine,
         top_genes=cfg.correlation_circle_top_genes,
@@ -143,9 +141,9 @@ def _build_correlation_circle_payload(engine, cfg) -> dict[str, Any] | None:
     if len(gene_names) < 2 or len(metabolite_names) < 1:
         return None
 
-    gene_df = _gene_expression_df(engine.adata).loc[:, gene_names]
-    metab_df = _metabolomics_df(engine.adata).loc[:, metabolite_names]
-    combined = pd.concat([gene_df, metab_df], axis=1)
+    gene_df = engine.gene_expression_df() if hasattr(engine, "gene_expression_df") else _gene_expression_df(engine.adata)
+    metab_df = engine.metabolomics_df() if hasattr(engine, "metabolomics_df") else _metabolomics_df(engine.adata)
+    combined = pd.concat([gene_df.loc[:, gene_names], metab_df.loc[:, metabolite_names]], axis=1)
     if combined.shape[0] < 3 or combined.shape[1] < 3:
         return None
 
@@ -182,16 +180,14 @@ def _build_correlation_circle_payload(engine, cfg) -> dict[str, Any] | None:
 
 
 def _build_network_payload(engine, cfg) -> dict[str, Any] | None:
-    """Prepare a compact GRN payload for the browser."""
     edge_df = engine.ml_results.get("grn_edges_df")
     if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         return None
 
     ranked = edge_df.assign(AbsPCC=edge_df["PCC_R"].abs()).sort_values(
-        ["Support_Count", "AbsPCC"],
-        ascending=[False, False],
+        ["Support_Count", "In_RRA", "AbsPCC"], ascending=[False, False, False]
     )
-    top_edges = ranked.head(cfg.circos_top_edges).copy()
+    top_edges = ranked.head(max(1, int(cfg.circos_top_edges))).copy()
     if top_edges.empty:
         return None
 
@@ -208,14 +204,7 @@ def _build_network_payload(engine, cfg) -> dict[str, Any] | None:
     metab_y = np.linspace(70, height - 70, num=len(metabolites)) if metabolites else []
 
     nodes = [
-        {
-            "id": f"gene::{gene}",
-            "label": gene,
-            "type": "Gene",
-            "color": PALETTE["gene"],
-            "x": float(gene_x),
-            "y": float(y),
-        }
+        {"id": f"gene::{gene}", "label": gene, "type": "Gene", "color": PALETTE["gene"], "x": float(gene_x), "y": float(y)}
         for gene, y in zip(genes, gene_y)
     ]
     nodes.extend(
@@ -256,12 +245,10 @@ def _build_network_payload(engine, cfg) -> dict[str, Any] | None:
 
     if not edges:
         return None
-
     return {"nodes": nodes, "edges": edges, "width": width, "height": height}
 
 
 def _interactive_html_template() -> str:
-    """Return a standalone interactive report template."""
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -285,7 +272,7 @@ def _interactive_html_template() -> str:
 <body>
   <div class="hero">
     <h1>DeepOmics Interactive Report</h1>
-    <p>This lightweight browser report focuses on the retained machine-learning workflow and GRN visualization outputs.</p>
+    <p>This standalone browser report provides lightweight offline visualization preview and SVG export.</p>
     <div class="chips" id="chips"></div>
   </div>
 
@@ -492,7 +479,6 @@ def _interactive_html_template() -> str:
 
 
 def generate_interactive_visual_report(engine, cfg, report_path: str | Path) -> None:
-    """Generate a standalone interactive HTML report."""
     output_path = Path(report_path)
     safe_mkdir(output_path.parent)
 

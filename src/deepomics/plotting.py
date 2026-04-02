@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import html
 from pathlib import Path
-from typing import Dict
 
 try:
     from adjustText import adjust_text
 except ImportError:  # pragma: no cover - optional dependency
     adjust_text = None
+
+try:
+    from upsetplot import from_contents, plot as upset_plot
+except ImportError:  # pragma: no cover - optional dependency
+    from_contents = None
+    upset_plot = None
 
 import matplotlib
 
@@ -19,9 +24,10 @@ import pandas as pd
 import seaborn as sns
 from scipy.stats import zscore
 from sklearn.decomposition import PCA
-from upsetplot import from_contents, plot as upset_plot
 
-from .utils import safe_mkdir
+from .utils import get_logger, safe_mkdir
+
+logger = get_logger()
 
 
 PALETTE = {
@@ -75,7 +81,6 @@ def _adaptive_figsize(
     margin_width: float = 3.0,
     margin_height: float = 2.5,
 ) -> tuple[float, float]:
-    """Return a clamped figure size based on matrix dimensions."""
     width = margin_width + max(1, n_cols) * cell_width
     height = margin_height + max(1, n_rows) * cell_height
     width = min(max_width, max(min_width, width))
@@ -84,7 +89,6 @@ def _adaptive_figsize(
 
 
 def set_academic_style() -> None:
-    """Apply a publication-oriented plotting style."""
     sns.set_context("paper", font_scale=1.2)
     sns.set_style("white")
     plt.rcParams["font.family"] = "DejaVu Sans"
@@ -111,10 +115,8 @@ def set_academic_style() -> None:
 
 
 def _save_figure(fig: plt.Figure, save_stem: str | Path, cfg) -> None:
-    """Save a figure in all formats requested by the configuration."""
     save_stem = Path(save_stem)
     save_stem.parent.mkdir(parents=True, exist_ok=True)
-
     if cfg.export_pdf:
         fig.savefig(save_stem.with_suffix(".pdf"))
     if cfg.export_svg:
@@ -125,7 +127,6 @@ def _save_figure(fig: plt.Figure, save_stem: str | Path, cfg) -> None:
 
 
 def _gene_expression_df(adata) -> pd.DataFrame:
-    """Return transcriptome matrix as a sample-by-gene DataFrame."""
     return pd.DataFrame(
         np.asarray(adata.X, dtype=np.float32),
         index=adata.obs_names.astype(str),
@@ -134,10 +135,9 @@ def _gene_expression_df(adata) -> pd.DataFrame:
 
 
 def _metabolomics_df(adata) -> pd.DataFrame:
-    """Return metabolomics matrix as a sample-by-metabolite DataFrame."""
     metab_df = adata.obsm.get("metabolomics_scaled", adata.obsm.get("metabolomics"))
     if isinstance(metab_df, pd.DataFrame):
-        return metab_df.copy()
+        return metab_df.copy(deep=False)
     return pd.DataFrame(
         np.asarray(metab_df, dtype=np.float32),
         index=adata.obs_names.astype(str),
@@ -146,9 +146,8 @@ def _metabolomics_df(adata) -> pd.DataFrame:
 
 
 def _pick_display_features(engine, top_genes: int, top_metabolites: int) -> tuple[list[str], list[str]]:
-    """Choose compact, publication-friendly feature subsets for multi-omics figures."""
-    gene_df = _gene_expression_df(engine.adata)
-    metab_df = _metabolomics_df(engine.adata)
+    gene_df = engine.gene_expression_df() if hasattr(engine, "gene_expression_df") else _gene_expression_df(engine.adata)
+    metab_df = engine.metabolomics_df() if hasattr(engine, "metabolomics_df") else _metabolomics_df(engine.adata)
 
     primary_df = _get_primary_key_gene_df(engine.ml_results, engine.config)
     if isinstance(primary_df, pd.DataFrame) and not primary_df.empty:
@@ -161,8 +160,10 @@ def _pick_display_features(engine, top_genes: int, top_metabolites: int) -> tupl
     selected_genes = gene_candidates[:top_genes]
 
     summary_df = engine.ml_results.get("metabolite_summary", pd.DataFrame())
-    if isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
-        summary_df = summary_df.sort_values(["RRA_Genes", "Candidate_Genes_PCC"], ascending=[False, False])
+    if isinstance(summary_df, pd.DataFrame) and not summary_df.empty and "Metabolite" in summary_df.columns:
+        sort_cols = [col for col in ["RRA_Genes", "Candidate_Genes_PCC"] if col in summary_df.columns]
+        if sort_cols:
+            summary_df = summary_df.sort_values(sort_cols, ascending=[False] * len(sort_cols))
         metabolite_candidates = [m for m in summary_df["Metabolite"].astype(str).tolist() if m in metab_df.columns]
     else:
         metabolite_candidates = []
@@ -170,36 +171,25 @@ def _pick_display_features(engine, top_genes: int, top_metabolites: int) -> tupl
         variance_rank = metab_df.var(axis=0).sort_values(ascending=False).index.astype(str).tolist()
         metabolite_candidates.extend([m for m in variance_rank if m not in metabolite_candidates])
     selected_metabs = metabolite_candidates[:top_metabolites]
-
     return selected_genes, selected_metabs
 
 
 def _primary_strategy_label(cfg) -> str:
-    """Return the display label of the configured primary key-gene strategy."""
     return str(getattr(cfg, "grn_primary_strategy", "rra")).upper()
 
 
 def _get_primary_key_gene_df(ml_results: dict, cfg) -> pd.DataFrame:
-    """Return the key-gene table for the configured primary strategy."""
     strategy = str(getattr(cfg, "grn_primary_strategy", "rra")).lower()
     return ml_results.get(f"key_genes_{strategy}", pd.DataFrame())
 
 
 def _text_rotation_for_angle(angle_deg: float) -> tuple[float, str]:
-    """Return readable label rotation and alignment for circular layouts."""
     if 90 < angle_deg < 270:
         return angle_deg + 180, "right"
     return angle_deg, "left"
 
 
-def _plot_pca_from_matrix(
-    matrix: np.ndarray,
-    sample_names: list[str],
-    title: str,
-    save_stem: str | Path,
-    cfg,
-) -> None:
-    """Plot a simple 2D PCA scatter."""
+def _plot_pca_from_matrix(matrix: np.ndarray, sample_names: list[str], title: str, save_stem: str | Path, cfg) -> None:
     if matrix.shape[0] < 2 or matrix.shape[1] < 2:
         return
 
@@ -220,15 +210,8 @@ def _plot_pca_from_matrix(
     )
 
     if len(sample_names) <= 20 and adjust_text is not None:
-        texts = [
-            ax.text(x, y, label, fontsize=8, alpha=0.90)
-            for x, y, label in zip(coords[:, 0], coords[:, 1], sample_names)
-        ]
-        adjust_text(
-            texts,
-            ax=ax,
-            arrowprops={"arrowstyle": "-", "color": PALETTE["grid_aux"], "lw": 0.5},
-        )
+        texts = [ax.text(x, y, label, fontsize=8, alpha=0.90) for x, y, label in zip(coords[:, 0], coords[:, 1], sample_names)]
+        adjust_text(texts, ax=ax, arrowprops={"arrowstyle": "-", "color": PALETTE["grid_aux"], "lw": 0.5})
 
     ax.axhline(0, color=PALETTE["grid_aux"], linewidth=0.8, zorder=1)
     ax.axvline(0, color=PALETTE["grid_aux"], linewidth=0.8, zorder=1)
@@ -239,7 +222,6 @@ def _plot_pca_from_matrix(
 
 
 def plot_sample_dendrogram(adata, save_stem: str | Path, cfg) -> None:
-    """Plot a sample clustering dendrogram based on transcriptome profiles."""
     if adata.n_obs < 2:
         return
 
@@ -265,7 +247,6 @@ def plot_sample_dendrogram(adata, save_stem: str | Path, cfg) -> None:
 
 
 def plot_transcriptome_pca(adata, save_stem: str | Path, cfg) -> None:
-    """Plot PCA for the transcriptome matrix."""
     _plot_pca_from_matrix(
         matrix=np.asarray(adata.X, dtype=np.float32),
         sample_names=adata.obs_names.astype(str).tolist(),
@@ -276,12 +257,8 @@ def plot_transcriptome_pca(adata, save_stem: str | Path, cfg) -> None:
 
 
 def plot_metabolome_pca(adata, save_stem: str | Path, cfg) -> None:
-    """Plot PCA for the metabolomics matrix."""
     metab_df = adata.obsm.get("metabolomics_scaled", adata.obsm.get("metabolomics"))
-    if isinstance(metab_df, pd.DataFrame):
-        matrix = metab_df.to_numpy(dtype=np.float32, copy=False)
-    else:
-        matrix = np.asarray(metab_df, dtype=np.float32)
+    matrix = metab_df.to_numpy(dtype=np.float32, copy=False) if isinstance(metab_df, pd.DataFrame) else np.asarray(metab_df, dtype=np.float32)
     _plot_pca_from_matrix(
         matrix=matrix,
         sample_names=adata.obs_names.astype(str).tolist(),
@@ -292,7 +269,6 @@ def plot_metabolome_pca(adata, save_stem: str | Path, cfg) -> None:
 
 
 def plot_correlation_circle(engine, save_stem: str | Path, cfg) -> None:
-    """Plot a PCA-based correlation circle for selected genes and metabolites."""
     gene_names, metabolite_names = _pick_display_features(
         engine,
         top_genes=cfg.correlation_circle_top_genes,
@@ -301,9 +277,9 @@ def plot_correlation_circle(engine, save_stem: str | Path, cfg) -> None:
     if len(gene_names) < 2 or len(metabolite_names) < 1:
         return
 
-    gene_df = _gene_expression_df(engine.adata).loc[:, gene_names]
-    metab_df = _metabolomics_df(engine.adata).loc[:, metabolite_names]
-    combined = pd.concat([gene_df, metab_df], axis=1)
+    gene_df = engine.gene_expression_df() if hasattr(engine, "gene_expression_df") else _gene_expression_df(engine.adata)
+    metab_df = engine.metabolomics_df() if hasattr(engine, "metabolomics_df") else _metabolomics_df(engine.adata)
+    combined = pd.concat([gene_df.loc[:, gene_names], metab_df.loc[:, metabolite_names]], axis=1)
     if combined.shape[0] < 3 or combined.shape[1] < 3:
         return
 
@@ -316,69 +292,27 @@ def plot_correlation_circle(engine, save_stem: str | Path, cfg) -> None:
 
     feature_types = ["Gene"] * len(gene_names) + ["Metabolite"] * len(metabolite_names)
     feature_df = pd.DataFrame(
-        {
-            "Feature": combined.columns.astype(str),
-            "PC1": corr_coords[:, 0],
-            "PC2": corr_coords[:, 1],
-            "Type": feature_types,
-        }
+        {"Feature": combined.columns.astype(str), "PC1": corr_coords[:, 0], "PC2": corr_coords[:, 1], "Type": feature_types}
     )
     feature_df["Radius"] = np.sqrt(feature_df["PC1"] ** 2 + feature_df["PC2"] ** 2)
     feature_df = feature_df.sort_values("Radius", ascending=False).reset_index(drop=True)
     label_features = set(feature_df.head(20)["Feature"].astype(str).tolist())
 
     fig, ax = plt.subplots(figsize=(8.5, 8.5))
-    circle = plt.Circle(
-        (0, 0),
-        1.0,
-        fill=False,
-        linestyle="--",
-        linewidth=1.0,
-        color=PALETTE["corr_circle_border"],
-    )
+    circle = plt.Circle((0, 0), 1.0, fill=False, linestyle="--", linewidth=1.0, color=PALETTE["corr_circle_border"])
     ax.add_patch(circle)
     ax.axhline(0, color=PALETTE["grid_aux"], linewidth=0.8)
     ax.axvline(0, color=PALETTE["grid_aux"], linewidth=0.8)
 
     palette = {"Gene": PALETTE["gene"], "Metabolite": PALETTE["metabolite"]}
     for feature_type, subset in feature_df.groupby("Type"):
-        ax.scatter(
-            subset["PC1"],
-            subset["PC2"],
-            s=30,
-            label=feature_type,
-            color=palette[feature_type],
-            alpha=0.90,
-            edgecolors="white",
-            linewidths=0.6,
-            zorder=3,
-        )
+        ax.scatter(subset["PC1"], subset["PC2"], s=30, label=feature_type, color=palette[feature_type], alpha=0.90, edgecolors="white", linewidths=0.6, zorder=3)
         for _, row in subset.iterrows():
             is_labeled = str(row["Feature"]) in label_features
             alpha = 0.82 if is_labeled else 0.30
-            ax.arrow(
-                0,
-                0,
-                row["PC1"],
-                row["PC2"],
-                color=palette[feature_type],
-                alpha=alpha,
-                linewidth=1.0 if is_labeled else 0.8,
-                head_width=0.02,
-                length_includes_head=True,
-                zorder=2,
-            )
+            ax.arrow(0, 0, row["PC1"], row["PC2"], color=palette[feature_type], alpha=alpha, linewidth=1.0 if is_labeled else 0.8, head_width=0.02, length_includes_head=True, zorder=2)
             if is_labeled:
-                ax.text(
-                    row["PC1"] * 1.07,
-                    row["PC2"] * 1.07,
-                    row["Feature"],
-                    fontsize=7.5,
-                    color=palette[feature_type],
-                    ha="center",
-                    va="center",
-                    zorder=4,
-                )
+                ax.text(row["PC1"] * 1.07, row["PC2"] * 1.07, row["Feature"], fontsize=7.5, color=palette[feature_type], ha="center", va="center", zorder=4)
 
     var_exp = pca.explained_variance_ratio_ * 100.0
     ax.set_title("Correlation Circle of Prioritized Multi-Omics Features")
@@ -392,14 +326,11 @@ def plot_correlation_circle(engine, save_stem: str | Path, cfg) -> None:
 
 
 def plot_circos_grn(engine, save_stem: str | Path, cfg) -> None:
-    """Plot a compact Circos-like GRN for top prioritized gene-metabolite edges."""
     edge_df = engine.ml_results.get("grn_edges_df")
     if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         return
 
-    ranked = edge_df.assign(AbsPCC=edge_df["PCC_R"].abs()).sort_values(
-        ["Support_Count", "In_RRA", "AbsPCC"], ascending=[False, False, False]
-    )
+    ranked = edge_df.assign(AbsPCC=edge_df["PCC_R"].abs()).sort_values(["Support_Count", "In_RRA", "AbsPCC"], ascending=[False, False, False])
     top_edges = ranked.head(cfg.circos_top_edges).copy()
     if top_edges.empty:
         return
@@ -433,17 +364,8 @@ def plot_circos_grn(engine, save_stem: str | Path, cfg) -> None:
         color = PALETTE["edge_positive"] if float(row["PCC_R"]) >= 0 else PALETTE["edge_negative"]
         width = 0.5 + 2.0 * min(1.0, abs(float(row["PCC_R"])))
         alpha = 0.30 + 0.18 * int(row["Support_Count"])
-        path = plt.matplotlib.path.Path(
-            verts,
-            [plt.matplotlib.path.Path.MOVETO, plt.matplotlib.path.Path.CURVE3, plt.matplotlib.path.Path.CURVE3],
-        )
-        patch = plt.matplotlib.patches.PathPatch(
-            path,
-            facecolor="none",
-            edgecolor=color,
-            linewidth=width,
-            alpha=min(alpha, 0.9),
-        )
+        path = plt.matplotlib.path.Path(verts, [plt.matplotlib.path.Path.MOVETO, plt.matplotlib.path.Path.CURVE3, plt.matplotlib.path.Path.CURVE3])
+        patch = plt.matplotlib.patches.PathPatch(path, facecolor="none", edgecolor=color, linewidth=width, alpha=min(alpha, 0.9))
         ax.add_patch(patch)
 
     for gene, (x, y, theta) in gene_pos.items():
@@ -465,14 +387,11 @@ def plot_circos_grn(engine, save_stem: str | Path, cfg) -> None:
 
 
 def plot_complex_gene_metabolite_heatmap(engine, save_stem: str | Path, cfg) -> None:
-    """Plot a clustered gene-metabolite heatmap with metabolite-strength annotation."""
     edge_df = engine.ml_results.get("grn_edges_df")
     if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         return
 
-    ranked = edge_df.assign(AbsPCC=edge_df["PCC_R"].abs()).sort_values(
-        ["Support_Count", "In_RRA", "AbsPCC"], ascending=[False, False, False]
-    )
+    ranked = edge_df.assign(AbsPCC=edge_df["PCC_R"].abs()).sort_values(["Support_Count", "In_RRA", "AbsPCC"], ascending=[False, False, False])
     top_edges = ranked.head(max(cfg.complex_heatmap_top_genes * cfg.complex_heatmap_top_metabolites, 120)).copy()
     if top_edges.empty:
         return
@@ -500,35 +419,17 @@ def plot_complex_gene_metabolite_heatmap(engine, save_stem: str | Path, cfg) -> 
     if np.ptp(col_strength) == 0:
         col_colors = pd.DataFrame({"RRA_Genes": [PALETTE["heatmap_strength_low"]] * len(col_strength)}, index=heat_df.columns)
     else:
-        cmap = plt.matplotlib.cm.get_cmap("Greens")
+        cmap = plt.get_cmap("Greens")
         normalized = (col_strength - col_strength.min()) / np.ptp(col_strength)
-        col_colors = pd.DataFrame(
-            {"RRA_Genes": [plt.matplotlib.colors.to_hex(cmap(0.35 + 0.55 * v)) for v in normalized]},
-            index=heat_df.columns,
-        )
+        col_colors = pd.DataFrame({"RRA_Genes": [plt.matplotlib.colors.to_hex(cmap(0.35 + 0.55 * v)) for v in normalized]}, index=heat_df.columns)
 
     figsize = _adaptive_figsize(
-        heat_df.shape[0],
-        heat_df.shape[1],
-        cell_width=0.55,
-        cell_height=0.28,
-        min_width=9.0,
-        min_height=8.0,
-        max_width=20.0,
-        max_height=18.0,
-        margin_width=3.0,
-        margin_height=3.0,
+        heat_df.shape[0], heat_df.shape[1], cell_width=0.55, cell_height=0.28,
+        min_width=9.0, min_height=8.0, max_width=20.0, max_height=18.0, margin_width=3.0, margin_height=3.0,
     )
     cluster = sns.clustermap(
-        heat_df,
-        cmap="RdBu_r",
-        center=0,
-        linewidths=0.2,
-        col_colors=col_colors,
-        figsize=figsize,
-        cbar_kws={"label": "Pearson r"},
-        xticklabels=True,
-        yticklabels=True,
+        heat_df, cmap="RdBu_r", center=0, linewidths=0.2, col_colors=col_colors,
+        figsize=figsize, cbar_kws={"label": "Pearson r"}, xticklabels=True, yticklabels=True,
     )
     cluster.fig.suptitle("Complex Heatmap of Prioritized Gene-Metabolite Associations", y=1.02)
     cluster.ax_heatmap.set_xlabel("Metabolites")
@@ -537,7 +438,10 @@ def plot_complex_gene_metabolite_heatmap(engine, save_stem: str | Path, cfg) -> 
 
 
 def plot_key_genes_upset(ml_results: dict, save_stem: str | Path, cfg) -> None:
-    """Plot an UpSet diagram of key genes from multiple ranking strategies."""
+    if from_contents is None or upset_plot is None:
+        logger.warning("upsetplot is not installed; skipping UpSet plot generation.")
+        return
+
     contents = {}
     for strategy in ("intersection", "borda", "rra"):
         df = ml_results.get(f"key_genes_{strategy}")
@@ -555,7 +459,6 @@ def plot_key_genes_upset(ml_results: dict, save_stem: str | Path, cfg) -> None:
 
 
 def plot_metabolite_selection_summary(ml_results: dict, save_stem: str | Path, cfg, top_n: int = 20) -> None:
-    """Plot final key-gene counts per metabolite across ranking strategies."""
     summary_df = ml_results.get("metabolite_summary")
     if not isinstance(summary_df, pd.DataFrame) or summary_df.empty:
         return
@@ -568,27 +471,9 @@ def plot_metabolite_selection_summary(ml_results: dict, save_stem: str | Path, c
     width = 0.24
 
     fig, ax = plt.subplots(figsize=(max(10, 0.60 * len(plot_df)), 6))
-    bars_intersection = ax.bar(
-        x - width,
-        plot_df["Intersection_Genes"],
-        width=width,
-        label="Intersection",
-        color=PALETTE["strategy_intersection"],
-    )
-    bars_borda = ax.bar(
-        x,
-        plot_df["Borda_Genes"],
-        width=width,
-        label="Borda",
-        color=PALETTE["strategy_borda"],
-    )
-    bars_rra = ax.bar(
-        x + width,
-        plot_df["RRA_Genes"],
-        width=width,
-        label="RRA",
-        color=PALETTE["strategy_rra"],
-    )
+    bars_intersection = ax.bar(x - width, plot_df["Intersection_Genes"], width=width, label="Intersection", color=PALETTE["strategy_intersection"])
+    bars_borda = ax.bar(x, plot_df["Borda_Genes"], width=width, label="Borda", color=PALETTE["strategy_borda"])
+    bars_rra = ax.bar(x + width, plot_df["RRA_Genes"], width=width, label="RRA", color=PALETTE["strategy_rra"])
 
     for container in (bars_intersection, bars_borda, bars_rra):
         ax.bar_label(container, fontsize=8.5, padding=2, fmt="%d")
@@ -602,26 +487,17 @@ def plot_metabolite_selection_summary(ml_results: dict, save_stem: str | Path, c
 
 
 def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int = 6) -> None:
-    """Plot scatter panels for the strongest prioritized gene-metabolite pairs."""
     edge_df = engine.ml_results.get("grn_edges_df")
     if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         return
 
-    ranked = edge_df.assign(AbsPCC=edge_df["PCC_R"].abs()).sort_values(
-        ["Support_Count", "AbsPCC"], ascending=[False, False]
-    )
+    ranked = edge_df.assign(AbsPCC=edge_df["PCC_R"].abs()).sort_values(["Support_Count", "AbsPCC"], ascending=[False, False])
     top_edges = ranked.head(top_n)
     if top_edges.empty:
         return
 
-    metab_df = engine.adata.obsm.get("metabolomics_scaled", engine.adata.obsm.get("metabolomics"))
-    if not isinstance(metab_df, pd.DataFrame):
-        metab_df = pd.DataFrame(metab_df, index=engine.adata.obs_names, columns=engine.adata.uns["metabolite_names"])
-    gene_df = pd.DataFrame(
-        np.asarray(engine.adata.X, dtype=np.float32),
-        index=engine.adata.obs_names,
-        columns=engine.adata.var_names.astype(str),
-    )
+    metab_df = engine.metabolomics_df() if hasattr(engine, "metabolomics_df") else _metabolomics_df(engine.adata)
+    gene_df = engine.gene_expression_df() if hasattr(engine, "gene_expression_df") else _gene_expression_df(engine.adata)
 
     n_panels = len(top_edges)
     n_cols = 2
@@ -639,13 +515,9 @@ def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int 
         x = gene_df[gene].to_numpy(dtype=float, copy=False)
         y = metab_df[metab].to_numpy(dtype=float, copy=False)
         sns.regplot(
-            x=x,
-            y=y,
-            ax=ax,
-            color=PALETTE["gene"],
-            scatter_kws={"s": 32, "alpha": 0.85, "edgecolor": "white", "linewidth": 0.4},
-            line_kws={"lw": 1.5},
-            ci=95,
+            x=x, y=y, ax=ax, color=PALETTE["gene"],
+            scatter_kws={"s": 32, "alpha": 0.85, "edgecolor": "white", "linewidths": 0.4},
+            line_kws={"lw": 1.5}, ci=95,
         )
         ax.set_title(f"{gene} vs {metab}", fontsize=11)
         ax.set_xlabel(gene)
@@ -653,13 +525,8 @@ def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int 
         corr = float(row["PCC_R"]) if pd.notna(row["PCC_R"]) else np.nan
         support = int(row["Support_Count"]) if pd.notna(row["Support_Count"]) else 0
         ax.text(
-            0.03,
-            0.97,
-            f"r = {corr:.3f}\nSupport = {support}",
-            transform=ax.transAxes,
-            ha="left",
-            va="top",
-            fontsize=9,
+            0.03, 0.97, f"r = {corr:.3f}\nSupport = {support}",
+            transform=ax.transAxes, ha="left", va="top", fontsize=9,
             bbox={"boxstyle": "round,pad=0.25", "fc": "white", "ec": "#d1d5db", "alpha": 0.95},
         )
 
@@ -671,7 +538,6 @@ def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int 
 
 
 def plot_top_primary_key_genes(ml_results: dict, save_stem: str | Path, cfg, top_n: int = 20) -> None:
-    """Plot the highest-priority genes from the configured primary strategy."""
     primary_df = _get_primary_key_gene_df(ml_results, cfg)
     if not isinstance(primary_df, pd.DataFrame) or primary_df.empty:
         return
@@ -679,11 +545,7 @@ def plot_top_primary_key_genes(ml_results: dict, save_stem: str | Path, cfg, top
     strategy_label = _primary_strategy_label(cfg)
     top_df = primary_df.head(top_n).iloc[::-1]
     fig, ax = plt.subplots(figsize=(10, max(5, 0.35 * len(top_df))))
-    bars = ax.barh(
-        top_df["Gene"],
-        top_df["Associated_Metabolites_Count"],
-        color=PALETTE["gene"],
-    )
+    bars = ax.barh(top_df["Gene"], top_df["Associated_Metabolites_Count"], color=PALETTE["gene"])
     labels = [f"{float(value):.0f}" for value in top_df["Associated_Metabolites_Count"]]
     ax.bar_label(bars, labels=labels, padding=3, fontsize=9)
     ax.set_title(f"Top {strategy_label}-Prioritized Genes")
@@ -693,24 +555,18 @@ def plot_top_primary_key_genes(ml_results: dict, save_stem: str | Path, cfg, top
 
 
 def _df_to_markdown(df: pd.DataFrame, max_rows: int = 20) -> str:
-    """Render a compact DataFrame as GitHub-flavored Markdown without extra deps."""
     if df.empty:
         return "_No data available._"
 
-    preview = df.head(max_rows).copy()
-    preview = preview.fillna("")
+    preview = df.head(max_rows).copy().fillna("")
     columns = preview.columns.tolist()
     header = "| " + " | ".join(columns) + " |"
     sep = "| " + " | ".join(["---"] * len(columns)) + " |"
-    rows = [
-        "| " + " | ".join(str(row[col]) for col in columns) + " |"
-        for _, row in preview.iterrows()
-    ]
+    rows = ["| " + " | ".join(str(row[col]) for col in columns) + " |" for _, row in preview.iterrows()]
     return "\n".join([header, sep, *rows])
 
 
 def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
-    """Generate a Markdown analysis report."""
     ml_summary = engine.ml_results.get("metabolite_summary", pd.DataFrame())
     primary_df = _get_primary_key_gene_df(engine.ml_results, cfg)
     strategy_label = _primary_strategy_label(cfg)
@@ -749,12 +605,10 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         f"- `plots/{FIGURE_FILE_PREFIXES['top_primary_key_genes']}.pdf|svg|png`",
         "- `DeepOmics_Interactive_Report.html`",
     ]
-
     Path(report_path).write_text("\n".join(lines), encoding="utf-8")
 
 
 def generate_html_report(engine, cfg, report_path: str | Path) -> None:
-    """Generate an HTML summary report with links to interactive editors."""
     ml_summary = engine.ml_results.get("metabolite_summary", pd.DataFrame()).head(50)
     primary_df = _get_primary_key_gene_df(engine.ml_results, cfg).head(50)
     strategy_label = _primary_strategy_label(cfg)
@@ -765,38 +619,29 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
   <h2>Interactive Figure Studio</h2>
   <p>
     Open <a href="DeepOmics_Interactive_Report.html"><code>DeepOmics_Interactive_Report.html</code></a>
-    for browser-native figure editing.
+    for lightweight browser-native visualization preview and SVG export.
   </p>
-  <ul>
-    <li>Correlation circle polishing via draggable endpoints and labels.</li>
-    <li>Prioritized GRN layout editing via draggable nodes and SVG/PNG export.</li>
-    <li>Standalone offline usage without external JavaScript dependencies.</li>
-  </ul>
 """
 
-    table_rows = "".join(
-        [
-            f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['grn_edges_full'])}</code></td><td>Full gene-metabolite edge table with support indicators.</td></tr>",
-            f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['grn_edges_cytoscape'])}</code></td><td>Cytoscape-ready edge table when Cytoscape export is enabled.</td></tr>",
-            f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['key_genes_consolidated'])}</code></td><td>Key-gene summary for the configured primary strategy.</td></tr>",
-            f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['ml_metabolite_summary'])}</code></td><td>Metabolite-level screening and key-gene selection counts.</td></tr>",
-        ]
-    )
+    table_rows = "".join([
+        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['grn_edges_full'])}</code></td><td>Full gene-metabolite edge table with support indicators.</td></tr>",
+        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['grn_edges_cytoscape'])}</code></td><td>Cytoscape-ready edge table when Cytoscape export is enabled.</td></tr>",
+        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['key_genes_consolidated'])}</code></td><td>Key-gene summary for the configured primary strategy.</td></tr>",
+        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['ml_metabolite_summary'])}</code></td><td>Metabolite-level screening and key-gene selection counts.</td></tr>",
+    ])
 
-    figure_rows = "".join(
-        [
-            f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['sample_clustering_dendrogram'])}.pdf|svg|png</code></td><td>Sample clustering dendrogram.</td></tr>",
-            f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_pca'])}.pdf|svg|png</code></td><td>Transcriptome PCA scatter plot.</td></tr>",
-            f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_pca'])}.pdf|svg|png</code></td><td>Metabolome PCA scatter plot.</td></tr>",
-            f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['key_genes_overlap_upset'])}.pdf|svg|png</code></td><td>Overlap of key genes across ranking strategies.</td></tr>",
-            f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolite_selection_summary'])}.pdf|svg|png</code></td><td>Intersection / Borda / RRA key-gene selection summary.</td></tr>",
-            f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['complex_gene_metabolite_heatmap'])}.pdf|svg|png</code></td><td>Clustered heatmap of prioritized associations.</td></tr>",
-            f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['correlation_circle'])}.pdf|svg|png</code></td><td>Correlation circle of prioritized transcriptome and metabolome features.</td></tr>",
-            f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['circos_grn'])}.pdf|svg|png</code></td><td>Circos-style prioritized GRN.</td></tr>",
-            f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs'])}.pdf|svg|png</code></td><td>Scatter panels with regression fit and confidence interval.</td></tr>",
-            f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_primary_key_genes'])}.pdf|svg|png</code></td><td>Top primary-strategy key genes.</td></tr>",
-        ]
-    )
+    figure_rows = "".join([
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['sample_clustering_dendrogram'])}.pdf|svg|png</code></td><td>Sample clustering dendrogram.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_pca'])}.pdf|svg|png</code></td><td>Transcriptome PCA scatter plot.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_pca'])}.pdf|svg|png</code></td><td>Metabolome PCA scatter plot.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['key_genes_overlap_upset'])}.pdf|svg|png</code></td><td>Overlap of key genes across ranking strategies.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolite_selection_summary'])}.pdf|svg|png</code></td><td>Intersection / Borda / RRA key-gene selection summary.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['complex_gene_metabolite_heatmap'])}.pdf|svg|png</code></td><td>Clustered heatmap of prioritized associations.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['correlation_circle'])}.pdf|svg|png</code></td><td>Correlation circle of prioritized transcriptome and metabolome features.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['circos_grn'])}.pdf|svg|png</code></td><td>Circos-style prioritized GRN.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs'])}.pdf|svg|png</code></td><td>Scatter panels with regression fit and confidence interval.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_primary_key_genes'])}.pdf|svg|png</code></td><td>Top primary-strategy key genes.</td></tr>",
+    ])
 
     html_text = f"""<!DOCTYPE html>
 <html lang="en">
@@ -831,7 +676,7 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
 <body>
   <div class="hero">
     <h1>DeepOmics Report: {html.escape(cfg.project_name)}</h1>
-    <p>This page summarizes structured result tables and figure file names. For manual figure polishing, use the standalone interactive editor linked below.</p>
+    <p>This page summarizes structured result tables and figure file names.</p>
   </div>
 
   <h2>Run Summary</h2>
@@ -843,9 +688,9 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
   </ul>
 
   <div class="link-card">
-    <strong>Figure editing:</strong>
+    <strong>Interactive report:</strong>
     Open <a href="DeepOmics_Interactive_Report.html"><code>DeepOmics_Interactive_Report.html</code></a>
-    to drag labels or nodes, remove distracting elements, add annotations, and save the edited figures as SVG or PNG.
+    for lightweight browser-native visualization preview and SVG export.
   </div>
 {interactive_html}
   <h2>Main Output Tables</h2>
@@ -872,7 +717,6 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
 
 
 def generate_report_plots(engine, cfg) -> None:
-    """Generate publication-style figures, reports, and interactive HTML editors."""
     set_academic_style()
     plots_dir = safe_mkdir(Path(cfg.output_dir) / "plots")
 
@@ -892,7 +736,7 @@ def generate_report_plots(engine, cfg) -> None:
         f"1. Use {TABLE_FILE_PREFIXES['key_genes_consolidated']} to summarize the primary strategy output.\n"
         f"2. Use {TABLE_FILE_PREFIXES['ml_metabolite_summary']} to compare candidate selection across metabolites.\n"
         f"3. Import source/target/interaction columns from {TABLE_FILE_PREFIXES['grn_edges_full']} into Cytoscape when needed.\n"
-        "4. Use DeepOmics_Interactive_Report.html for final figure polishing without modifying model outputs.\n"
+        "4. Use DeepOmics_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
     )
     (plots_dir / "visualization_notes.txt").write_text(notes, encoding="utf-8")
 
@@ -903,8 +747,4 @@ def generate_report_plots(engine, cfg) -> None:
             generate_html_report(engine, cfg, Path(cfg.output_dir) / "DeepOmics_Report.html")
             from .interactive import generate_interactive_visual_report
 
-            generate_interactive_visual_report(
-                engine,
-                cfg,
-                Path(cfg.output_dir) / "DeepOmics_Interactive_Report.html",
-            )
+            generate_interactive_visual_report(engine, cfg, Path(cfg.output_dir) / "DeepOmics_Interactive_Report.html")

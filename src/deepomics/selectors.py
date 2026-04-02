@@ -19,15 +19,7 @@ def _as_array_and_names(
     X: pd.DataFrame | np.ndarray,
     feature_names: Optional[Sequence[str]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Convert input features to a dense array and validated feature names.
-
-    Args:
-        X: Feature matrix.
-        feature_names: Optional feature names when ``X`` is a NumPy array.
-
-    Returns:
-        Tuple of dense matrix and feature-name array.
-    """
+    """Convert input features to a dense array and validated feature names."""
     if isinstance(X, pd.DataFrame):
         array = X.to_numpy(dtype=np.float32, copy=False)
         names = X.columns.astype(str).to_numpy()
@@ -42,12 +34,10 @@ def _as_array_and_names(
 
     if len(names) != array.shape[1]:
         raise ValueError("feature_names length does not match the number of columns in X.")
-
     return array, names
 
 
 def _empty_score_table(index: Sequence[str]) -> pd.DataFrame:
-    """Create an empty score table with the expected schema."""
     return pd.DataFrame(
         {
             "ElasticNetScore": pd.Series(0.0, index=index, dtype=float),
@@ -62,8 +52,11 @@ def _empty_score_table(index: Sequence[str]) -> pd.DataFrame:
     )
 
 
+def _zero_score_series(names: Sequence[str]) -> pd.Series:
+    return pd.Series(0.0, index=pd.Index(names, dtype=str), dtype=float)
+
+
 def _safe_nonconstant_mask(X_arr: np.ndarray) -> np.ndarray:
-    """Identify columns with finite, non-zero variance."""
     if X_arr.size == 0:
         return np.zeros(X_arr.shape[1], dtype=bool)
     variances = np.nanvar(X_arr, axis=0)
@@ -71,7 +64,6 @@ def _safe_nonconstant_mask(X_arr: np.ndarray) -> np.ndarray:
 
 
 def _resolved_cv_folds(n_samples: int, requested_folds: int) -> int:
-    """Resolve a safe CV fold number for small-sample regression."""
     if n_samples < 4:
         return 2
     max_safe_folds = max(2, n_samples // 2)
@@ -85,18 +77,7 @@ def filter_by_pcc(
     feature_names: Optional[Sequence[str]] = None,
     return_stats: bool = False,
 ):
-    """Perform vectorized Pearson correlation screening.
-
-    Args:
-        X: Gene matrix with shape ``(n_samples, n_features)``.
-        y: Target vector with shape ``(n_samples,)``.
-        config: ``AnalysisConfig`` instance.
-        feature_names: Optional feature names when ``X`` is a NumPy array.
-        return_stats: Whether to additionally return the full statistics table.
-
-    Returns:
-        List of selected feature names, or a tuple ``(selected_names, stats_df)``.
-    """
+    """Perform vectorized Pearson correlation screening."""
     X_arr, names = _as_array_and_names(X, feature_names=feature_names)
     y_arr = np.asarray(y, dtype=np.float32).reshape(-1)
 
@@ -105,37 +86,40 @@ def filter_by_pcc(
     if X_arr.shape[0] < 3:
         raise ValueError("At least 3 samples are required for Pearson correlation screening.")
 
-    X_centered = X_arr - X_arr.mean(axis=0, keepdims=True)
-    y_centered = y_arr - y_arr.mean()
+    X64 = np.asarray(X_arr, dtype=np.float64)
+    y64 = np.asarray(y_arr, dtype=np.float64)
+
+    X_centered = X64 - X64.mean(axis=0, keepdims=True)
+    y_centered = y64 - y64.mean()
     x_std = X_centered.std(axis=0, ddof=1)
     y_std = float(y_centered.std(ddof=1))
 
+    correlations = np.zeros(X64.shape[1], dtype=np.float64)
     valid = (x_std > 0) & np.isfinite(x_std) & np.isfinite(y_std) & (y_std > 0)
-    correlations = np.zeros(X_arr.shape[1], dtype=np.float64)
     if np.any(valid):
-        denom = (X_arr.shape[0] - 1) * x_std[valid] * y_std
+        denom = (X64.shape[0] - 1) * x_std[valid] * y_std
         correlations[valid] = (X_centered[:, valid].T @ y_centered) / denom
 
     correlations = np.clip(correlations, -1.0, 1.0)
-    t_stat = correlations * np.sqrt((X_arr.shape[0] - 2) / np.maximum(1.0 - correlations**2, 1e-12))
-    p_values = 2.0 * (1.0 - t.cdf(np.abs(t_stat), df=X_arr.shape[0] - 2))
+    t_stat = correlations * np.sqrt((X64.shape[0] - 2) / np.maximum(1.0 - correlations**2, 1e-12))
+    p_values = 2.0 * (1.0 - t.cdf(np.abs(t_stat), df=X64.shape[0] - 2))
 
-    stats_df = pd.DataFrame(
-        {
-            "R": correlations,
-            "AbsR": np.abs(correlations),
-            "P": p_values,
-        },
-        index=names,
-    ).replace([np.inf, -np.inf], np.nan).dropna()
+    stats_df = (
+        pd.DataFrame({"R": correlations, "AbsR": np.abs(correlations), "P": p_values}, index=names)
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+    )
+
+    if stats_df.empty:
+        return ([], stats_df) if return_stats else []
 
     if config.use_fdr:
-        ranked = stats_df["P"].sort_values()
+        ranked = stats_df["P"].sort_values(kind="stable")
         n_tests = max(1, len(ranked))
         bh_threshold = config.fdr_alpha * (np.arange(1, n_tests + 1) / n_tests)
-        reject = ranked.values <= bh_threshold
-        max_idx = np.where(reject)[0].max() if reject.any() else -1
-        p_cutoff = ranked.iloc[max_idx] if max_idx >= 0 else -np.inf
+        reject = ranked.to_numpy(dtype=float) <= bh_threshold
+        max_idx = int(np.where(reject)[0].max()) if reject.any() else -1
+        p_cutoff = float(ranked.iloc[max_idx]) if max_idx >= 0 else -np.inf
         mask = (stats_df["P"] <= p_cutoff) & (stats_df["AbsR"] >= config.pcc_r_threshold)
     else:
         mask = (stats_df["P"] <= config.pcc_p_threshold) & (stats_df["AbsR"] >= config.pcc_r_threshold)
@@ -151,9 +135,7 @@ def filter_by_pcc(
         selected_df = selected_df.head(config.max_candidate_genes)
 
     selected_names = selected_df.index.tolist()
-    if return_stats:
-        return selected_names, selected_df
-    return selected_names
+    return (selected_names, selected_df) if return_stats else selected_names
 
 
 def run_elastic_net(
@@ -162,11 +144,6 @@ def run_elastic_net(
     config,
     feature_names: Optional[Sequence[str]] = None,
 ) -> pd.Series:
-    """Fit an Elastic Net model and return absolute coefficients.
-
-    The implementation is robust to small-sample high-dimensional settings and
-    falls back to a fixed-alpha model when CV is not reliable.
-    """
     X_arr, names = _as_array_and_names(X, feature_names=feature_names)
     y_arr = np.asarray(y, dtype=np.float32).reshape(-1)
 
@@ -175,13 +152,13 @@ def run_elastic_net(
 
     valid_mask = _safe_nonconstant_mask(X_arr)
     if not np.any(valid_mask):
-        return pd.Series(0.0, index=names, dtype=float)
+        return _zero_score_series(names)
 
     X_work = X_arr[:, valid_mask]
     valid_names = names[valid_mask]
 
     if np.nanstd(y_arr, ddof=1) == 0 or X_work.shape[0] < 3:
-        return pd.Series(0.0, index=names, dtype=float)
+        return _zero_score_series(names)
 
     try:
         if config.elastic_net_alpha_search and X_work.shape[0] >= 4:
@@ -216,9 +193,9 @@ def run_elastic_net(
             coef = np.abs(np.asarray(fallback_model.coef_, dtype=float))
         except Exception as fallback_exc:  # pragma: no cover
             logger.warning("Elastic Net fallback also failed. Reason: %s", fallback_exc)
-            return pd.Series(0.0, index=names, dtype=float)
+            return _zero_score_series(names)
 
-    result = pd.Series(0.0, index=names, dtype=float)
+    result = _zero_score_series(names)
     result.loc[valid_names] = coef
     return result
 
@@ -230,7 +207,6 @@ def run_svm_rfe(
     config,
     feature_names: Optional[Sequence[str]] = None,
 ) -> pd.Series:
-    """Run LinearSVR-based recursive feature elimination."""
     X_arr, names = _as_array_and_names(X, feature_names=feature_names)
     y_arr = np.asarray(y, dtype=np.float32).reshape(-1)
 
@@ -239,17 +215,16 @@ def run_svm_rfe(
 
     valid_mask = _safe_nonconstant_mask(X_arr)
     if not np.any(valid_mask):
-        return pd.Series(0.0, index=names, dtype=float)
-
+        return _zero_score_series(names)
     if np.nanstd(y_arr, ddof=1) == 0:
-        return pd.Series(0.0, index=names, dtype=float)
+        return _zero_score_series(names)
 
     X_work = X_arr[:, valid_mask]
     valid_names = names[valid_mask]
     safe_target_k = min(max(1, target_k), X_work.shape[1])
 
     if X_work.shape[1] <= safe_target_k:
-        result = pd.Series(0.0, index=names, dtype=float)
+        result = _zero_score_series(names)
         result.loc[valid_names] = 1.0
         return result
 
@@ -261,9 +236,9 @@ def run_svm_rfe(
         scores = 1.0 / selector.ranking_.astype(float)
     except Exception as exc:  # pragma: no cover
         logger.warning("SVM-RFE failed; using zero scores for this metabolite. Reason: %s", exc)
-        return pd.Series(0.0, index=names, dtype=float)
+        return _zero_score_series(names)
 
-    result = pd.Series(0.0, index=names, dtype=float)
+    result = _zero_score_series(names)
     result.loc[valid_names] = scores
     return result
 
@@ -275,7 +250,6 @@ def run_xgboost(
     config,
     feature_names: Optional[Sequence[str]] = None,
 ) -> pd.Series:
-    """Fit an XGBoost regressor and return feature importance scores."""
     del target_k
     X_arr, names = _as_array_and_names(X, feature_names=feature_names)
     y_arr = np.asarray(y, dtype=np.float32).reshape(-1)
@@ -285,10 +259,9 @@ def run_xgboost(
 
     valid_mask = _safe_nonconstant_mask(X_arr)
     if not np.any(valid_mask):
-        return pd.Series(0.0, index=names, dtype=float)
-
+        return _zero_score_series(names)
     if np.nanstd(y_arr, ddof=1) == 0:
-        return pd.Series(0.0, index=names, dtype=float)
+        return _zero_score_series(names)
 
     X_work = X_arr[:, valid_mask]
     valid_names = names[valid_mask]
@@ -310,15 +283,14 @@ def run_xgboost(
         importance = np.asarray(model.feature_importances_, dtype=float)
     except Exception as exc:  # pragma: no cover
         logger.warning("XGBoost fitting failed; using zero scores for this metabolite. Reason: %s", exc)
-        return pd.Series(0.0, index=names, dtype=float)
+        return _zero_score_series(names)
 
-    result = pd.Series(0.0, index=names, dtype=float)
+    result = _zero_score_series(names)
     result.loc[valid_names] = importance
     return result
 
 
 def borda_aggregation(rank_df: pd.DataFrame) -> pd.Series:
-    """Aggregate rankings using Borda count."""
     if rank_df.empty:
         return pd.Series(dtype=float)
     ranks = rank_df.rank(ascending=False, method="average")
@@ -328,7 +300,6 @@ def borda_aggregation(rank_df: pd.DataFrame) -> pd.Series:
 
 
 def rra_aggregation(rank_df: pd.DataFrame) -> pd.Series:
-    """Approximate robust rank aggregation using beta order statistics."""
     if rank_df.empty:
         return pd.Series(dtype=float)
     ranks = rank_df.rank(ascending=False, method="average")
@@ -345,7 +316,6 @@ def rra_aggregation(rank_df: pd.DataFrame) -> pd.Series:
 
 
 def _top_k_names(score_series: pd.Series, target_k: int, min_positive: bool = False) -> list[str]:
-    """Return the top-k feature names from a score series."""
     if score_series.empty:
         return []
     series = score_series.copy()

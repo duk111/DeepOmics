@@ -13,21 +13,7 @@ logger = get_logger()
 
 
 def _read_feature_table(path: str | Path, label: str) -> pd.DataFrame:
-    """Read and validate an omics matrix.
-
-    The input format is expected to be features x samples.
-
-    Args:
-        path: CSV file path.
-        label: Human-readable label used in log messages.
-
-    Returns:
-        Cleaned numeric table.
-
-    Raises:
-        FileNotFoundError: If the file does not exist.
-        ValueError: If the file is empty, duplicated, or non-numeric.
-    """
+    """Read and validate an omics matrix."""
     file_path = Path(path)
     if not file_path.exists():
         raise FileNotFoundError(f"{label} file not found: {file_path}")
@@ -62,30 +48,21 @@ def _read_feature_table(path: str | Path, label: str) -> pd.DataFrame:
 
 
 def _impute_missing_with_column_mean(df: pd.DataFrame) -> pd.DataFrame:
-    """Fill missing values using column means.
-
-    Args:
-        df: Numeric data frame.
-
-    Returns:
-        Imputed data frame.
-    """
+    """Fill missing values using column means."""
     if not df.isna().values.any():
         return df
+
+    all_missing = df.columns[df.isna().all(axis=0)].tolist()
+    if all_missing:
+        raise ValueError(
+            "The following features contain only missing values and cannot be imputed: "
+            f"{all_missing[:5]}"
+        )
     return df.fillna(df.mean(axis=0))
 
 
-def load_as_anndata(gene_path: str, metab_path: str) -> ad.AnnData:
-    """Load transcriptome and metabolome matrices into a single AnnData object.
-
-    Args:
-        gene_path: Path to a gene expression CSV file in features x samples format.
-        metab_path: Path to a metabolite abundance CSV file in features x samples format.
-
-    Returns:
-        AnnData object where ``X`` stores transcriptome data and ``obsm["metabolomics"]``
-        stores metabolite data aligned by shared samples.
-    """
+def load_as_anndata(gene_path: str | Path, metab_path: str | Path) -> ad.AnnData:
+    """Load transcriptome and metabolome matrices into a single AnnData object."""
     logger.info("Loading transcriptome data from %s", gene_path)
     df_gene = _read_feature_table(gene_path, label="Transcriptome")
 
@@ -95,18 +72,18 @@ def load_as_anndata(gene_path: str, metab_path: str) -> ad.AnnData:
     df_gene_t = _impute_missing_with_column_mean(df_gene.T)
     df_metab_t = _impute_missing_with_column_mean(df_metab.T)
 
-    common_samples = [sample for sample in df_gene_t.index if sample in set(df_metab_t.index)]
-    if not common_samples:
+    common_samples = df_gene_t.index.intersection(df_metab_t.index, sort=False)
+    if len(common_samples) == 0:
         raise ValueError("No shared sample IDs were found between transcriptome and metabolomics tables.")
 
     logger.info("Sample alignment completed. Shared samples: %d", len(common_samples))
 
-    gene_aligned = df_gene_t.loc[common_samples].astype(np.float32)
-    metab_aligned = df_metab_t.loc[common_samples].astype(np.float32)
+    gene_aligned = df_gene_t.loc[common_samples].astype(np.float32, copy=False)
+    metab_aligned = df_metab_t.loc[common_samples].astype(np.float32, copy=False)
 
     adata = ad.AnnData(
         X=gene_aligned.to_numpy(dtype=np.float32, copy=False),
-        obs=pd.DataFrame(index=pd.Index(common_samples, name="SampleID")),
+        obs=pd.DataFrame(index=pd.Index(common_samples.astype(str), name="SampleID")),
         var=pd.DataFrame(index=pd.Index(gene_aligned.columns.astype(str), name="Gene")),
     )
     adata.obsm["metabolomics"] = pd.DataFrame(
@@ -124,37 +101,39 @@ def load_as_anndata(gene_path: str, metab_path: str) -> ad.AnnData:
 
 
 def preprocess_adata(adata: ad.AnnData, scale: bool = True) -> ad.AnnData:
-    """Apply basic preprocessing to the AnnData object.
-
-    Steps include missing-value imputation, constant-feature removal, and z-score scaling.
-
-    Args:
-        adata: Input AnnData object.
-        scale: Whether to z-score transcriptome and metabolomics matrices.
-
-    Returns:
-        Processed AnnData object.
-    """
+    """Apply basic preprocessing to the AnnData object."""
     if "metabolomics" not in adata.obsm:
         raise KeyError("adata.obsm['metabolomics'] is required.")
 
-    X = np.asarray(adata.X, dtype=np.float32)
-    gene_df = pd.DataFrame(X, index=adata.obs_names, columns=adata.var_names)
+    gene_df = pd.DataFrame(
+        np.asarray(adata.X, dtype=np.float32),
+        index=adata.obs_names.astype(str),
+        columns=adata.var_names.astype(str),
+    )
     gene_df = _impute_missing_with_column_mean(gene_df)
-    X = gene_df.to_numpy(dtype=np.float32, copy=False)
 
-    gene_var = np.nanvar(X, axis=0)
+    gene_var = np.nanvar(gene_df.to_numpy(dtype=np.float32, copy=False), axis=0)
     keep_genes = gene_var > 0
     if not np.all(keep_genes):
         dropped = int((~keep_genes).sum())
         logger.warning("Removed %d constant genes before modeling.", dropped)
+        gene_df = gene_df.loc[:, keep_genes]
         adata = adata[:, keep_genes].copy()
-        X = np.asarray(adata.X, dtype=np.float32)
+
+    if gene_df.shape[1] == 0:
+        raise ValueError("No genes remain after preprocessing.")
+
+    adata.X = gene_df.to_numpy(dtype=np.float32, copy=False)
+    adata.var_names = pd.Index(gene_df.columns.astype(str), name="Gene")
 
     metab_df = adata.obsm["metabolomics"]
     if not isinstance(metab_df, pd.DataFrame):
-        metab_df = pd.DataFrame(metab_df, index=adata.obs_names)
-    metab_df = _impute_missing_with_column_mean(metab_df.astype(np.float32))
+        metabolite_names = adata.uns.get("metabolite_names", [])
+        metab_df = pd.DataFrame(metab_df, index=adata.obs_names, columns=metabolite_names)
+    metab_df = metab_df.copy()
+    metab_df.index = adata.obs_names.astype(str)
+    metab_df.columns = metab_df.columns.astype(str)
+    metab_df = _impute_missing_with_column_mean(metab_df.astype(np.float32, copy=False))
 
     metab_var = np.nanvar(metab_df.to_numpy(dtype=np.float32, copy=False), axis=0)
     keep_metabs = metab_var > 0
@@ -162,9 +141,12 @@ def preprocess_adata(adata: ad.AnnData, scale: bool = True) -> ad.AnnData:
         dropped = int((~keep_metabs).sum())
         logger.warning("Removed %d constant metabolites before modeling.", dropped)
         metab_df = metab_df.loc[:, keep_metabs]
-        adata.uns["metabolite_names"] = metab_df.columns.astype(str).tolist()
 
-    adata.obsm["metabolomics"] = metab_df.astype(np.float32)
+    if metab_df.shape[1] == 0:
+        raise ValueError("No metabolites remain after preprocessing.")
+
+    adata.obsm["metabolomics"] = metab_df.astype(np.float32, copy=False)
+    adata.uns["metabolite_names"] = metab_df.columns.astype(str).tolist()
 
     if scale:
         logger.info("Applying z-score scaling to transcriptome and metabolomics matrices.")
@@ -182,6 +164,8 @@ def preprocess_adata(adata: ad.AnnData, scale: bool = True) -> ad.AnnData:
             index=adata.obs_names.copy(),
             columns=adata.uns["metabolite_names"],
         )
+    else:
+        adata.obsm.pop("metabolomics_scaled", None)
 
     adata.uns["preprocess_summary"] = {
         "n_samples": int(adata.n_obs),
@@ -193,23 +177,11 @@ def preprocess_adata(adata: ad.AnnData, scale: bool = True) -> ad.AnnData:
 
 
 def save_h5ad(adata: ad.AnnData, filename: str | Path) -> None:
-    """Persist an AnnData object to disk.
-
-    Args:
-        adata: AnnData object to save.
-        filename: Output path.
-    """
+    """Persist an AnnData object to disk."""
     adata.write_h5ad(str(filename))
     logger.info("Analysis state saved to %s", filename)
 
 
 def read_h5ad(filename: str | Path) -> ad.AnnData:
-    """Load a previously saved AnnData object.
-
-    Args:
-        filename: Input ``.h5ad`` path.
-
-    Returns:
-        Loaded AnnData object.
-    """
+    """Load a previously saved AnnData object."""
     return ad.read_h5ad(str(filename))
