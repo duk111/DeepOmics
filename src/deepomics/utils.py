@@ -33,14 +33,14 @@ def get_logger(
     resolved_level = getattr(logging, level.upper(), logging.INFO) if isinstance(level, str) else int(level)
     logger = logging.getLogger(name)
 
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
     if not getattr(logger, "_deepomics_configured", False):
         logger.setLevel(resolved_level)
         logger.propagate = False
-
-        formatter = logging.Formatter(
-            fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
 
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(resolved_level)
@@ -52,6 +52,8 @@ def get_logger(
         logger.setLevel(resolved_level)
         for handler in logger.handlers:
             handler.setLevel(resolved_level)
+            if handler.formatter is None:
+                handler.setFormatter(formatter)
 
     if log_file is not None:
         log_path = Path(log_file)
