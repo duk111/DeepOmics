@@ -17,6 +17,7 @@ class AnalysisConfig:
 
     project_name: str = "DeepOmics_Association_Analysis"
     output_dir: str = "results"
+    group_table_path: str | None = None
     random_state: int = 42
 
     screen_top_k_per_method: int = 1000
@@ -60,6 +61,9 @@ class AnalysisConfig:
     def __post_init__(self) -> None:
         self.project_name = str(self.project_name).strip()
         self.output_dir = str(self.output_dir)
+        self.group_table_path = (
+            None if self.group_table_path is None else str(self.group_table_path).strip() or None
+        )
         self.log_level = str(self.log_level).upper().strip()
         self.report_formats = self._normalize_report_formats(self.report_formats)
 

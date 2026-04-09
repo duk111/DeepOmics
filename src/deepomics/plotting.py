@@ -17,6 +17,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from matplotlib.patches import Ellipse, Polygon
+from scipy.spatial import ConvexHull, QhullError
+from scipy.stats import chi2
 from sklearn.decomposition import PCA
 
 from .utils import get_logger, safe_mkdir
@@ -35,6 +38,21 @@ PALETTE = {
     "bar_dual_model": "#2563eb",
     "bar_high_conf": "#1d4ed8",
 }
+
+PCA_GROUP_PALETTE = [
+    "#1f77b4",
+    "#d62728",
+    "#2ca02c",
+    "#9467bd",
+    "#ff7f0e",
+    "#17becf",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#003f5c",
+    "#7a5195",
+]
 
 FIGURE_FILE_PREFIXES = {
     "sample_clustering_dendrogram": "F01_Sample_Clustering_Dendrogram",
@@ -114,28 +132,304 @@ def _metabolomics_df(adata) -> pd.DataFrame:
     )
 
 
-def _plot_pca_from_matrix(matrix: np.ndarray, sample_names: list[str], title: str, save_stem: str | Path, cfg) -> None:
-    if matrix.shape[0] < 2 or matrix.shape[1] < 2:
+def _load_pca_group_table(cfg) -> pd.DataFrame | None:
+    group_table_path = getattr(cfg, "group_table_path", None)
+    if not group_table_path:
+        return None
+
+    group_table_path = Path(group_table_path)
+    group_df = pd.read_csv(group_table_path, sep=None, engine="python", encoding="utf-8-sig")
+    normalized_columns = {
+        str(column).replace("\ufeff", "").strip().lower(): column
+        for column in group_df.columns
+    }
+    required_columns = {"sample_id", "group"}
+    missing_columns = required_columns.difference(normalized_columns)
+    if missing_columns:
+        raise ValueError(
+            "PCA group table must contain columns: sample_id and group. "
+            f"Missing columns: {sorted(missing_columns)}."
+        )
+
+    group_df = group_df.rename(
+        columns={
+            normalized_columns["sample_id"]: "sample_id",
+            normalized_columns["group"]: "group",
+        }
+    ).loc[:, ["sample_id", "group"]].copy()
+
+    group_df["sample_id"] = group_df["sample_id"].astype(str).str.strip()
+    group_df["group"] = group_df["group"].astype(str).str.strip()
+    valid_mask = group_df["sample_id"].ne("") & group_df["group"].ne("")
+    dropped_rows = int((~valid_mask).sum())
+    if dropped_rows > 0:
+        logger.warning(
+            "Dropped %d invalid rows from PCA group table because sample_id or group was empty.",
+            dropped_rows,
+        )
+        group_df = group_df.loc[valid_mask].copy()
+
+    if group_df.empty:
+        raise ValueError("PCA group table is empty after removing invalid rows.")
+
+    duplicated_mask = group_df["sample_id"].duplicated(keep=False)
+    if duplicated_mask.any():
+        duplicated_ids = group_df.loc[duplicated_mask, "sample_id"].astype(str).unique().tolist()
+        raise ValueError(
+            "PCA group table contains duplicated sample_id values: "
+            f"{duplicated_ids[:5]}"
+        )
+
+    group_df.attrs["source_path"] = str(group_table_path)
+    logger.info(
+        "Loaded PCA group table from %s with %d samples across %d groups.",
+        group_table_path,
+        len(group_df),
+        group_df["group"].nunique(),
+    )
+    return group_df
+
+
+def _prepare_grouped_pca_inputs(
+    matrix: np.ndarray,
+    sample_names: list[str],
+    title: str,
+    group_df: pd.DataFrame | None,
+) -> tuple[np.ndarray, list[str], pd.DataFrame | None]:
+    values = np.asarray(matrix, dtype=np.float32)
+    samples = [str(name).strip() for name in sample_names]
+
+    if group_df is None:
+        return values, samples, None
+
+    sample_index = pd.Index(samples, dtype=str, name="sample_id")
+    group_map = group_df.set_index("sample_id")["group"].astype(str)
+
+    matched_mask = sample_index.isin(group_map.index)
+    missing_samples = sample_index[~matched_mask].tolist()
+    if missing_samples:
+        preview = ", ".join(missing_samples[:10])
+        suffix = " ..." if len(missing_samples) > 10 else ""
+        logger.warning(
+            "[%s] Skipped %d samples without group annotation in %s: %s%s",
+            title,
+            len(missing_samples),
+            Path(group_df.attrs.get("source_path", "group_table")).name,
+            preview,
+            suffix,
+        )
+
+    unused_group_rows = group_map.index.difference(sample_index, sort=False).tolist()
+    if unused_group_rows:
+        logger.info(
+            "[%s] Ignored %d group table entries not present in the current matrix.",
+            title,
+            len(unused_group_rows),
+        )
+
+    filtered_samples = sample_index[matched_mask].tolist()
+    filtered_matrix = values[matched_mask]
+    if len(filtered_samples) == 0:
+        logger.warning("[%s] No overlapping samples were found between the matrix and PCA group table.", title)
+        return filtered_matrix, filtered_samples, pd.DataFrame(columns=["sample_id", "group"])
+
+    grouped_plot_df = pd.DataFrame(
+        {
+            "sample_id": filtered_samples,
+            "group": group_map.reindex(filtered_samples).to_numpy(),
+        }
+    )
+    return filtered_matrix, filtered_samples, grouped_plot_df
+
+
+def _group_color_map(groups: list[str]) -> dict[str, str]:
+    unique_groups = sorted({str(group) for group in groups})
+    return {
+        group: PCA_GROUP_PALETTE[idx % len(PCA_GROUP_PALETTE)]
+        for idx, group in enumerate(unique_groups)
+    }
+
+
+def _try_add_confidence_ellipse(
+    ax: plt.Axes,
+    points: np.ndarray,
+    color: str,
+    *,
+    confidence: float = 0.95,
+) -> bool:
+    if points.shape[0] < 3:
+        return False
+
+    covariance = np.cov(points, rowvar=False)
+    if covariance.shape != (2, 2) or not np.isfinite(covariance).all():
+        return False
+
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    order = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+
+    if np.any(eigenvalues <= 0):
+        return False
+
+    scale = float(np.sqrt(chi2.ppf(confidence, df=2)))
+    width, height = 2.0 * scale * np.sqrt(eigenvalues)
+    angle = float(np.degrees(np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0])))
+
+    ellipse = Ellipse(
+        xy=points.mean(axis=0),
+        width=float(width),
+        height=float(height),
+        angle=angle,
+        facecolor=color,
+        edgecolor=color,
+        linewidth=1.4,
+        alpha=0.18,
+        zorder=2,
+    )
+    ax.add_patch(ellipse)
+    return True
+
+
+def _try_add_convex_hull(ax: plt.Axes, points: np.ndarray, color: str) -> bool:
+    if points.shape[0] < 3:
+        return False
+
+    try:
+        hull = ConvexHull(points)
+    except (QhullError, ValueError):
+        return False
+
+    hull_points = points[hull.vertices]
+    polygon = Polygon(
+        hull_points,
+        closed=True,
+        facecolor=color,
+        edgecolor=color,
+        linewidth=1.4,
+        alpha=0.18,
+        zorder=2,
+        joinstyle="round",
+    )
+    ax.add_patch(polygon)
+    return True
+
+
+def _add_group_envelope(ax: plt.Axes, points: np.ndarray, color: str, fallback_radius: float) -> None:
+    if points.shape[0] >= 3 and _try_add_confidence_ellipse(ax, points, color):
+        return
+    if points.shape[0] >= 3 and _try_add_convex_hull(ax, points, color):
+        return
+
+    if points.shape[0] == 2:
+        ax.plot(
+            points[:, 0],
+            points[:, 1],
+            color=color,
+            linewidth=10.0,
+            alpha=0.14,
+            zorder=2,
+            solid_capstyle="round",
+        )
+        ax.plot(
+            points[:, 0],
+            points[:, 1],
+            color=color,
+            linewidth=1.3,
+            alpha=0.95,
+            zorder=2,
+            solid_capstyle="round",
+        )
+        return
+
+    if points.shape[0] == 1:
+        circle = plt.Circle(
+            (float(points[0, 0]), float(points[0, 1])),
+            radius=float(fallback_radius),
+            facecolor=color,
+            edgecolor=color,
+            linewidth=1.2,
+            alpha=0.18,
+            zorder=2,
+        )
+        ax.add_patch(circle)
+
+
+def _plot_pca_from_matrix(
+    matrix: np.ndarray,
+    sample_names: list[str],
+    title: str,
+    save_stem: str | Path,
+    cfg,
+    *,
+    group_df: pd.DataFrame | None = None,
+) -> None:
+    plot_matrix, plot_sample_names, plot_group_df = _prepare_grouped_pca_inputs(
+        matrix=np.asarray(matrix, dtype=np.float32),
+        sample_names=sample_names,
+        title=title,
+        group_df=group_df,
+    )
+
+    if plot_matrix.shape[0] < 2 or plot_matrix.shape[1] < 2:
+        logger.warning("[%s] PCA plot was skipped because fewer than 2 samples or features remained for plotting.", title)
         return
 
     pca = PCA(n_components=2, random_state=cfg.random_state)
-    coords = pca.fit_transform(matrix)
+    coords = pca.fit_transform(plot_matrix)
     var_exp = pca.explained_variance_ratio_ * 100.0
 
     fig, ax = plt.subplots(figsize=(7.5, 6.0))
-    ax.scatter(
-        coords[:, 0],
-        coords[:, 1],
-        s=42,
-        alpha=0.90,
-        color=PALETTE["pca_scatter"],
-        edgecolors="white",
-        linewidths=0.8,
-        zorder=3,
-    )
 
-    if len(sample_names) <= 20 and adjust_text is not None:
-        texts = [ax.text(x, y, label, fontsize=8, alpha=0.90) for x, y, label in zip(coords[:, 0], coords[:, 1], sample_names)]
+    if plot_group_df is None:
+        ax.scatter(
+            coords[:, 0],
+            coords[:, 1],
+            s=42,
+            alpha=0.90,
+            color=PALETTE["pca_scatter"],
+            edgecolors="white",
+            linewidths=0.8,
+            zorder=3,
+        )
+    else:
+        plot_group_df = plot_group_df.copy()
+        plot_group_df["PC1"] = coords[:, 0]
+        plot_group_df["PC2"] = coords[:, 1]
+
+        span = max(
+            float(np.ptp(coords[:, 0])) if coords.shape[0] > 0 else 0.0,
+            float(np.ptp(coords[:, 1])) if coords.shape[0] > 0 else 0.0,
+            1.0,
+        )
+        fallback_radius = 0.035 * span
+        color_map = _group_color_map(plot_group_df["group"].astype(str).tolist())
+
+        for group_name in sorted(plot_group_df["group"].astype(str).unique().tolist()):
+            group_points_df = plot_group_df.loc[plot_group_df["group"].astype(str) == group_name]
+            group_points = group_points_df.loc[:, ["PC1", "PC2"]].to_numpy(dtype=float, copy=False)
+            group_color = color_map[group_name]
+
+            _add_group_envelope(ax, group_points, group_color, fallback_radius)
+            ax.scatter(
+                group_points[:, 0],
+                group_points[:, 1],
+                s=42,
+                alpha=0.90,
+                color=group_color,
+                edgecolors="white",
+                linewidths=0.8,
+                zorder=3,
+                label=group_name,
+            )
+
+        ax.legend(title="Group", loc="best")
+
+    if len(plot_sample_names) <= 20 and adjust_text is not None:
+        texts = [
+            ax.text(x, y, label, fontsize=8, alpha=0.90)
+            for x, y, label in zip(coords[:, 0], coords[:, 1], plot_sample_names)
+        ]
         adjust_text(texts, ax=ax, arrowprops={"arrowstyle": "-", "color": PALETTE["grid_aux"], "lw": 0.5})
 
     ax.axhline(0, color=PALETTE["grid_aux"], linewidth=0.8, zorder=1)
@@ -171,17 +465,18 @@ def plot_sample_dendrogram(adata, save_stem: str | Path, cfg) -> None:
     _save_figure(fig, save_stem, cfg)
 
 
-def plot_transcriptome_pca(adata, save_stem: str | Path, cfg) -> None:
+def plot_transcriptome_pca(adata, save_stem: str | Path, cfg, group_df: pd.DataFrame | None = None) -> None:
     _plot_pca_from_matrix(
         matrix=np.asarray(adata.X, dtype=np.float32),
         sample_names=adata.obs_names.astype(str).tolist(),
         title="Transcriptome PCA",
         save_stem=save_stem,
         cfg=cfg,
+        group_df=group_df,
     )
 
 
-def plot_metabolome_pca(adata, save_stem: str | Path, cfg) -> None:
+def plot_metabolome_pca(adata, save_stem: str | Path, cfg, group_df: pd.DataFrame | None = None) -> None:
     metab_df = adata.obsm.get("metabolomics_scaled", adata.obsm.get("metabolomics"))
     matrix = metab_df.to_numpy(dtype=np.float32, copy=False) if isinstance(metab_df, pd.DataFrame) else np.asarray(metab_df, dtype=np.float32)
     _plot_pca_from_matrix(
@@ -190,6 +485,7 @@ def plot_metabolome_pca(adata, save_stem: str | Path, cfg) -> None:
         title="Metabolome PCA",
         save_stem=save_stem,
         cfg=cfg,
+        group_df=group_df,
     )
 
 
@@ -574,10 +870,11 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
 def generate_report_plots(engine, cfg) -> None:
     set_academic_style()
     plots_dir = safe_mkdir(Path(cfg.output_dir) / "plots")
+    pca_group_df = _load_pca_group_table(cfg)
 
     plot_sample_dendrogram(engine.adata, plots_dir / FIGURE_FILE_PREFIXES["sample_clustering_dendrogram"], cfg)
-    plot_transcriptome_pca(engine.adata, plots_dir / FIGURE_FILE_PREFIXES["transcriptome_pca"], cfg)
-    plot_metabolome_pca(engine.adata, plots_dir / FIGURE_FILE_PREFIXES["metabolome_pca"], cfg)
+    plot_transcriptome_pca(engine.adata, plots_dir / FIGURE_FILE_PREFIXES["transcriptome_pca"], cfg, group_df=pca_group_df)
+    plot_metabolome_pca(engine.adata, plots_dir / FIGURE_FILE_PREFIXES["metabolome_pca"], cfg, group_df=pca_group_df)
     plot_total_association_network(engine, plots_dir / FIGURE_FILE_PREFIXES["total_association_network"], cfg)
     plot_high_confidence_network(engine, plots_dir / FIGURE_FILE_PREFIXES["high_confidence_network"], cfg)
     plot_top_edge_scatter_panels(engine, plots_dir / FIGURE_FILE_PREFIXES["top_gene_metabolite_pairs"], cfg)
