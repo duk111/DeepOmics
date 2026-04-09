@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from typing import Dict, List
@@ -32,10 +31,14 @@ class MultiOmicsEngine:
         self.config = cfg
         self._validate_adata()
 
+        self._obs_names = self.adata.obs_names.astype(str)
         self._gene_names = np.asarray(self.adata.var_names, dtype=str)
         self._gene_index = pd.Index(self._gene_names)
         self._gene_matrix = np.asarray(self.adata.X, dtype=np.float32)
+
         self._metabolomics_df = self._coerce_metabolomics_df()
+        self._metabolite_names = np.asarray(self.adata.uns["metabolite_names"], dtype=str)
+        self._metabolomics_matrix = self._metabolomics_df.to_numpy(dtype=np.float32, copy=False)
 
         self.ml_results: Dict[str, object] = {
             "gene_scores_df": pd.DataFrame(),
@@ -68,12 +71,12 @@ class MultiOmicsEngine:
             return metab_df.copy(deep=False)
         return pd.DataFrame(
             np.asarray(metab_df, dtype=np.float32),
-            index=self.adata.obs_names.astype(str),
+            index=self._obs_names,
             columns=metabolites,
         )
 
     def gene_expression_df(self) -> pd.DataFrame:
-        return pd.DataFrame(self._gene_matrix, index=self.adata.obs_names.astype(str), columns=self._gene_names)
+        return pd.DataFrame(self._gene_matrix, index=self._obs_names, columns=self._gene_names)
 
     def metabolomics_df(self) -> pd.DataFrame:
         return self._metabolomics_df.copy(deep=False)
@@ -121,6 +124,32 @@ class MultiOmicsEngine:
             + 0.10 * group["ScreenScore"]
         ).clip(0.0, 1.0)
         return group
+
+    @staticmethod
+    def _compute_group_weights_vectorized(gene_scores_df: pd.DataFrame) -> pd.DataFrame:
+        if gene_scores_df.empty:
+            return gene_scores_df
+
+        result = gene_scores_df.copy()
+        group_sizes = result.groupby("Metabolite", sort=False)["Metabolite"].transform("size").astype(float)
+        denom = (group_sizes - 1.0).where(group_sizes > 1.0, 1.0)
+
+        rra_rank = result["RRARank"].astype(float)
+        result["RRAWeight"] = np.where(
+            group_sizes <= 1.0,
+            1.0,
+            1.0 - (rra_rank - 1.0) / denom,
+        )
+        result["CorrScore"] = np.maximum(result["PearsonR"].abs(), result["SpearmanRho"].abs()).clip(0.0, 1.0)
+        result["ModelScore"] = (result["ModelSupportCount"].astype(float) / 2.0).clip(0.0, 1.0)
+        result["ScreenScore"] = (result["ScreenSupportCount"].astype(float) / 3.0).clip(0.0, 1.0)
+        result["EdgeWeight"] = (
+            0.45 * result["RRAWeight"]
+            + 0.25 * result["CorrScore"]
+            + 0.20 * result["ModelScore"]
+            + 0.10 * result["ScreenScore"]
+        ).clip(0.0, 1.0)
+        return result
 
     @staticmethod
     def _network_edge_columns() -> list[str]:
@@ -175,7 +204,8 @@ class MultiOmicsEngine:
         total_df["EdgeTier"] = "total"
 
         high_conf_mask = (
-            (base_df["TargetK"] > 0)
+            total_mask
+            & (base_df["TargetK"] > 0)
             & (base_df["RRARank"] <= base_df["TargetK"])
             & ((base_df["ModelSupportCount"] == 2) | (base_df["ScreenSupportCount"] >= 2))
         )
@@ -306,18 +336,19 @@ class MultiOmicsEngine:
         summary["TargetK"] = base_group["TargetK"].max().reindex(metabolites).fillna(0).astype(int)
         summary["MeanScreenSupportCount"] = base_group["ScreenSupportCount"].mean().reindex(metabolites).fillna(0.0)
         summary["MeanModelSupportCount"] = base_group["ModelSupportCount"].mean().reindex(metabolites).fillna(0.0)
-        summary["DualModelEdges"] = (
-            base_group.apply(lambda df: int((df["ModelSupportCount"] == 2).sum()))
-            .reindex(metabolites)
-            .fillna(0)
-            .astype(int)
+
+        dual_model_counts = (
+            gene_scores_df.assign(_DualModel=(gene_scores_df["ModelSupportCount"] == 2).astype(np.int8))
+            .groupby("Metabolite", sort=False)["_DualModel"]
+            .sum()
         )
-        summary["MultiScreenEdges"] = (
-            base_group.apply(lambda df: int((df["ScreenSupportCount"] >= 2).sum()))
-            .reindex(metabolites)
-            .fillna(0)
-            .astype(int)
+        multi_screen_counts = (
+            gene_scores_df.assign(_MultiScreen=(gene_scores_df["ScreenSupportCount"] >= 2).astype(np.int8))
+            .groupby("Metabolite", sort=False)["_MultiScreen"]
+            .sum()
         )
+        summary["DualModelEdges"] = dual_model_counts.reindex(metabolites).fillna(0).astype(int)
+        summary["MultiScreenEdges"] = multi_screen_counts.reindex(metabolites).fillna(0).astype(int)
 
         if total_group is not None:
             summary["TotalAssociationEdges"] = total_group.size().reindex(metabolites).fillna(0).astype(int)
@@ -340,17 +371,26 @@ class MultiOmicsEngine:
         )
         return summary
 
+    @staticmethod
+    def _vectorized_sign_labels(df: pd.DataFrame) -> np.ndarray:
+        pearson = df["PearsonR"].to_numpy(dtype=float, copy=False)
+        spearman = df["SpearmanRho"].to_numpy(dtype=float, copy=False)
+
+        pearson_abs = np.abs(np.nan_to_num(pearson, nan=0.0))
+        spearman_abs = np.abs(np.nan_to_num(spearman, nan=0.0))
+        basis = np.where(pearson_abs >= spearman_abs, np.nan_to_num(pearson, nan=0.0), np.nan_to_num(spearman, nan=0.0))
+        return np.where(basis >= 0.0, "positive", "negative")
+
     def _run_association_analysis(self) -> None:
-        metabolites = list(self.adata.uns["metabolite_names"])
         per_metabolite_tables: List[pd.DataFrame] = []
 
         logger.info(
             "Processing %d metabolites using three-way screening + ElasticNet/XGBoost/RRA.",
-            len(metabolites),
+            len(self._metabolite_names),
         )
 
-        for metab_name in tqdm(metabolites, desc="Association Modeling"):
-            y = self._metabolomics_df[metab_name].to_numpy(dtype=np.float32, copy=False)
+        for metab_idx, metab_name in enumerate(tqdm(self._metabolite_names, desc="Association Modeling")):
+            y = self._metabolomics_matrix[:, metab_idx]
 
             screen_df = selectors.screen_genes_three_way(
                 self._gene_matrix,
@@ -361,14 +401,13 @@ class MultiOmicsEngine:
             if screen_df.empty:
                 continue
 
-            candidate_genes = screen_df.index.astype(str).tolist()
-            candidate_positions = self._gene_index.get_indexer(candidate_genes)
+            candidate_positions = self._gene_index.get_indexer(screen_df.index)
             candidate_positions = candidate_positions[candidate_positions >= 0]
             if len(candidate_positions) == 0:
                 continue
 
-            X_sub = self._gene_matrix[:, candidate_positions]
             feature_names = self._gene_names[candidate_positions]
+            X_sub = self._gene_matrix[:, candidate_positions]
 
             model_df, target_k = selectors.run_association_models(
                 X_sub,
@@ -378,14 +417,14 @@ class MultiOmicsEngine:
             )
 
             combined_df = (
-                screen_df.reindex(feature_names)
-                .join(model_df.reindex(feature_names), how="left")
+                screen_df.loc[feature_names]
+                .join(model_df, how="left")
                 .reset_index()
                 .rename(columns={"index": "Gene"})
             )
             combined_df.insert(0, "Metabolite", str(metab_name))
             combined_df["TargetK"] = int(target_k)
-            combined_df["Sign"] = combined_df.apply(self._infer_association_sign, axis=1)
+            combined_df["Sign"] = self._vectorized_sign_labels(combined_df)
             per_metabolite_tables.append(combined_df)
 
         if not per_metabolite_tables:
@@ -397,11 +436,7 @@ class MultiOmicsEngine:
             return
 
         gene_scores_df = pd.concat(per_metabolite_tables, ignore_index=True)
-        gene_scores_df = (
-            gene_scores_df.groupby("Metabolite", group_keys=False, sort=False)
-            .apply(self._compute_group_weights)
-            .reset_index(drop=True)
-        )
+        gene_scores_df = self._compute_group_weights_vectorized(gene_scores_df)
 
         gene_scores_df = gene_scores_df.loc[
             :,
@@ -480,15 +515,16 @@ class MultiOmicsEngine:
             metabolite_summary.to_csv(out_dir / TABLE_FILE_PREFIXES["metabolite_summary"], index=False)
 
         if self.config.export_cytoscape:
-            cytoscape_df = pd.concat(
-                [
+            export_frames = [
+                df
+                for df in (
                     total_network_df if isinstance(total_network_df, pd.DataFrame) else pd.DataFrame(),
                     high_confidence_network_df if isinstance(high_confidence_network_df, pd.DataFrame) else pd.DataFrame(),
-                ],
-                ignore_index=True,
-            )
-            if not cytoscape_df.empty:
-                cytoscape_df = cytoscape_df.rename(
+                )
+                if not df.empty
+            ]
+            if export_frames:
+                cytoscape_df = pd.concat(export_frames, ignore_index=True).rename(
                     columns={
                         "Source": "source",
                         "Target": "target",

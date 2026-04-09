@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -21,7 +20,7 @@ class AnalysisConfig:
     random_state: int = 42
 
     screen_top_k_per_method: int = 1000
-    use_fdr: bool = True
+    use_fdr: bool = False
     fdr_alpha: float = 0.05
 
     xgb_n_estimators: int = 200
@@ -47,7 +46,6 @@ class AnalysisConfig:
     support_plot_top_metabolites: int = 20
     top_key_genes_plot_n: int = 20
 
-    verbose: bool = False
     n_threads: int = -1
     cv_folds: int = 5
     generate_reports: bool = True
@@ -56,7 +54,6 @@ class AnalysisConfig:
     export_svg: bool = True
     export_png: bool = True
     export_cytoscape: bool = True
-    verbose_outputs: bool = False
     save_h5ad: bool = True
     log_level: str = "INFO"
 
@@ -141,9 +138,6 @@ class AnalysisConfig:
             return 0
         target_k = max(int(self.min_features), int(n_samples * self.selection_ratio))
         return min(target_k, int(self.max_features), int(n_features))
-
-    def diagnostics_enabled(self) -> bool:
-        return bool(self.verbose_outputs or self.log_level == "DEBUG")
 
     def to_dict(self) -> Dict[str, object]:
         return asdict(self)

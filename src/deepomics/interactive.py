@@ -126,9 +126,9 @@ def _build_network_payload(engine, tier: str, max_edges: int) -> dict[str, Any] 
 
     node_ids = {node["id"] for node in nodes}
     edges = []
-    for edge_idx, (_, row) in enumerate(ranked.reset_index(drop=True).iterrows(), start=1):
-        source = f"gene::{str(row['Gene'])}"
-        target = f"metab::{str(row['Metabolite'])}"
+    for edge_idx, row in enumerate(ranked.reset_index(drop=True).itertuples(index=False), start=1):
+        source = f"gene::{str(row.Gene)}"
+        target = f"metab::{str(row.Metabolite)}"
         if source not in node_ids or target not in node_ids:
             continue
 
@@ -137,17 +137,17 @@ def _build_network_payload(engine, tier: str, max_edges: int) -> dict[str, Any] 
                 "id": f"edge_{edge_idx:03d}",
                 "source": source,
                 "target": target,
-                "weight": float(row["EdgeWeight"]),
-                "modelSupport": int(row["ModelSupportCount"]),
-                "screenSupport": int(row["ScreenSupportCount"]),
-                "color": PALETTE["edge_positive"] if str(row["Sign"]) == "positive" else PALETTE["edge_negative"],
-                "width": float(0.8 + 4.2 * float(row["EdgeWeight"])),
+                "weight": float(row.EdgeWeight),
+                "modelSupport": int(row.ModelSupportCount),
+                "screenSupport": int(row.ScreenSupportCount),
+                "color": PALETTE["edge_positive"] if str(row.Sign) == "positive" else PALETTE["edge_negative"],
+                "width": float(0.8 + 4.2 * float(row.EdgeWeight)),
                 "opacity": float(
                     min(
                         0.95,
                         0.20
-                        + 0.35 * (float(row["ModelSupportCount"]) / 2.0)
-                        + 0.20 * (float(row["ScreenSupportCount"]) / 3.0),
+                        + 0.35 * (float(row.ModelSupportCount) / 2.0)
+                        + 0.20 * (float(row.ScreenSupportCount) / 3.0),
                     )
                 ),
             }

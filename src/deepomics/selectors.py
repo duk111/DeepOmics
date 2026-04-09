@@ -204,20 +204,40 @@ def screen_genes_three_way(
     ).replace([np.inf, -np.inf], np.nan)
 
     top_k = max(1, int(getattr(config, "screen_top_k_per_method", 1000)))
+    use_fdr = bool(getattr(config, "use_fdr", False))
+    fdr_alpha = float(getattr(config, "fdr_alpha", 0.05))
+
+    if use_fdr:
+        pcc_mask = screen_df["PearsonFDR"].fillna(1.0) <= fdr_alpha
+        pcc_primary = screen_df.loc[pcc_mask, "PearsonR"]
+        pcc_secondary = screen_df.loc[pcc_mask, "PearsonFDR"]
+    else:
+        pcc_primary = screen_df["PearsonR"]
+        pcc_secondary = screen_df["PearsonFDR"]
+
     pcc_genes = set(
         _top_names_from_series(
-            screen_df["PearsonR"],
+            pcc_primary,
             top_k,
             absolute=True,
-            secondary=screen_df["PearsonFDR"],
+            secondary=pcc_secondary,
         )
     )
+
+    if use_fdr:
+        spearman_mask = screen_df["SpearmanFDR"].fillna(1.0) <= fdr_alpha
+        spearman_primary = screen_df.loc[spearman_mask, "SpearmanRho"]
+        spearman_secondary = screen_df.loc[spearman_mask, "SpearmanFDR"]
+    else:
+        spearman_primary = screen_df["SpearmanRho"]
+        spearman_secondary = screen_df["SpearmanFDR"]
+
     spearman_genes = set(
         _top_names_from_series(
-            screen_df["SpearmanRho"],
+            spearman_primary,
             top_k,
             absolute=True,
-            secondary=screen_df["SpearmanFDR"],
+            secondary=spearman_secondary,
         )
     )
     mi_genes = set(_top_names_from_series(screen_df["MIScore"], top_k, absolute=False))
@@ -227,9 +247,10 @@ def screen_genes_three_way(
         return screen_df.iloc[0:0].copy()
 
     candidate_df = screen_df.loc[sorted(candidate_genes)].copy()
-    candidate_df["In_PCC"] = candidate_df.index.to_series().isin(pcc_genes).astype(int)
-    candidate_df["In_Spearman"] = candidate_df.index.to_series().isin(spearman_genes).astype(int)
-    candidate_df["In_MI"] = candidate_df.index.to_series().isin(mi_genes).astype(int)
+    candidate_index = candidate_df.index.to_series()
+    candidate_df["In_PCC"] = candidate_index.isin(pcc_genes).astype(int)
+    candidate_df["In_Spearman"] = candidate_index.isin(spearman_genes).astype(int)
+    candidate_df["In_MI"] = candidate_index.isin(mi_genes).astype(int)
     candidate_df["ScreenSupportCount"] = (
         candidate_df["In_PCC"] + candidate_df["In_Spearman"] + candidate_df["In_MI"]
     ).astype(int)
@@ -244,6 +265,47 @@ def screen_genes_three_way(
         kind="mergesort",
     ).drop(columns=["MaxAbsCorr"])
     return candidate_df
+
+
+def _fit_elastic_net_prepared(
+    X_work: np.ndarray,
+    y_arr: np.ndarray,
+    config,
+) -> np.ndarray:
+    try:
+        if config.elastic_net_alpha_search and X_work.shape[0] >= 4:
+            cv = _resolved_cv_folds(X_work.shape[0], config.cv_folds)
+            model = ElasticNetCV(
+                l1_ratio=config.elastic_net_l1_ratio_grid,
+                cv=cv,
+                random_state=config.random_state,
+                max_iter=config.elastic_net_max_iter,
+                n_jobs=1,
+            )
+        else:
+            model = ElasticNet(
+                alpha=config.elastic_net_fixed_alpha,
+                l1_ratio=config.elastic_net_l1_ratio,
+                random_state=config.random_state,
+                max_iter=config.elastic_net_max_iter,
+            )
+
+        model.fit(X_work, y_arr)
+        return np.abs(np.asarray(model.coef_, dtype=float))
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Elastic Net fitting failed; falling back to fixed-alpha mode. Reason: %s", exc)
+        try:
+            fallback_model = ElasticNet(
+                alpha=config.elastic_net_fixed_alpha,
+                l1_ratio=config.elastic_net_l1_ratio,
+                random_state=config.random_state,
+                max_iter=config.elastic_net_max_iter,
+            )
+            fallback_model.fit(X_work, y_arr)
+            return np.abs(np.asarray(fallback_model.coef_, dtype=float))
+        except Exception as fallback_exc:  # pragma: no cover
+            logger.warning("Elastic Net fallback also failed. Reason: %s", fallback_exc)
+            return np.zeros(X_work.shape[1], dtype=float)
 
 
 def run_elastic_net(
@@ -268,44 +330,36 @@ def run_elastic_net(
     if np.nanstd(y_arr, ddof=1) == 0 or X_work.shape[0] < 3:
         return _zero_score_series(names)
 
-    try:
-        if config.elastic_net_alpha_search and X_work.shape[0] >= 4:
-            cv = _resolved_cv_folds(X_work.shape[0], config.cv_folds)
-            model = ElasticNetCV(
-                l1_ratio=config.elastic_net_l1_ratio_grid,
-                cv=cv,
-                random_state=config.random_state,
-                max_iter=config.elastic_net_max_iter,
-                n_jobs=1,
-            )
-        else:
-            model = ElasticNet(
-                alpha=config.elastic_net_fixed_alpha,
-                l1_ratio=config.elastic_net_l1_ratio,
-                random_state=config.random_state,
-                max_iter=config.elastic_net_max_iter,
-            )
-
-        model.fit(X_work, y_arr)
-        coef = np.abs(np.asarray(model.coef_, dtype=float))
-    except Exception as exc:  # pragma: no cover
-        logger.warning("Elastic Net fitting failed; falling back to fixed-alpha mode. Reason: %s", exc)
-        try:
-            fallback_model = ElasticNet(
-                alpha=config.elastic_net_fixed_alpha,
-                l1_ratio=config.elastic_net_l1_ratio,
-                random_state=config.random_state,
-                max_iter=config.elastic_net_max_iter,
-            )
-            fallback_model.fit(X_work, y_arr)
-            coef = np.abs(np.asarray(fallback_model.coef_, dtype=float))
-        except Exception as fallback_exc:  # pragma: no cover
-            logger.warning("Elastic Net fallback also failed. Reason: %s", fallback_exc)
-            return _zero_score_series(names)
+    coef = _fit_elastic_net_prepared(X_work, y_arr, config)
 
     result = _zero_score_series(names)
     result.loc[valid_names] = coef
     return result
+
+
+def _fit_xgboost_prepared(
+    X_work: np.ndarray,
+    y_arr: np.ndarray,
+    config,
+) -> np.ndarray:
+    try:
+        model = XGBRegressor(
+            n_estimators=config.xgb_n_estimators,
+            max_depth=config.xgb_max_depth,
+            learning_rate=config.xgb_learning_rate,
+            subsample=config.xgb_subsample,
+            colsample_bytree=config.xgb_colsample_bytree,
+            objective="reg:squarederror",
+            random_state=config.random_state,
+            n_jobs=config.resolved_threads(),
+            tree_method="hist",
+            verbosity=0,
+        )
+        model.fit(X_work, y_arr)
+        return np.asarray(model.feature_importances_, dtype=float)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("XGBoost fitting failed; using zero scores for this metabolite. Reason: %s", exc)
+        return np.zeros(X_work.shape[1], dtype=float)
 
 
 def run_xgboost(
@@ -329,24 +383,7 @@ def run_xgboost(
     X_work = X_arr[:, valid_mask]
     valid_names = names[valid_mask]
 
-    try:
-        model = XGBRegressor(
-            n_estimators=config.xgb_n_estimators,
-            max_depth=config.xgb_max_depth,
-            learning_rate=config.xgb_learning_rate,
-            subsample=config.xgb_subsample,
-            colsample_bytree=config.xgb_colsample_bytree,
-            objective="reg:squarederror",
-            random_state=config.random_state,
-            n_jobs=config.resolved_threads(),
-            tree_method="hist",
-            verbosity=0,
-        )
-        model.fit(X_work, y_arr)
-        importance = np.asarray(model.feature_importances_, dtype=float)
-    except Exception as exc:  # pragma: no cover
-        logger.warning("XGBoost fitting failed; using zero scores for this metabolite. Reason: %s", exc)
-        return _zero_score_series(names)
+    importance = _fit_xgboost_prepared(X_work, y_arr, config)
 
     result = _zero_score_series(names)
     result.loc[valid_names] = importance
@@ -469,8 +506,17 @@ def run_association_models(
         n_features=int(valid_mask.sum()),
     )
 
-    s_enet = run_elastic_net(X_arr, y_arr, config, feature_names=names).reindex(names).fillna(0.0)
-    s_xgb = run_xgboost(X_arr, y_arr, config, feature_names=names).reindex(names).fillna(0.0)
+    X_work = X_arr[:, valid_mask]
+    enet_coef = _fit_elastic_net_prepared(X_work, y_arr, config)
+    xgb_importance = _fit_xgboost_prepared(X_work, y_arr, config)
+
+    enet_values = np.zeros(len(names), dtype=float)
+    xgb_values = np.zeros(len(names), dtype=float)
+    enet_values[valid_mask] = enet_coef
+    xgb_values[valid_mask] = xgb_importance
+
+    s_enet = pd.Series(enet_values, index=pd.Index(names, name="Gene"), dtype=float)
+    s_xgb = pd.Series(xgb_values, index=pd.Index(names, name="Gene"), dtype=float)
 
     enet_rank = _ordinal_rank_desc(s_enet)
     xgb_rank = _ordinal_rank_desc(s_xgb)

@@ -237,20 +237,20 @@ def _plot_association_network(edge_df: pd.DataFrame, title: str, save_stem: str 
     gene_pos = {gene: (gene_x, float(y)) for gene, y in zip(genes, gene_y)}
     metabolite_pos = {metab: (metabolite_x, float(y)) for metab, y in zip(metabolites, metabolite_y)}
 
-    for _, row in edge_df.iterrows():
-        gene = str(row["Gene"])
-        metab = str(row["Metabolite"])
+    for row in edge_df.itertuples(index=False):
+        gene = str(row.Gene)
+        metab = str(row.Metabolite)
         if gene not in gene_pos or metab not in metabolite_pos:
             continue
         x1, y1 = gene_pos[gene]
         x2, y2 = metabolite_pos[metab]
-        color = PALETTE["edge_positive"] if str(row["Sign"]) == "positive" else PALETTE["edge_negative"]
-        width = 0.8 + 4.2 * float(row["EdgeWeight"])
+        color = PALETTE["edge_positive"] if str(row.Sign) == "positive" else PALETTE["edge_negative"]
+        width = 0.8 + 4.2 * float(row.EdgeWeight)
         opacity = min(
             0.95,
             0.20
-            + 0.35 * (float(row["ModelSupportCount"]) / 2.0)
-            + 0.20 * (float(row["ScreenSupportCount"]) / 3.0),
+            + 0.35 * (float(row.ModelSupportCount) / 2.0)
+            + 0.20 * (float(row.ScreenSupportCount) / 3.0),
         )
         ax.plot([x1, x2], [y1, y2], color=color, linewidth=width, alpha=opacity, solid_capstyle="round", zorder=1)
 
@@ -328,9 +328,9 @@ def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int 
     fig.subplots_adjust(hspace=0.50, wspace=0.35)
     axes = np.atleast_1d(axes).ravel()
 
-    for ax, (_, row) in zip(axes, ranked.iterrows()):
-        gene = str(row["Gene"])
-        metab = str(row["Metabolite"])
+    for ax, row in zip(axes, ranked.itertuples(index=False)):
+        gene = str(row.Gene)
+        metab = str(row.Metabolite)
         if gene not in gene_df.columns or metab not in metab_df.columns:
             ax.axis("off")
             continue
@@ -354,10 +354,10 @@ def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int 
             0.03,
             0.97,
             (
-                f"EdgeWeight = {float(row['EdgeWeight']):.3f}\n"
-                f"RRARank = {int(row['RRARank'])}\n"
-                f"ModelSupport = {int(row['ModelSupportCount'])}\n"
-                f"ScreenSupport = {int(row['ScreenSupportCount'])}"
+                f"EdgeWeight = {float(row.EdgeWeight):.3f}\n"
+                f"RRARank = {int(row.RRARank)}\n"
+                f"ModelSupport = {int(row.ModelSupportCount)}\n"
+                f"ScreenSupport = {int(row.ScreenSupportCount)}"
             ),
             transform=ax.transAxes,
             ha="left",
@@ -449,7 +449,7 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         "## Main Tables",
         f"- `{TABLE_FILE_PREFIXES['gene_scores']}`: complete metabolite-level gene scoring table after three-way screening and two-model ranking.",
         f"- `{TABLE_FILE_PREFIXES['total_network']}`: total gene-metabolite association network from ElasticNet top-k union XGBoost top-k.",
-        f"- `{TABLE_FILE_PREFIXES['high_confidence_network']}`: RRA-driven high-confidence association network.",
+        f"- `{TABLE_FILE_PREFIXES['high_confidence_network']}`: high-confidence subnetwork of the total association network after RRA and multi-evidence filtering.",
         f"- `{TABLE_FILE_PREFIXES['key_gene_summary']}`: merged key-gene summary across metabolites.",
         f"- `{TABLE_FILE_PREFIXES['metabolite_summary']}`: metabolite-level candidate and network summary.",
         f"- `{TABLE_FILE_PREFIXES['cytoscape_network']}`: Cytoscape-ready edge table with updated association fields.",
@@ -481,7 +481,7 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
     table_rows = "".join([
         f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['gene_scores'])}</code></td><td>Complete metabolite-level gene scoring table after three-way screening and two-model ranking.</td></tr>",
         f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['total_network'])}</code></td><td>Total gene-metabolite association network from ElasticNet top-k union XGBoost top-k.</td></tr>",
-        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['high_confidence_network'])}</code></td><td>RRA-driven high-confidence association network.</td></tr>",
+        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['high_confidence_network'])}</code></td><td>High-confidence subnetwork of the total association network after RRA and multi-evidence filtering.</td></tr>",
         f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['key_gene_summary'])}</code></td><td>Merged key-gene summary across metabolites.</td></tr>",
         f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['metabolite_summary'])}</code></td><td>Metabolite-level candidate and network summary.</td></tr>",
         f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['cytoscape_network'])}</code></td><td>Cytoscape-ready edge table with updated association fields.</td></tr>",
@@ -588,7 +588,7 @@ def generate_report_plots(engine, cfg) -> None:
         "Recommended downstream usage:\n"
         f"1. Use {TABLE_FILE_PREFIXES['gene_scores']} for full metabolite-level candidate scoring.\n"
         f"2. Use {TABLE_FILE_PREFIXES['total_network']} for broad association recovery.\n"
-        f"3. Use {TABLE_FILE_PREFIXES['high_confidence_network']} for manuscript-grade network figures.\n"
+        f"3. Use {TABLE_FILE_PREFIXES['high_confidence_network']} for the stricter high-confidence subset of the total network.\n"
         f"4. Use {TABLE_FILE_PREFIXES['cytoscape_network']} for Cytoscape import.\n"
         "5. Use DeepOmics_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
     )
