@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy.stats import beta, t
-from sklearn.feature_selection import RFE
+from scipy.stats import beta, rankdata, t
+from sklearn.feature_selection import mutual_info_regression
 from sklearn.linear_model import ElasticNet, ElasticNetCV
-from sklearn.svm import LinearSVR
 from xgboost import XGBRegressor
 
 from .utils import get_logger
@@ -37,21 +36,6 @@ def _as_array_and_names(
     return array, names
 
 
-def _empty_score_table(index: Sequence[str]) -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "ElasticNetScore": pd.Series(0.0, index=index, dtype=float),
-            "SVMRFEscore": pd.Series(0.0, index=index, dtype=float),
-            "XGBoostScore": pd.Series(0.0, index=index, dtype=float),
-            "BordaScore": pd.Series(0.0, index=index, dtype=float),
-            "RRAScore": pd.Series(1.0, index=index, dtype=float),
-            "BordaRank": pd.Series(np.arange(1, len(index) + 1), index=index, dtype=int),
-            "RRARank": pd.Series(np.arange(1, len(index) + 1), index=index, dtype=int),
-        },
-        index=pd.Index(index, name="Gene"),
-    )
-
-
 def _zero_score_series(names: Sequence[str]) -> pd.Series:
     return pd.Series(0.0, index=pd.Index(names, dtype=str), dtype=float)
 
@@ -70,24 +54,40 @@ def _resolved_cv_folds(n_samples: int, requested_folds: int) -> int:
     return min(max_safe_folds, max(2, requested_folds))
 
 
-def filter_by_pcc(
-    X: pd.DataFrame | np.ndarray,
-    y: pd.Series | np.ndarray,
-    config,
-    feature_names: Optional[Sequence[str]] = None,
-    return_stats: bool = False,
-):
-    """Perform vectorized Pearson correlation screening."""
-    X_arr, names = _as_array_and_names(X, feature_names=feature_names)
-    y_arr = np.asarray(y, dtype=np.float32).reshape(-1)
+def _bh_fdr(p_values: np.ndarray) -> np.ndarray:
+    p = np.asarray(p_values, dtype=float)
+    if p.ndim != 1:
+        raise ValueError("p_values must be a 1D array.")
+    if p.size == 0:
+        return p.copy()
 
-    if X_arr.shape[0] != y_arr.shape[0]:
-        raise ValueError("X and y must contain the same number of samples.")
-    if X_arr.shape[0] < 3:
-        raise ValueError("At least 3 samples are required for Pearson correlation screening.")
+    result = np.full_like(p, np.nan, dtype=float)
+    valid_mask = np.isfinite(p)
+    if not np.any(valid_mask):
+        return result
 
+    valid_p = np.clip(p[valid_mask], 0.0, 1.0)
+    order = np.argsort(valid_p, kind="mergesort")
+    ranked = valid_p[order]
+    n = ranked.size
+    adjusted = ranked * n / np.arange(1, n + 1, dtype=float)
+    adjusted = np.minimum.accumulate(adjusted[::-1])[::-1]
+    adjusted = np.clip(adjusted, 0.0, 1.0)
+
+    back = np.empty_like(adjusted)
+    back[order] = adjusted
+    result[valid_mask] = back
+    return result
+
+
+def _vectorized_pearson(X_arr: np.ndarray, y_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     X64 = np.asarray(X_arr, dtype=np.float64)
-    y64 = np.asarray(y_arr, dtype=np.float64)
+    y64 = np.asarray(y_arr, dtype=np.float64).reshape(-1)
+
+    if X64.shape[0] != y64.shape[0]:
+        raise ValueError("X and y must contain the same number of samples.")
+    if X64.shape[0] < 3:
+        raise ValueError("At least 3 samples are required for correlation screening.")
 
     X_centered = X64 - X64.mean(axis=0, keepdims=True)
     y_centered = y64 - y64.mean()
@@ -101,41 +101,149 @@ def filter_by_pcc(
         correlations[valid] = (X_centered[:, valid].T @ y_centered) / denom
 
     correlations = np.clip(correlations, -1.0, 1.0)
-    t_stat = correlations * np.sqrt((X64.shape[0] - 2) / np.maximum(1.0 - correlations**2, 1e-12))
+    denom = np.maximum(1.0 - correlations**2, 1e-12)
+    t_stat = correlations * np.sqrt((X64.shape[0] - 2) / denom)
     p_values = 2.0 * (1.0 - t.cdf(np.abs(t_stat), df=X64.shape[0] - 2))
+    return correlations.astype(float), np.clip(p_values.astype(float), 0.0, 1.0)
 
-    stats_df = (
-        pd.DataFrame({"R": correlations, "AbsR": np.abs(correlations), "P": p_values}, index=names)
-        .replace([np.inf, -np.inf], np.nan)
-        .dropna()
-    )
 
-    if stats_df.empty:
-        return ([], stats_df) if return_stats else []
+def _vectorized_spearman(X_arr: np.ndarray, y_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    X_rank = np.apply_along_axis(rankdata, 0, np.asarray(X_arr, dtype=np.float64))
+    y_rank = rankdata(np.asarray(y_arr, dtype=np.float64).reshape(-1))
+    return _vectorized_pearson(X_rank, y_rank)
 
-    if config.use_fdr:
-        ranked = stats_df["P"].sort_values(kind="stable")
-        n_tests = max(1, len(ranked))
-        bh_threshold = config.fdr_alpha * (np.arange(1, n_tests + 1) / n_tests)
-        reject = ranked.to_numpy(dtype=float) <= bh_threshold
-        max_idx = int(np.where(reject)[0].max()) if reject.any() else -1
-        p_cutoff = float(ranked.iloc[max_idx]) if max_idx >= 0 else -np.inf
-        mask = (stats_df["P"] <= p_cutoff) & (stats_df["AbsR"] >= config.pcc_r_threshold)
+
+def _top_names_from_series(
+    series: pd.Series,
+    top_k: int,
+    *,
+    absolute: bool = False,
+    secondary: Optional[pd.Series] = None,
+) -> list[str]:
+    if series.empty:
+        return []
+
+    work = pd.DataFrame({"Primary": series.astype(float)})
+    work["_GeneName"] = work.index.astype(str)
+    work["PrimarySort"] = work["Primary"].abs() if absolute else work["Primary"]
+
+    if secondary is not None:
+        work["Secondary"] = secondary.reindex(work.index).astype(float).fillna(np.inf)
+        sort_cols = ["PrimarySort", "Secondary", "_GeneName"]
+        ascending = [False, True, True]
     else:
-        mask = (stats_df["P"] <= config.pcc_p_threshold) & (stats_df["AbsR"] >= config.pcc_r_threshold)
+        sort_cols = ["PrimarySort", "_GeneName"]
+        ascending = [False, True]
 
-    selected_df = stats_df.loc[mask].sort_values(["AbsR", "P"], ascending=[False, True])
+    ranked = work.sort_values(sort_cols, ascending=ascending, kind="mergesort")
+    return ranked.head(max(1, int(top_k))).index.astype(str).tolist()
 
-    if config.max_candidate_genes is not None and len(selected_df) > config.max_candidate_genes:
-        logger.info(
-            "PCC prefilter selected %d genes; retaining top %d by |r| for memory stability.",
-            len(selected_df),
-            config.max_candidate_genes,
+
+def screen_genes_three_way(
+    X: pd.DataFrame | np.ndarray,
+    y: pd.Series | np.ndarray,
+    config,
+    feature_names: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    """Three-way gene screening using Pearson, Spearman, and mutual information."""
+    X_arr, names = _as_array_and_names(X, feature_names=feature_names)
+    y_arr = np.asarray(y, dtype=np.float32).reshape(-1)
+
+    if X_arr.shape[0] != y_arr.shape[0]:
+        raise ValueError("X and y must contain the same number of samples.")
+    if X_arr.shape[0] < 3:
+        raise ValueError("At least 3 samples are required for screening.")
+    if X_arr.shape[1] == 0:
+        return pd.DataFrame(
+            columns=[
+                "PearsonR",
+                "PearsonP",
+                "PearsonFDR",
+                "SpearmanRho",
+                "SpearmanP",
+                "SpearmanFDR",
+                "MIScore",
+                "In_PCC",
+                "In_Spearman",
+                "In_MI",
+                "ScreenSupportCount",
+            ],
+            index=pd.Index([], name="Gene"),
         )
-        selected_df = selected_df.head(config.max_candidate_genes)
 
-    selected_names = selected_df.index.tolist()
-    return (selected_names, selected_df) if return_stats else selected_names
+    pearson_r, pearson_p = _vectorized_pearson(X_arr, y_arr)
+    pearson_fdr = _bh_fdr(pearson_p)
+
+    spearman_rho, spearman_p = _vectorized_spearman(X_arr, y_arr)
+    spearman_fdr = _bh_fdr(spearman_p)
+
+    valid_mask = _safe_nonconstant_mask(X_arr)
+    mi_scores = np.zeros(X_arr.shape[1], dtype=float)
+    if np.any(valid_mask) and np.nanstd(y_arr, ddof=1) > 0:
+        try:
+            mi_scores_valid = mutual_info_regression(
+                np.asarray(X_arr[:, valid_mask], dtype=np.float64),
+                np.asarray(y_arr, dtype=np.float64),
+                random_state=config.random_state,
+            )
+            mi_scores[valid_mask] = np.asarray(mi_scores_valid, dtype=float)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Mutual information screening failed; MI scores will be zero. Reason: %s", exc)
+
+    screen_df = pd.DataFrame(
+        {
+            "PearsonR": pearson_r,
+            "PearsonP": pearson_p,
+            "PearsonFDR": pearson_fdr,
+            "SpearmanRho": spearman_rho,
+            "SpearmanP": spearman_p,
+            "SpearmanFDR": spearman_fdr,
+            "MIScore": mi_scores,
+        },
+        index=pd.Index(names, name="Gene"),
+    ).replace([np.inf, -np.inf], np.nan)
+
+    top_k = max(1, int(getattr(config, "screen_top_k_per_method", 1000)))
+    pcc_genes = set(
+        _top_names_from_series(
+            screen_df["PearsonR"],
+            top_k,
+            absolute=True,
+            secondary=screen_df["PearsonFDR"],
+        )
+    )
+    spearman_genes = set(
+        _top_names_from_series(
+            screen_df["SpearmanRho"],
+            top_k,
+            absolute=True,
+            secondary=screen_df["SpearmanFDR"],
+        )
+    )
+    mi_genes = set(_top_names_from_series(screen_df["MIScore"], top_k, absolute=False))
+
+    candidate_genes = pcc_genes | spearman_genes | mi_genes
+    if not candidate_genes:
+        return screen_df.iloc[0:0].copy()
+
+    candidate_df = screen_df.loc[sorted(candidate_genes)].copy()
+    candidate_df["In_PCC"] = candidate_df.index.to_series().isin(pcc_genes).astype(int)
+    candidate_df["In_Spearman"] = candidate_df.index.to_series().isin(spearman_genes).astype(int)
+    candidate_df["In_MI"] = candidate_df.index.to_series().isin(mi_genes).astype(int)
+    candidate_df["ScreenSupportCount"] = (
+        candidate_df["In_PCC"] + candidate_df["In_Spearman"] + candidate_df["In_MI"]
+    ).astype(int)
+
+    candidate_df["MaxAbsCorr"] = np.maximum(
+        candidate_df["PearsonR"].abs(),
+        candidate_df["SpearmanRho"].abs(),
+    )
+    candidate_df = candidate_df.sort_values(
+        ["ScreenSupportCount", "MaxAbsCorr", "MIScore", "PearsonFDR", "SpearmanFDR"],
+        ascending=[False, False, False, True, True],
+        kind="mergesort",
+    ).drop(columns=["MaxAbsCorr"])
+    return candidate_df
 
 
 def run_elastic_net(
@@ -200,57 +308,12 @@ def run_elastic_net(
     return result
 
 
-def run_svm_rfe(
-    X: pd.DataFrame | np.ndarray,
-    y: pd.Series | np.ndarray,
-    target_k: int,
-    config,
-    feature_names: Optional[Sequence[str]] = None,
-) -> pd.Series:
-    X_arr, names = _as_array_and_names(X, feature_names=feature_names)
-    y_arr = np.asarray(y, dtype=np.float32).reshape(-1)
-
-    if X_arr.shape[1] == 0:
-        return pd.Series(dtype=float)
-
-    valid_mask = _safe_nonconstant_mask(X_arr)
-    if not np.any(valid_mask):
-        return _zero_score_series(names)
-    if np.nanstd(y_arr, ddof=1) == 0:
-        return _zero_score_series(names)
-
-    X_work = X_arr[:, valid_mask]
-    valid_names = names[valid_mask]
-    safe_target_k = min(max(1, target_k), X_work.shape[1])
-
-    if X_work.shape[1] <= safe_target_k:
-        result = _zero_score_series(names)
-        result.loc[valid_names] = 1.0
-        return result
-
-    try:
-        estimator = LinearSVR(random_state=config.random_state, max_iter=5000)
-        step = max(1, int(X_work.shape[1] * 0.10))
-        selector = RFE(estimator, n_features_to_select=safe_target_k, step=step)
-        selector.fit(X_work, y_arr)
-        scores = 1.0 / selector.ranking_.astype(float)
-    except Exception as exc:  # pragma: no cover
-        logger.warning("SVM-RFE failed; using zero scores for this metabolite. Reason: %s", exc)
-        return _zero_score_series(names)
-
-    result = _zero_score_series(names)
-    result.loc[valid_names] = scores
-    return result
-
-
 def run_xgboost(
     X: pd.DataFrame | np.ndarray,
     y: pd.Series | np.ndarray,
-    target_k: int,
     config,
     feature_names: Optional[Sequence[str]] = None,
 ) -> pd.Series:
-    del target_k
     X_arr, names = _as_array_and_names(X, feature_names=feature_names)
     y_arr = np.asarray(y, dtype=np.float32).reshape(-1)
 
@@ -290,21 +353,54 @@ def run_xgboost(
     return result
 
 
-def borda_aggregation(rank_df: pd.DataFrame) -> pd.Series:
-    if rank_df.empty:
-        return pd.Series(dtype=float)
-    ranks = rank_df.rank(ascending=False, method="average")
-    n_genes = len(rank_df)
-    borda_scores = (n_genes - ranks + 1).sum(axis=1)
-    return borda_scores.sort_values(ascending=False)
+def _ordinal_rank_desc(score_series: pd.Series) -> pd.Series:
+    if score_series.empty:
+        return pd.Series(dtype=int)
+
+    work = pd.DataFrame(
+        {
+            "Score": score_series.astype(float).to_numpy(),
+            "_GeneName": score_series.index.astype(str).to_numpy(),
+        },
+        index=score_series.index,
+    )
+    ordered = work.sort_values(
+        ["Score", "_GeneName"],
+        ascending=[False, True],
+        kind="mergesort",
+    ).index
+    ranks = pd.Series(np.arange(1, len(ordered) + 1), index=ordered, dtype=int)
+    return ranks.reindex(score_series.index).astype(int)
+
+
+def _ordinal_rank_asc(score_series: pd.Series) -> pd.Series:
+    if score_series.empty:
+        return pd.Series(dtype=int)
+
+    work = pd.DataFrame(
+        {
+            "Score": score_series.astype(float).to_numpy(),
+            "_GeneName": score_series.index.astype(str).to_numpy(),
+        },
+        index=score_series.index,
+    )
+    ordered = work.sort_values(
+        ["Score", "_GeneName"],
+        ascending=[True, True],
+        kind="mergesort",
+    ).index
+    ranks = pd.Series(np.arange(1, len(ordered) + 1), index=ordered, dtype=int)
+    return ranks.reindex(score_series.index).astype(int)
 
 
 def rra_aggregation(rank_df: pd.DataFrame) -> pd.Series:
+    """Robust rank aggregation from rank columns where smaller ranks are better."""
     if rank_df.empty:
         return pd.Series(dtype=float)
-    ranks = rank_df.rank(ascending=False, method="average")
-    n_genes = max(1, rank_df.shape[0])
-    n_methods = max(1, rank_df.shape[1])
+
+    ranks = rank_df.astype(float).clip(lower=1.0)
+    n_genes = max(1, ranks.shape[0])
+    n_methods = max(1, ranks.shape[1])
     normalized = np.sort((ranks.to_numpy(dtype=float) / n_genes), axis=1)
 
     best_p = np.ones(normalized.shape[0], dtype=float)
@@ -312,78 +408,103 @@ def rra_aggregation(rank_df: pd.DataFrame) -> pd.Series:
         best_p = np.minimum(best_p, beta.cdf(normalized[:, k], k + 1, n_methods - k))
 
     adjusted = np.minimum(best_p * n_methods, 1.0)
-    return pd.Series(adjusted, index=rank_df.index, dtype=float).sort_values(ascending=True)
+    return pd.Series(adjusted, index=rank_df.index, dtype=float)
 
 
-def _top_k_names(score_series: pd.Series, target_k: int, min_positive: bool = False) -> list[str]:
-    if score_series.empty:
-        return []
-    series = score_series.copy()
-    if min_positive:
-        series = series[series > 0]
-    if series.empty:
-        return []
-    return series.sort_values(ascending=False).head(target_k).index.tolist()
+def _selected_from_scores(
+    score_series: pd.Series,
+    rank_series: pd.Series,
+    target_k: int,
+    *,
+    require_positive: bool = True,
+) -> pd.Series:
+    selected = rank_series <= max(1, int(target_k))
+    if require_positive:
+        selected = selected & (score_series > 0)
+    return selected.astype(int)
 
 
-def get_integrated_key_genes(
+def _empty_model_table(index: Sequence[str]) -> pd.DataFrame:
+    gene_index = pd.Index(index, name="Gene", dtype=str)
+    return pd.DataFrame(
+        {
+            "ElasticNetScore": pd.Series(0.0, index=gene_index, dtype=float),
+            "ElasticNetRank": pd.Series(np.arange(1, len(gene_index) + 1), index=gene_index, dtype=int),
+            "ElasticNetSelected": pd.Series(0, index=gene_index, dtype=int),
+            "XGBoostScore": pd.Series(0.0, index=gene_index, dtype=float),
+            "XGBoostRank": pd.Series(np.arange(1, len(gene_index) + 1), index=gene_index, dtype=int),
+            "XGBoostSelected": pd.Series(0, index=gene_index, dtype=int),
+            "ModelSupportCount": pd.Series(0, index=gene_index, dtype=int),
+            "RRAScore": pd.Series(1.0, index=gene_index, dtype=float),
+            "RRARank": pd.Series(np.arange(1, len(gene_index) + 1), index=gene_index, dtype=int),
+        },
+        index=gene_index,
+    )
+
+
+def run_association_models(
     X: pd.DataFrame | np.ndarray,
     y: pd.Series | np.ndarray,
     config,
     feature_names: Optional[Sequence[str]] = None,
-):
-    """Run the ensemble feature-selection workflow."""
+) -> tuple[pd.DataFrame, int]:
+    """Run ElasticNet + XGBoost modeling and aggregate ranks with RRA."""
     X_arr, names = _as_array_and_names(X, feature_names=feature_names)
     y_arr = np.asarray(y, dtype=np.float32).reshape(-1)
 
     if X_arr.shape[1] == 0:
-        return {"intersection": [], "borda": [], "rra": []}, _empty_score_table([])
+        return _empty_model_table([]), 0
 
     valid_mask = _safe_nonconstant_mask(X_arr)
     if not np.any(valid_mask):
-        logger.info("All candidate genes are constant after PCC screening; skipping model fitting.")
-        return {"intersection": [], "borda": [], "rra": []}, _empty_score_table(names)
+        logger.info("All candidate genes are constant after screening; skipping model fitting.")
+        return _empty_model_table(names), 0
 
     if X_arr.shape[0] < 3 or np.nanstd(y_arr, ddof=1) == 0:
         logger.info("Skipping model fitting because the target metabolite has insufficient variation.")
-        return {"intersection": [], "borda": [], "rra": []}, _empty_score_table(names)
+        return _empty_model_table(names), 0
 
-    target_k = config.target_feature_count(n_samples=X_arr.shape[0], n_features=int(valid_mask.sum()))
+    target_k = config.target_feature_count(
+        n_samples=X_arr.shape[0],
+        n_features=int(valid_mask.sum()),
+    )
 
-    s_enet = run_elastic_net(X_arr, y_arr, config, feature_names=names)
-    s_svm = run_svm_rfe(X_arr, y_arr, target_k, config, feature_names=names)
-    s_xgb = run_xgboost(X_arr, y_arr, target_k, config, feature_names=names)
+    s_enet = run_elastic_net(X_arr, y_arr, config, feature_names=names).reindex(names).fillna(0.0)
+    s_xgb = run_xgboost(X_arr, y_arr, config, feature_names=names).reindex(names).fillna(0.0)
+
+    enet_rank = _ordinal_rank_desc(s_enet)
+    xgb_rank = _ordinal_rank_desc(s_xgb)
+
+    rank_input = pd.DataFrame(
+        {
+            "ElasticNetRank": enet_rank,
+            "XGBoostRank": xgb_rank,
+        },
+        index=pd.Index(names, name="Gene"),
+    )
+    rra_score = rra_aggregation(rank_input).reindex(names).fillna(1.0)
+    rra_rank = _ordinal_rank_asc(rra_score)
 
     score_df = pd.DataFrame(
         {
-            "ElasticNetScore": s_enet.reindex(names).fillna(0.0),
-            "SVMRFEscore": s_svm.reindex(names).fillna(0.0),
-            "XGBoostScore": s_xgb.reindex(names).fillna(0.0),
+            "ElasticNetScore": s_enet,
+            "ElasticNetRank": enet_rank,
+            "ElasticNetSelected": _selected_from_scores(s_enet, enet_rank, target_k, require_positive=True),
+            "XGBoostScore": s_xgb,
+            "XGBoostRank": xgb_rank,
+            "XGBoostSelected": _selected_from_scores(s_xgb, xgb_rank, target_k, require_positive=True),
+            "RRAScore": rra_score,
+            "RRARank": rra_rank,
         },
-        index=names,
+        index=pd.Index(names, name="Gene"),
     )
+    score_df["ModelSupportCount"] = (
+        score_df["ElasticNetSelected"] + score_df["XGBoostSelected"]
+    ).astype(int)
 
-    borda_scores = borda_aggregation(score_df)
-    rra_scores = rra_aggregation(score_df)
-
-    score_df["BordaScore"] = borda_scores.reindex(names).fillna(0.0)
-    score_df["RRAScore"] = rra_scores.reindex(names).fillna(1.0)
-    score_df["BordaRank"] = score_df["BordaScore"].rank(ascending=False, method="min").astype(int)
-    score_df["RRARank"] = score_df["RRAScore"].rank(ascending=True, method="min").astype(int)
-
-    selected_enet = set(_top_k_names(score_df["ElasticNetScore"], target_k, min_positive=True))
-    selected_svm = set(_top_k_names(score_df["SVMRFEscore"], target_k))
-    selected_xgb = set(_top_k_names(score_df["XGBoostScore"], target_k))
-
-    intersection = selected_enet & selected_svm & selected_xgb
-    ordered_intersection = [gene for gene in rra_scores.index.tolist() if gene in intersection]
-
-    results: Dict[str, list[str]] = {
-        "intersection": ordered_intersection if config.enable_intersection else [],
-        "borda": borda_scores.head(target_k).index.tolist() if config.enable_borda else [],
-        "rra": rra_scores.head(target_k).index.tolist() if config.enable_rra else [],
-    }
-
-    ordered_score_df = score_df.sort_values(["RRARank", "BordaRank"], ascending=[True, True])
-    ordered_score_df.index.name = "Gene"
-    return results, ordered_score_df
+    ordered_score_df = score_df.sort_values(
+        ["RRARank", "ModelSupportCount", "ElasticNetRank", "XGBoostRank"],
+        ascending=[True, False, True, True],
+        kind="mergesort",
+    )
+    return ordered_score_df, int(target_k)

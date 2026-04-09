@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import html
@@ -7,7 +8,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy.stats import zscore
 from sklearn.decomposition import PCA
 
 from .utils import safe_mkdir
@@ -15,68 +15,10 @@ from .utils import safe_mkdir
 
 PALETTE = {
     "gene": "#2563eb",
-    "metabolite": "#dc2626",
+    "metabolite": "#111827",
     "edge_positive": "#dc2626",
     "edge_negative": "#2563eb",
-    "metabolite_node": "#111827",
 }
-
-
-def _gene_expression_df(adata) -> pd.DataFrame:
-    """Return transcriptome matrix as a sample-by-gene DataFrame."""
-    return pd.DataFrame(
-        np.asarray(adata.X, dtype=np.float32),
-        index=adata.obs_names.astype(str),
-        columns=adata.var_names.astype(str),
-    )
-
-
-def _metabolomics_df(adata) -> pd.DataFrame:
-    """Return metabolomics matrix as a sample-by-metabolite DataFrame."""
-    metab_df = adata.obsm.get("metabolomics_scaled", adata.obsm.get("metabolomics"))
-    if isinstance(metab_df, pd.DataFrame):
-        return metab_df.copy(deep=False)
-    return pd.DataFrame(
-        np.asarray(metab_df, dtype=np.float32),
-        index=adata.obs_names.astype(str),
-        columns=[str(x) for x in adata.uns.get("metabolite_names", [])],
-    )
-
-
-def _get_primary_key_gene_df(engine) -> pd.DataFrame:
-    strategy = str(getattr(engine.config, "grn_primary_strategy", "rra")).lower()
-    return engine.ml_results.get(f"key_genes_{strategy}", pd.DataFrame())
-
-
-def _pick_display_features(engine, top_genes: int, top_metabolites: int) -> tuple[list[str], list[str]]:
-    gene_df = engine.gene_expression_df() if hasattr(engine, "gene_expression_df") else _gene_expression_df(engine.adata)
-    metab_df = engine.metabolomics_df() if hasattr(engine, "metabolomics_df") else _metabolomics_df(engine.adata)
-
-    primary_df = _get_primary_key_gene_df(engine)
-    if isinstance(primary_df, pd.DataFrame) and not primary_df.empty:
-        gene_candidates = [g for g in primary_df["Gene"].astype(str).tolist() if g in gene_df.columns]
-    else:
-        gene_candidates = []
-    if len(gene_candidates) < top_genes:
-        variance_rank = gene_df.var(axis=0).sort_values(ascending=False).index.astype(str).tolist()
-        gene_candidates.extend([g for g in variance_rank if g not in gene_candidates])
-    selected_genes = gene_candidates[:top_genes]
-
-    summary_df = engine.ml_results.get("metabolite_summary", pd.DataFrame())
-    if isinstance(summary_df, pd.DataFrame) and not summary_df.empty and "Metabolite" in summary_df.columns:
-        sort_cols = [col for col in ["RRA_Genes", "Candidate_Genes_PCC"] if col in summary_df.columns]
-        if sort_cols:
-            summary_df = summary_df.sort_values(sort_cols, ascending=[False] * len(sort_cols))
-        metabolite_candidates = [m for m in summary_df["Metabolite"].astype(str).tolist() if m in metab_df.columns]
-    else:
-        metabolite_candidates = []
-
-    if len(metabolite_candidates) < top_metabolites:
-        variance_rank = metab_df.var(axis=0).sort_values(ascending=False).index.astype(str).tolist()
-        metabolite_candidates.extend([m for m in variance_rank if m not in metabolite_candidates])
-    selected_metabs = metabolite_candidates[:top_metabolites]
-
-    return selected_genes, selected_metabs
 
 
 def _json_default(obj: Any) -> Any:
@@ -96,14 +38,15 @@ def _json_dumps(data: Any) -> str:
 
 
 def _build_summary_payload(engine, cfg) -> dict[str, Any]:
-    grn_edges_df = engine.ml_results.get("grn_edges_df", pd.DataFrame())
+    total_df = engine.ml_results.get("total_association_network_df", pd.DataFrame())
+    high_df = engine.ml_results.get("high_confidence_network_df", pd.DataFrame())
     return {
         "projectName": str(cfg.project_name),
         "samples": int(engine.adata.n_obs),
         "genes": int(engine.adata.n_vars),
         "metabolites": int(len(engine.adata.uns.get("metabolite_names", []))),
-        "grnEdges": int(len(grn_edges_df)) if isinstance(grn_edges_df, pd.DataFrame) else 0,
-        "primaryStrategy": str(getattr(cfg, "grn_primary_strategy", "rra")).upper(),
+        "totalEdges": int(len(total_df)) if isinstance(total_df, pd.DataFrame) else 0,
+        "highConfidenceEdges": int(len(high_df)) if isinstance(high_df, pd.DataFrame) else 0,
     }
 
 
@@ -132,76 +75,38 @@ def _build_pca_payload(matrix, sample_names, title: str, cfg) -> dict[str, Any] 
     }
 
 
-def _build_correlation_circle_payload(engine, cfg) -> dict[str, Any] | None:
-    gene_names, metabolite_names = _pick_display_features(
-        engine,
-        top_genes=cfg.correlation_circle_top_genes,
-        top_metabolites=cfg.correlation_circle_top_metabolites,
-    )
-    if len(gene_names) < 2 or len(metabolite_names) < 1:
-        return None
+def _build_network_payload(engine, tier: str, max_edges: int) -> dict[str, Any] | None:
+    if tier == "total":
+        edge_df = engine.ml_results.get("total_association_network_df", pd.DataFrame())
+        title = "Total Association Network"
+    else:
+        edge_df = engine.ml_results.get("high_confidence_network_df", pd.DataFrame())
+        title = "High-Confidence Association Network"
 
-    gene_df = engine.gene_expression_df() if hasattr(engine, "gene_expression_df") else _gene_expression_df(engine.adata)
-    metab_df = engine.metabolomics_df() if hasattr(engine, "metabolomics_df") else _metabolomics_df(engine.adata)
-    combined = pd.concat([gene_df.loc[:, gene_names], metab_df.loc[:, metabolite_names]], axis=1)
-    if combined.shape[0] < 3 or combined.shape[1] < 3:
-        return None
-
-    X = combined.to_numpy(dtype=float, copy=False)
-    Xz = np.nan_to_num(zscore(X, axis=0, ddof=1), nan=0.0, posinf=0.0, neginf=0.0)
-    pca = PCA(n_components=2, random_state=cfg.random_state)
-    scores = pca.fit_transform(Xz)
-    score_z = np.nan_to_num(zscore(scores, axis=0, ddof=1), nan=0.0, posinf=0.0, neginf=0.0)
-    corr_coords = (Xz.T @ score_z) / max(1, Xz.shape[0] - 1)
-    var_exp = pca.explained_variance_ratio_ * 100.0
-
-    items = []
-    feature_types = ["Gene"] * len(gene_names) + ["Metabolite"] * len(metabolite_names)
-    for idx, (name, feature_type) in enumerate(zip(combined.columns.astype(str), feature_types), start=1):
-        items.append(
-            {
-                "id": f"{feature_type.lower()}_{idx:03d}",
-                "label": str(name),
-                "type": feature_type,
-                "x": float(np.clip(corr_coords[idx - 1, 0], -1.05, 1.05)),
-                "y": float(np.clip(corr_coords[idx - 1, 1], -1.05, 1.05)),
-                "color": PALETTE["gene"] if feature_type == "Gene" else PALETTE["metabolite"],
-            }
-        )
-
-    return {
-        "title": "Correlation Circle",
-        "width": 900,
-        "height": 760,
-        "xLabel": f"PC1 ({var_exp[0]:.1f}%)",
-        "yLabel": f"PC2 ({var_exp[1]:.1f}%)",
-        "items": items,
-    }
-
-
-def _build_network_payload(engine, cfg) -> dict[str, Any] | None:
-    edge_df = engine.ml_results.get("grn_edges_df")
     if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         return None
 
-    ranked = edge_df.assign(AbsPCC=edge_df["PCC_R"].abs()).sort_values(
-        ["Support_Count", "In_RRA", "AbsPCC"], ascending=[False, False, False]
-    )
-    top_edges = ranked.head(max(1, int(cfg.circos_top_edges))).copy()
-    if top_edges.empty:
+    ranked = edge_df.sort_values(
+        ["EdgeWeight", "RRARank", "ModelSupportCount", "ScreenSupportCount"],
+        ascending=[False, True, False, False],
+        kind="mergesort",
+    ).head(max(1, int(max_edges)))
+    if ranked.empty:
         return None
 
-    genes = top_edges["Gene"].astype(str).drop_duplicates().tolist()
-    metabolites = top_edges["Metabolite"].astype(str).drop_duplicates().tolist()
+    genes = ranked.groupby("Gene")["EdgeWeight"].max().sort_values(ascending=False).index.astype(str).tolist()
+    metabolites = (
+        ranked.groupby("Metabolite")["EdgeWeight"].max().sort_values(ascending=False).index.astype(str).tolist()
+    )
     if not genes or not metabolites:
         return None
 
     width = 1100
-    height = 700
+    height = max(700, 26 * max(len(genes), len(metabolites)) + 140)
     gene_x = 250
     metab_x = 850
-    gene_y = np.linspace(70, height - 70, num=len(genes)) if genes else []
-    metab_y = np.linspace(70, height - 70, num=len(metabolites)) if metabolites else []
+    gene_y = np.linspace(70, height - 70, num=len(genes))
+    metab_y = np.linspace(70, height - 70, num=len(metabolites))
 
     nodes = [
         {"id": f"gene::{gene}", "label": gene, "type": "Gene", "color": PALETTE["gene"], "x": float(gene_x), "y": float(y)}
@@ -212,7 +117,7 @@ def _build_network_payload(engine, cfg) -> dict[str, Any] | None:
             "id": f"metab::{metab}",
             "label": metab,
             "type": "Metabolite",
-            "color": PALETTE["metabolite_node"],
+            "color": PALETTE["metabolite"],
             "x": float(metab_x),
             "y": float(y),
         }
@@ -221,31 +126,36 @@ def _build_network_payload(engine, cfg) -> dict[str, Any] | None:
 
     node_ids = {node["id"] for node in nodes}
     edges = []
-    for edge_idx, (_, row) in enumerate(top_edges.reset_index(drop=True).iterrows(), start=1):
+    for edge_idx, (_, row) in enumerate(ranked.reset_index(drop=True).iterrows(), start=1):
         source = f"gene::{str(row['Gene'])}"
         target = f"metab::{str(row['Metabolite'])}"
         if source not in node_ids or target not in node_ids:
             continue
 
-        corr = float(row["PCC_R"]) if pd.notna(row["PCC_R"]) else 0.0
-        support = int(row["Support_Count"]) if pd.notna(row["Support_Count"]) else 1
-        abs_corr = min(1.0, abs(corr))
         edges.append(
             {
                 "id": f"edge_{edge_idx:03d}",
                 "source": source,
                 "target": target,
-                "correlation": corr,
-                "support": support,
-                "color": PALETTE["edge_positive"] if corr >= 0 else PALETTE["edge_negative"],
-                "width": 1.0 + 2.0 * abs_corr,
-                "opacity": min(0.95, 0.25 + 0.18 * support),
+                "weight": float(row["EdgeWeight"]),
+                "modelSupport": int(row["ModelSupportCount"]),
+                "screenSupport": int(row["ScreenSupportCount"]),
+                "color": PALETTE["edge_positive"] if str(row["Sign"]) == "positive" else PALETTE["edge_negative"],
+                "width": float(0.8 + 4.2 * float(row["EdgeWeight"])),
+                "opacity": float(
+                    min(
+                        0.95,
+                        0.20
+                        + 0.35 * (float(row["ModelSupportCount"]) / 2.0)
+                        + 0.20 * (float(row["ScreenSupportCount"]) / 3.0),
+                    )
+                ),
             }
         )
 
     if not edges:
         return None
-    return {"nodes": nodes, "edges": edges, "width": width, "height": height}
+    return {"title": title, "nodes": nodes, "edges": edges, "width": width, "height": height}
 
 
 def _interactive_html_template() -> str:
@@ -294,20 +204,21 @@ def _interactive_html_template() -> str:
     </div>
 
     <div class="card">
-      <h2>GRN Network</h2>
+      <h2>Total Association Network</h2>
       <div class="toolbar">
-        <button onclick="saveSvg('netSvg','grn_network.svg')">Save SVG</button>
+        <button onclick="saveSvg('totalNetSvg','total_association_network.svg')">Save SVG</button>
       </div>
-      <svg id="netSvg" viewBox="0 0 1100 700"></svg>
-      <div class="legend">Blue nodes are genes, dark nodes are metabolites. Red edges indicate positive PCC and blue edges indicate negative PCC.</div>
+      <svg id="totalNetSvg" viewBox="0 0 1100 900"></svg>
+      <div class="legend">Blue nodes are genes, dark nodes are metabolites. Red edges indicate positive associations and blue edges indicate negative associations.</div>
     </div>
 
     <div class="card">
-      <h2>Correlation Circle</h2>
+      <h2>High-Confidence Association Network</h2>
       <div class="toolbar">
-        <button onclick="saveSvg('circleSvg','correlation_circle.svg')">Save SVG</button>
+        <button onclick="saveSvg('highNetSvg','high_confidence_network.svg')">Save SVG</button>
       </div>
-      <svg id="circleSvg" viewBox="0 0 900 760"></svg>
+      <svg id="highNetSvg" viewBox="0 0 1100 900"></svg>
+      <div class="legend">Edges are ranked by RRA and weighted by correlation strength, model support, and screening support.</div>
     </div>
   </div>
 
@@ -315,8 +226,8 @@ def _interactive_html_template() -> str:
     const summaryPayload = __SUMMARY_PAYLOAD__;
     const txPcaPayload = __TRANSCRIPTOME_PCA_PAYLOAD__;
     const metabPcaPayload = __METABOLOME_PCA_PAYLOAD__;
-    const networkPayload = __NETWORK_PAYLOAD__;
-    const circlePayload = __CIRCLE_PAYLOAD__;
+    const totalNetworkPayload = __TOTAL_NETWORK_PAYLOAD__;
+    const highNetworkPayload = __HIGH_NETWORK_PAYLOAD__;
 
     function el(tag, attrs = {}) {
       const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
@@ -397,12 +308,12 @@ def _interactive_html_template() -> str:
       svg.appendChild(ylabel);
     }
 
-    function renderNetwork() {
-      const svg = document.getElementById("netSvg");
+    function renderNetwork(svgId, payload) {
+      const svg = document.getElementById(svgId);
       clearSvg(svg);
-      const payload = networkPayload;
       if (!payload) return;
 
+      svg.setAttribute("viewBox", `0 0 ${payload.width} ${payload.height}`);
       const nodeMap = new Map(payload.nodes.map(n => [n.id, n]));
       svg.appendChild(el("rect", { x: 0, y: 0, width: payload.width, height: payload.height, fill: "#ffffff" }));
 
@@ -428,36 +339,8 @@ def _interactive_html_template() -> str:
         text.textContent = node.label;
         svg.appendChild(text);
       }
-    }
 
-    function renderCircle() {
-      const svg = document.getElementById("circleSvg");
-      clearSvg(svg);
-      const payload = circlePayload;
-      if (!payload || !Array.isArray(payload.items) || payload.items.length === 0) return;
-
-      const width = payload.width || 900;
-      const height = payload.height || 760;
-      const cx = width / 2;
-      const cy = height / 2 + 20;
-      const radius = Math.min(width, height) * 0.30;
-
-      svg.appendChild(el("rect", { x: 0, y: 0, width, height, fill: "#ffffff" }));
-      svg.appendChild(el("circle", { cx, cy, r: radius, fill: "none", stroke: "#94a3b8", "stroke-dasharray": "6 4" }));
-      svg.appendChild(el("line", { x1: cx - radius * 1.1, y1: cy, x2: cx + radius * 1.1, y2: cy, stroke: "#cbd5e1" }));
-      svg.appendChild(el("line", { x1: cx, y1: cy - radius * 1.1, x2: cx, y2: cy + radius * 1.1, stroke: "#cbd5e1" }));
-
-      for (const item of payload.items) {
-        const x = cx + item.x * radius;
-        const y = cy - item.y * radius;
-        svg.appendChild(el("line", { x1: cx, y1: cy, x2: x, y2: y, stroke: item.color, "stroke-width": 1.2, opacity: 0.8 }));
-        svg.appendChild(el("circle", { cx: x, cy: y, r: 4.5, fill: item.color }));
-        const text = el("text", { x: x + 8, y: y - 6, "font-size": 11, fill: item.color });
-        text.textContent = item.label;
-        svg.appendChild(text);
-      }
-
-      const title = el("text", { x: width / 2, y: 26, "text-anchor": "middle", "font-size": 18, "font-weight": 700, fill: "#111827" });
+      const title = el("text", { x: payload.width / 2, y: 28, "text-anchor": "middle", "font-size": 18, "font-weight": 700, fill: "#111827" });
       title.textContent = payload.title || "";
       svg.appendChild(title);
     }
@@ -465,13 +348,13 @@ def _interactive_html_template() -> str:
     addChip(`Samples: ${summaryPayload.samples}`);
     addChip(`Genes: ${summaryPayload.genes}`);
     addChip(`Metabolites: ${summaryPayload.metabolites}`);
-    addChip(`GRN edges: ${summaryPayload.grnEdges}`);
-    addChip(`Primary strategy: ${summaryPayload.primaryStrategy}`);
+    addChip(`Total edges: ${summaryPayload.totalEdges}`);
+    addChip(`High-confidence edges: ${summaryPayload.highConfidenceEdges}`);
 
     renderPca("txSvg", txPcaPayload);
     renderPca("metSvg", metabPcaPayload);
-    renderNetwork();
-    renderCircle();
+    renderNetwork("totalNetSvg", totalNetworkPayload);
+    renderNetwork("highNetSvg", highNetworkPayload);
   </script>
 </body>
 </html>
@@ -502,7 +385,13 @@ def generate_interactive_visual_report(engine, cfg, report_path: str | Path) -> 
         "__METABOLOME_PCA_PAYLOAD__",
         _json_dumps(_build_pca_payload(metab_matrix, engine.adata.obs_names.astype(str).tolist(), "Metabolome PCA", cfg)),
     )
-    html_text = html_text.replace("__NETWORK_PAYLOAD__", _json_dumps(_build_network_payload(engine, cfg)))
-    html_text = html_text.replace("__CIRCLE_PAYLOAD__", _json_dumps(_build_correlation_circle_payload(engine, cfg)))
+    html_text = html_text.replace(
+        "__TOTAL_NETWORK_PAYLOAD__",
+        _json_dumps(_build_network_payload(engine, "total", max_edges=cfg.network_plot_top_edges)),
+    )
+    html_text = html_text.replace(
+        "__HIGH_NETWORK_PAYLOAD__",
+        _json_dumps(_build_network_payload(engine, "high_confidence", max_edges=cfg.network_plot_top_edges)),
+    )
 
     output_path.write_text(html_text, encoding="utf-8")

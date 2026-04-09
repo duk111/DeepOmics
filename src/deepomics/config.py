@@ -1,14 +1,14 @@
+
 from __future__ import annotations
 
 import os
 from dataclasses import asdict, dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 from .utils import safe_mkdir
 
 
 _VALID_REPORT_FORMATS = {"md", "html"}
-_VALID_PRIMARY_STRATEGIES = {"intersection", "borda", "rra"}
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
 
@@ -16,12 +16,11 @@ _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 class AnalysisConfig:
     """Configuration container for the DeepOmics workflow."""
 
-    project_name: str = "DeepOmics_Analysis"
+    project_name: str = "DeepOmics_Association_Analysis"
     output_dir: str = "results"
     random_state: int = 42
 
-    pcc_r_threshold: float = 0.30
-    pcc_p_threshold: float = 0.05
+    screen_top_k_per_method: int = 1000
     use_fdr: bool = True
     fdr_alpha: float = 0.05
 
@@ -39,26 +38,14 @@ class AnalysisConfig:
     )
     elastic_net_max_iter: int = 20000
 
-    lasso_alpha_search: Optional[bool] = None
-    lasso_fixed_alpha: Optional[float] = None
-
-    svm_kernel: str = "linear"
-
     selection_ratio: float = 0.20
     min_features: int = 10
     max_features: int = 50
-    max_candidate_genes: Optional[int] = 2000
 
-    enable_intersection: bool = True
-    enable_borda: bool = True
-    enable_rra: bool = True
-    grn_primary_strategy: str = "rra"
-
-    correlation_circle_top_genes: int = 30
-    correlation_circle_top_metabolites: int = 20
-    circos_top_edges: int = 80
-    complex_heatmap_top_genes: int = 30
-    complex_heatmap_top_metabolites: int = 15
+    network_plot_top_edges: int = 120
+    top_pairs_plot_n: int = 6
+    support_plot_top_metabolites: int = 20
+    top_key_genes_plot_n: int = 20
 
     verbose: bool = False
     n_threads: int = -1
@@ -74,26 +61,17 @@ class AnalysisConfig:
     log_level: str = "INFO"
 
     def __post_init__(self) -> None:
-        if self.lasso_alpha_search is not None:
-            self.elastic_net_alpha_search = bool(self.lasso_alpha_search)
-        if self.lasso_fixed_alpha is not None:
-            self.elastic_net_fixed_alpha = float(self.lasso_fixed_alpha)
-
         self.project_name = str(self.project_name).strip()
         self.output_dir = str(self.output_dir)
         self.log_level = str(self.log_level).upper().strip()
-        self.svm_kernel = str(self.svm_kernel).lower().strip()
-        self.grn_primary_strategy = str(self.grn_primary_strategy).lower().strip()
         self.report_formats = self._normalize_report_formats(self.report_formats)
 
         if not self.project_name:
             raise ValueError("project_name must not be empty.")
         if self.log_level not in _VALID_LOG_LEVELS:
             raise ValueError(f"log_level must be one of: {sorted(_VALID_LOG_LEVELS)}.")
-        if not (0 < self.pcc_r_threshold <= 1):
-            raise ValueError("pcc_r_threshold must be within (0, 1].")
-        if not (0 < self.pcc_p_threshold <= 1):
-            raise ValueError("pcc_p_threshold must be within (0, 1].")
+        if self.screen_top_k_per_method < 1:
+            raise ValueError("screen_top_k_per_method must be at least 1.")
         if not (0 < self.fdr_alpha <= 1):
             raise ValueError("fdr_alpha must be within (0, 1].")
         if not (0 < self.selection_ratio <= 1):
@@ -102,18 +80,16 @@ class AnalysisConfig:
             raise ValueError("min_features and max_features must be positive.")
         if self.min_features > self.max_features:
             raise ValueError("min_features cannot be larger than max_features.")
-        if self.max_candidate_genes is not None and self.max_candidate_genes <= 0:
-            raise ValueError("max_candidate_genes must be positive when provided.")
         if self.cv_folds < 2:
             raise ValueError("cv_folds must be at least 2.")
-        if self.correlation_circle_top_genes < 1 or self.correlation_circle_top_metabolites < 1:
-            raise ValueError("correlation circle feature counts must be at least 1.")
-        if self.circos_top_edges < 1:
-            raise ValueError("circos_top_edges must be at least 1.")
-        if self.complex_heatmap_top_genes < 1 or self.complex_heatmap_top_metabolites < 1:
-            raise ValueError("complex heatmap feature counts must be at least 1.")
-        if self.grn_primary_strategy not in _VALID_PRIMARY_STRATEGIES:
-            raise ValueError("grn_primary_strategy must be one of: intersection, borda, rra.")
+        if self.network_plot_top_edges < 1:
+            raise ValueError("network_plot_top_edges must be at least 1.")
+        if self.top_pairs_plot_n < 1:
+            raise ValueError("top_pairs_plot_n must be at least 1.")
+        if self.support_plot_top_metabolites < 1:
+            raise ValueError("support_plot_top_metabolites must be at least 1.")
+        if self.top_key_genes_plot_n < 1:
+            raise ValueError("top_key_genes_plot_n must be at least 1.")
         if self.elastic_net_fixed_alpha <= 0:
             raise ValueError("elastic_net_fixed_alpha must be positive.")
         if not (0 < self.elastic_net_l1_ratio <= 1):
@@ -161,6 +137,8 @@ class AnalysisConfig:
         return max(1, int(self.n_threads))
 
     def target_feature_count(self, n_samples: int, n_features: int) -> int:
+        if n_features <= 0:
+            return 0
         target_k = max(int(self.min_features), int(n_samples * self.selection_ratio))
         return min(target_k, int(self.max_features), int(n_features))
 
