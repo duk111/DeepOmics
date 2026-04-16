@@ -23,6 +23,12 @@ def _build_config(
     export_cytoscape: bool,
     no_plots: bool,
     no_save_state: bool,
+    enable_modules: bool,
+    module_graph_k: int,
+    module_min_edge_weight: float,
+    module_method: str,
+    module_resolution: float,
+    module_min_size: int,
 ) -> AnalysisConfig:
     """Build a validated analysis configuration from CLI options."""
     return AnalysisConfig(
@@ -37,6 +43,12 @@ def _build_config(
         save_h5ad=not no_save_state,
         generate_reports=not no_plots,
         export_cytoscape=export_cytoscape,
+        enable_module_detection=enable_modules,
+        module_graph_k=module_graph_k,
+        module_min_edge_weight=module_min_edge_weight,
+        module_method=module_method.lower(),
+        module_resolution=module_resolution,
+        module_min_size=module_min_size,
     )
 
 
@@ -59,6 +71,12 @@ def main() -> None:
 @click.option("--export-cytoscape/--no-export-cytoscape", default=True, show_default=True, help="Whether to export the Cytoscape-specific edge table.")
 @click.option("--no-plots", is_flag=True, help="Skip plot and report generation.")
 @click.option("--no-save-state", is_flag=True, help="Do not save the final H5AD state file.")
+@click.option("--enable-modules/--disable-modules", default=True, show_default=True, help="Enable post-T03 gene module detection.")
+@click.option("--module-graph-k", type=int, default=10, show_default=True, help="Top-k positive neighbors retained per gene before module detection.")
+@click.option("--module-min-edge-weight", type=float, default=0.15, show_default=True, help="Minimum positive edge weight retained after Spearman graph construction.")
+@click.option("--module-method", type=click.Choice(["leiden", "hierarchical"], case_sensitive=False), default="leiden", show_default=True, help="Community detection backend for gene modules.")
+@click.option("--module-resolution", type=float, default=1.0, show_default=True, help="Resolution parameter for module partitioning.")
+@click.option("--module-min-size", type=int, default=5, show_default=True, help="Modules smaller than this size are collapsed into grey.")
 def run(
     genes: Path,
     metabs: Path,
@@ -73,6 +91,12 @@ def run(
     export_cytoscape: bool,
     no_plots: bool,
     no_save_state: bool,
+    enable_modules: bool,
+    module_graph_k: int,
+    module_min_edge_weight: float,
+    module_method: str,
+    module_resolution: float,
+    module_min_size: int,
 ) -> None:
     """Run the end-to-end DeepOmics workflow."""
     output_dir = safe_mkdir(output)
@@ -91,6 +115,12 @@ def run(
         export_cytoscape=export_cytoscape,
         no_plots=no_plots,
         no_save_state=no_save_state,
+        enable_modules=enable_modules,
+        module_graph_k=module_graph_k,
+        module_min_edge_weight=module_min_edge_weight,
+        module_method=module_method,
+        module_resolution=module_resolution,
+        module_min_size=module_min_size,
     )
 
     logger.info("Launching DeepOmics project: %s", cfg.project_name)

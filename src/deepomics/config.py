@@ -47,6 +47,14 @@ class AnalysisConfig:
     support_plot_top_metabolites: int = 20
     top_key_genes_plot_n: int = 20
 
+    enable_module_detection: bool = True
+    module_corr_method: str = "spearman"
+    module_graph_k: int = 10
+    module_min_edge_weight: float = 0.15
+    module_method: str = "leiden"
+    module_resolution: float = 1.0
+    module_min_size: int = 5
+
     n_threads: int = -1
     cv_folds: int = 5
     generate_reports: bool = True
@@ -65,6 +73,8 @@ class AnalysisConfig:
             None if self.group_table_path is None else str(self.group_table_path).strip() or None
         )
         self.log_level = str(self.log_level).upper().strip()
+        self.module_corr_method = str(self.module_corr_method).lower().strip()
+        self.module_method = str(self.module_method).lower().strip()
         self.report_formats = self._normalize_report_formats(self.report_formats)
 
         if not self.project_name:
@@ -91,6 +101,19 @@ class AnalysisConfig:
             raise ValueError("support_plot_top_metabolites must be at least 1.")
         if self.top_key_genes_plot_n < 1:
             raise ValueError("top_key_genes_plot_n must be at least 1.")
+
+        if str(self.module_corr_method).lower().strip() not in {"spearman"}:
+            raise ValueError("module_corr_method currently only supports 'spearman'.")
+        if str(self.module_method).lower().strip() not in {"leiden", "hierarchical"}:
+            raise ValueError("module_method must be either 'leiden' or 'hierarchical'.")
+        if self.module_graph_k < 1:
+            raise ValueError("module_graph_k must be at least 1.")
+        if not (0 <= self.module_min_edge_weight < 1):
+            raise ValueError("module_min_edge_weight must be within [0, 1).")
+        if self.module_resolution <= 0:
+            raise ValueError("module_resolution must be positive.")
+        if self.module_min_size < 1:
+            raise ValueError("module_min_size must be at least 1.")
         if self.elastic_net_fixed_alpha <= 0:
             raise ValueError("elastic_net_fixed_alpha must be positive.")
         if not (0 < self.elastic_net_l1_ratio <= 1):

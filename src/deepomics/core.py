@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from . import config, plotting, selectors
+from . import config, modules, plotting, selectors
 from .utils import get_logger, log_step, safe_mkdir, write_json
 
 logger = get_logger()
@@ -20,6 +20,10 @@ TABLE_FILE_PREFIXES = {
     "key_gene_summary": "T04_Key_Gene_Summary.csv",
     "metabolite_summary": "T05_Metabolite_Association_Summary.csv",
     "cytoscape_network": "T06_Association_Network_Cytoscape.csv",
+    "gene_module_assignment": "T07_Gene_Module_Assignment.csv",
+    "module_eigengenes": "T08_Module_Eigengenes.csv",
+    "module_metabolite_association": "T09_Module_Metabolite_Association.csv",
+    "module_summary": "T10_Module_Summary.csv",
 }
 
 
@@ -46,6 +50,10 @@ class MultiOmicsEngine:
             "high_confidence_network_df": pd.DataFrame(),
             "key_gene_summary_df": pd.DataFrame(),
             "metabolite_summary": pd.DataFrame(),
+            "gene_module_assignment_df": pd.DataFrame(),
+            "module_eigengenes_df": pd.DataFrame(),
+            "module_metabolite_assoc_df": pd.DataFrame(),
+            "module_summary_df": pd.DataFrame(),
         }
         self.run_metadata: Dict[str, object] = {
             "project_name": self.config.project_name,
@@ -88,6 +96,10 @@ class MultiOmicsEngine:
 
         with log_step(logger, "Gene-metabolite association modeling"):
             self._run_association_analysis()
+
+        if bool(getattr(self.config, "enable_module_detection", True)):
+            with log_step(logger, "Gene module detection"):
+                self._run_module_analysis()
 
         with log_step(logger, "Saving outputs"):
             self.save_results()
@@ -491,6 +503,37 @@ class MultiOmicsEngine:
         self.ml_results["key_gene_summary_df"] = key_gene_summary_df
         self.ml_results["metabolite_summary"] = metabolite_summary_df
 
+
+    def _run_module_analysis(self) -> None:
+        high_confidence_network_df = self.ml_results.get("high_confidence_network_df", pd.DataFrame())
+        key_gene_summary_df = self.ml_results.get("key_gene_summary_df", pd.DataFrame())
+
+        if not isinstance(high_confidence_network_df, pd.DataFrame) or high_confidence_network_df.empty:
+            logger.info("Module analysis skipped because the high-confidence network is empty.")
+            self.ml_results["gene_module_assignment_df"] = pd.DataFrame()
+            self.ml_results["module_eigengenes_df"] = pd.DataFrame()
+            self.ml_results["module_metabolite_assoc_df"] = pd.DataFrame()
+            self.ml_results["module_summary_df"] = pd.DataFrame()
+            self.run_metadata["module_method_used"] = "none"
+            self.run_metadata["n_non_grey_modules"] = 0
+            self.run_metadata["n_module_genes"] = 0
+            self.run_metadata["n_grey_genes"] = 0
+            return
+
+        artifacts = modules.run_gene_module_analysis(
+            expr_df=self.gene_expression_df(),
+            metabolomics_df=self.metabolomics_df(),
+            high_confidence_network_df=high_confidence_network_df,
+            key_gene_summary_df=key_gene_summary_df if isinstance(key_gene_summary_df, pd.DataFrame) else pd.DataFrame(),
+            cfg=self.config,
+        )
+
+        self.ml_results["gene_module_assignment_df"] = artifacts.gene_module_assignment_df
+        self.ml_results["module_eigengenes_df"] = artifacts.module_eigengenes_df
+        self.ml_results["module_metabolite_assoc_df"] = artifacts.module_metabolite_assoc_df
+        self.ml_results["module_summary_df"] = artifacts.module_summary_df
+        self.run_metadata.update(artifacts.metadata)
+
     def save_results(self) -> None:
         out_dir = safe_mkdir(self.config.output_dir)
 
@@ -513,6 +556,22 @@ class MultiOmicsEngine:
         metabolite_summary = self.ml_results.get("metabolite_summary", pd.DataFrame())
         if isinstance(metabolite_summary, pd.DataFrame) and not metabolite_summary.empty:
             metabolite_summary.to_csv(out_dir / TABLE_FILE_PREFIXES["metabolite_summary"], index=False)
+
+        gene_module_assignment_df = self.ml_results.get("gene_module_assignment_df", pd.DataFrame())
+        if isinstance(gene_module_assignment_df, pd.DataFrame) and not gene_module_assignment_df.empty:
+            gene_module_assignment_df.to_csv(out_dir / TABLE_FILE_PREFIXES["gene_module_assignment"], index=False)
+
+        module_eigengenes_df = self.ml_results.get("module_eigengenes_df", pd.DataFrame())
+        if isinstance(module_eigengenes_df, pd.DataFrame) and not module_eigengenes_df.empty:
+            module_eigengenes_df.to_csv(out_dir / TABLE_FILE_PREFIXES["module_eigengenes"], index=True)
+
+        module_metabolite_assoc_df = self.ml_results.get("module_metabolite_assoc_df", pd.DataFrame())
+        if isinstance(module_metabolite_assoc_df, pd.DataFrame) and not module_metabolite_assoc_df.empty:
+            module_metabolite_assoc_df.to_csv(out_dir / TABLE_FILE_PREFIXES["module_metabolite_association"], index=False)
+
+        module_summary_df = self.ml_results.get("module_summary_df", pd.DataFrame())
+        if isinstance(module_summary_df, pd.DataFrame) and not module_summary_df.empty:
+            module_summary_df.to_csv(out_dir / TABLE_FILE_PREFIXES["module_summary"], index=False)
 
         if self.config.export_cytoscape:
             export_frames = [
@@ -544,6 +603,15 @@ class MultiOmicsEngine:
         )
         self.run_metadata["n_high_confidence_edges"] = (
             int(len(high_confidence_network_df)) if isinstance(high_confidence_network_df, pd.DataFrame) else 0
+        )
+
+        gene_module_assignment_df = self.ml_results.get("gene_module_assignment_df", pd.DataFrame())
+        module_summary_df = self.ml_results.get("module_summary_df", pd.DataFrame())
+        self.run_metadata["n_module_assignment_rows"] = (
+            int(len(gene_module_assignment_df)) if isinstance(gene_module_assignment_df, pd.DataFrame) else 0
+        )
+        self.run_metadata["n_non_grey_modules"] = (
+            int(module_summary_df["Module"].nunique()) if isinstance(module_summary_df, pd.DataFrame) and not module_summary_df.empty else 0
         )
 
         write_json(

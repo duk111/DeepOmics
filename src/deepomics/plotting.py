@@ -94,6 +94,10 @@ TABLE_FILE_PREFIXES = {
     "key_gene_summary": "T04_Key_Gene_Summary.csv",
     "metabolite_summary": "T05_Metabolite_Association_Summary.csv",
     "cytoscape_network": "T06_Association_Network_Cytoscape.csv",
+    "gene_module_assignment": "T07_Gene_Module_Assignment.csv",
+    "module_eigengenes": "T08_Module_Eigengenes.csv",
+    "module_metabolite_association": "T09_Module_Metabolite_Association.csv",
+    "module_summary": "T10_Module_Summary.csv",
 }
 
 
@@ -878,6 +882,145 @@ def _prepare_circos_node_tables(engine) -> tuple[pd.DataFrame, pd.DataFrame, pd.
     return edge_df, gene_summary, metab_summary
 
 
+
+def _build_circos_module_color_map(module_names: list[str]) -> dict[str, str]:
+    ordered_modules = [str(name) for name in module_names if str(name).strip()]
+    unique_modules = _ordered_unique_nonempty(ordered_modules)
+
+    # Fixed WGCNA-like palette to keep module colors stable across runs and figures.
+    # Larger / earlier modules receive earlier canonical colors.
+    wgcna_palette = [
+        "#40E0D0",  # turquoise
+        "#1F77B4",  # blue
+        "#8B4513",  # brown
+        "#FFD700",  # yellow
+        "#2CA02C",  # green
+        "#D62728",  # red
+        "#000000",  # black
+        "#FFC0CB",  # pink
+        "#FF00FF",  # magenta
+        "#800080",  # purple
+        "#D2B48C",  # tan
+        "#FA8072",  # salmon
+        "#00FFFF",  # cyan
+        "#191970",  # midnightblue
+        "#E0FFFF",  # lightcyan
+        "#4169E1",  # royalblue
+        "#8B0000",  # darkred
+        "#006400",  # darkgreen
+        "#00CED1",  # darkturquoise
+        "#A9A9A9",  # darkgrey
+        "#FFA500",  # orange
+        "#FFFFFF",  # white
+        "#87CEEB",  # skyblue
+        "#A0522D",  # sienna / saddlebrown-like
+        "#4682B4",  # steelblue
+        "#AFEEEE",  # paleturquoise
+        "#EE82EE",  # violet
+        "#FF8C00",  # darkorange
+        "#8B008B",  # darkmagenta
+    ]
+
+    non_grey = [name for name in unique_modules if str(name).lower() != "grey"]
+    color_map: dict[str, str] = {}
+
+    for idx, module_name in enumerate(non_grey):
+        color_map[module_name] = wgcna_palette[idx % len(wgcna_palette)]
+
+    color_map["grey"] = "#BEBEBE"
+    return color_map
+
+def _attach_circos_module_annotations(engine, gene_summary: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
+    work = gene_summary.copy()
+    work["Module"] = "grey"
+    work["ModuleSize"] = 0
+    work["kME"] = np.nan
+    work["IntramodularDegree"] = np.nan
+    work["IsGrey"] = 1
+
+    module_df = engine.ml_results.get("gene_module_assignment_df", pd.DataFrame())
+    required_columns = {"Gene", "Module"}
+    if isinstance(module_df, pd.DataFrame) and not module_df.empty and required_columns.issubset(module_df.columns):
+        keep_cols = [
+            "Gene",
+            "Module",
+            "ModuleSize",
+            "kME",
+            "IntramodularDegree",
+            "IsGrey",
+        ]
+        module_keep = module_df.loc[:, [col for col in keep_cols if col in module_df.columns]].copy()
+        module_keep = module_keep.rename(columns={"Gene": "Node"})
+        module_keep["Node"] = module_keep["Node"].astype(str)
+        if "Module" in module_keep.columns:
+            module_keep["Module"] = module_keep["Module"].astype(str).replace("", "grey")
+        work = work.merge(module_keep, on="Node", how="left", suffixes=("", "_Module"))
+
+        for column, default_value in {
+            "Module_Module": "grey",
+            "ModuleSize_Module": 0,
+            "kME_Module": np.nan,
+            "IntramodularDegree_Module": np.nan,
+            "IsGrey_Module": 1,
+        }.items():
+            if column not in work.columns:
+                work[column] = default_value
+
+        work["Module"] = work["Module_Module"].fillna("grey").astype(str)
+        work["ModuleSize"] = pd.to_numeric(work["ModuleSize_Module"], errors="coerce").fillna(0).astype(int)
+        work["kME"] = pd.to_numeric(work["kME_Module"], errors="coerce").astype(float)
+        work["IntramodularDegree"] = pd.to_numeric(work["IntramodularDegree_Module"], errors="coerce").astype(float)
+        work["IsGrey"] = pd.to_numeric(work["IsGrey_Module"], errors="coerce").fillna(1).astype(int)
+        drop_cols = [col for col in work.columns if col.endswith("_Module")]
+        if drop_cols:
+            work = work.drop(columns=drop_cols)
+
+    work["Module"] = work["Module"].fillna("grey").astype(str)
+    work["IsGrey"] = (work["Module"].str.lower() == "grey").astype(int)
+
+    non_grey = work.loc[work["IsGrey"] == 0, ["Module", "ModuleSize"]].drop_duplicates()
+    module_order = non_grey.sort_values(
+        ["ModuleSize", "Module"],
+        ascending=[False, True],
+        kind="mergesort",
+    )["Module"].astype(str).tolist()
+    if "grey" in work["Module"].astype(str).tolist():
+        module_order.append("grey")
+
+    module_color_map = _build_circos_module_color_map(module_order)
+    work["ModuleColor"] = work["Module"].map(module_color_map).fillna("#d1d5db")
+
+    work = work.sort_values(
+        ["IsGrey", "ModuleSize", "Module", "kME", "IntramodularDegree", "WeightedDegree", "Node"],
+        ascending=[True, False, True, False, False, False, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+    return work, module_color_map
+
+
+def _compute_gene_module_spans(gene_summary: pd.DataFrame, layout: dict[str, dict[str, float | str]]) -> list[dict[str, object]]:
+    if gene_summary.empty or not layout:
+        return []
+
+    spans: list[dict[str, object]] = []
+    grouped = gene_summary.groupby("Module", sort=False)
+    for module_name, group in grouped:
+        nodes = [str(node) for node in group["Node"].astype(str).tolist() if str(node) in layout]
+        if not nodes:
+            continue
+        theta_start = float(layout[nodes[0]]["theta_start"])
+        theta_end = float(layout[nodes[-1]]["theta_end"])
+        spans.append(
+            {
+                "Module": str(module_name),
+                "ThetaStart": theta_start,
+                "ThetaEnd": theta_end,
+                "Color": str(group["ModuleColor"].iloc[0]),
+                "GeneCount": int(len(nodes)),
+            }
+        )
+    return spans
+
 def _compute_circos_layout(gene_nodes: list[str], metabolite_nodes: list[str]) -> dict[str, dict[str, float | str]]:
     """Assign compact angular positions with genes and metabolites in two consecutive sectors."""
     n_gene = len(gene_nodes)
@@ -1127,11 +1270,19 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
     if edge_df.empty or gene_summary.empty or metabolite_summary.empty:
         return
 
+    gene_summary, _module_color_map = _attach_circos_module_annotations(engine, gene_summary)
+
     gene_nodes = gene_summary["Node"].astype(str).tolist()
     metabolite_nodes = metabolite_summary["Node"].astype(str).tolist()
     layout = _compute_circos_layout(gene_nodes, metabolite_nodes)
     if not layout:
         return
+
+    module_spans = _compute_gene_module_spans(gene_summary, layout)
+
+    metabolite_summary = metabolite_summary.copy()
+    metabolite_summary["Module"] = ""
+    metabolite_summary["ModuleColor"] = "#c9ad85"
 
     node_df = pd.concat([gene_summary, metabolite_summary], ignore_index=True)
     node_df["Node"] = node_df["Node"].astype(str)
@@ -1149,8 +1300,10 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
     bias_cmap = plt.get_cmap("RdBu_r")
 
     radii = {
-        "outer_strip_inner": 0.995,
-        "outer_strip_outer": 1.038,
+        "outer_strip_inner": 0.992,
+        "outer_strip_outer": 1.035,
+        "module_band_inner": 1.041,
+        "module_band_outer": 1.058,
         "track1a_inner": 0.86,
         "track1a_outer": 0.975,
         "track1b_inner": 0.795,
@@ -1165,7 +1318,7 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
     }
     track1a_mid = 0.5 * (radii["track1a_inner"] + radii["track1a_outer"])
 
-    fig, ax = plt.subplots(figsize=(10.5, 10.5))
+    fig, ax = plt.subplots(figsize=(10.7, 10.7))
     ax.set_aspect("equal")
     ax.axis("off")
     fig.patch.set_facecolor("white")
@@ -1220,7 +1373,11 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
         degree_value = float(max(0.0, row.WeightedDegree))
         direction_bias = float(np.clip(row.DirectionBias, -1.0, 1.0))
 
-        outer_color = "#7db8ab" if node_type == "gene" else "#c9ad85"
+        if node_type == "gene":
+            outer_color = getattr(row, "ModuleColor", "#7db8ab")
+        else:
+            outer_color = "#c9ad85"
+
         _add_annular_segment(
             ax,
             theta_start,
@@ -1318,10 +1475,167 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
             zorder=1.0,
         )
 
-    outer_limit = radii["outer_strip_outer"] + 0.05
+    for span in module_spans:
+        module_name = str(span["Module"])
+        if not module_name or module_name.lower() == "grey":
+            continue
+        _add_annular_segment(
+            ax,
+            float(span["ThetaStart"]),
+            float(span["ThetaEnd"]),
+            radii["module_band_inner"],
+            radii["module_band_outer"],
+            facecolor=str(span["Color"]),
+            edgecolor="#ffffff",
+            linewidth=0.55,
+            alpha=1.0,
+            zorder=4.8,
+        )
+
+    outer_limit = radii["module_band_outer"] + 0.05
     ax.set_xlim(-outer_limit, outer_limit)
     ax.set_ylim(-outer_limit, outer_limit)
     _save_figure(fig, save_stem, cfg)
+
+def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
+    metabolite_summary = engine.ml_results.get("metabolite_summary", pd.DataFrame())
+    key_gene_summary = engine.ml_results.get("key_gene_summary_df", pd.DataFrame())
+
+    lines = [
+        f"# DeepOmics Report: {cfg.project_name}",
+        "",
+        "## Run Summary",
+        f"- Samples: {engine.adata.n_obs}",
+        f"- Genes: {engine.adata.n_vars}",
+        f"- Metabolites: {len(engine.adata.uns.get('metabolite_names', []))}",
+        f"- Output directory: `{cfg.output_dir}`",
+        "",
+        "## Main Tables",
+        f"- `{TABLE_FILE_PREFIXES['gene_scores']}`: complete metabolite-level gene scoring table after three-way screening and two-model ranking.",
+        f"- `{TABLE_FILE_PREFIXES['total_network']}`: total gene-metabolite association network from ElasticNet top-k union XGBoost top-k.",
+        f"- `{TABLE_FILE_PREFIXES['high_confidence_network']}`: high-confidence subnetwork of the total association network after RRA and multi-evidence filtering.",
+        f"- `{TABLE_FILE_PREFIXES['key_gene_summary']}`: merged key-gene summary across metabolites.",
+        f"- `{TABLE_FILE_PREFIXES['metabolite_summary']}`: metabolite-level candidate and network summary.",
+        f"- `{TABLE_FILE_PREFIXES['cytoscape_network']}`: Cytoscape-ready edge table with updated association fields.",
+        "",
+        "## Metabolite-Level Summary",
+        _df_to_markdown(metabolite_summary, max_rows=20),
+        "",
+        "## Key Gene Summary",
+        _df_to_markdown(key_gene_summary, max_rows=20),
+        "",
+        "## Generated Figures",
+        f"- `plots/{FIGURE_FILE_PREFIXES['sample_clustering_dendrogram']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['transcriptome_pca']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_pca']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['total_association_network']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['high_confidence_network']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['metabolite_model_support_summary']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['top_key_genes']}.pdf|svg|png`",
+        "- `DeepOmics_Interactive_Report.html`",
+    ]
+    Path(report_path).write_text("\n".join(lines), encoding="utf-8")
+
+
+def generate_html_report(engine, cfg, report_path: str | Path) -> None:
+    metabolite_summary = engine.ml_results.get("metabolite_summary", pd.DataFrame()).head(50)
+    key_gene_summary = engine.ml_results.get("key_gene_summary_df", pd.DataFrame()).head(50)
+
+    table_rows = "".join([
+        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['gene_scores'])}</code></td><td>Complete metabolite-level gene scoring table after three-way screening and two-model ranking.</td></tr>",
+        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['total_network'])}</code></td><td>Total gene-metabolite association network from ElasticNet top-k union XGBoost top-k.</td></tr>",
+        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['high_confidence_network'])}</code></td><td>High-confidence subnetwork of the total association network after RRA and multi-evidence filtering.</td></tr>",
+        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['key_gene_summary'])}</code></td><td>Merged key-gene summary across metabolites.</td></tr>",
+        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['metabolite_summary'])}</code></td><td>Metabolite-level candidate and network summary.</td></tr>",
+        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['cytoscape_network'])}</code></td><td>Cytoscape-ready edge table with updated association fields.</td></tr>",
+    ])
+
+    figure_rows = "".join([
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['sample_clustering_dendrogram'])}.pdf|svg|png</code></td><td>Sample clustering dendrogram.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_pca'])}.pdf|svg|png</code></td><td>Transcriptome PCA scatter plot.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_pca'])}.pdf|svg|png</code></td><td>Metabolome PCA scatter plot.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['total_association_network'])}.pdf|svg|png</code></td><td>Total gene-metabolite association network.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['high_confidence_network'])}.pdf|svg|png</code></td><td>High-confidence gene-metabolite association network.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['compressed_circos_network'])}.pdf|svg|png</code></td><td>Compact Circos overview using all unique genes and metabolites from T03 only.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs'])}.pdf|svg|png</code></td><td>Top association pair scatter panels ranked by EdgeWeight.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolite_model_support_summary'])}.pdf|svg|png</code></td><td>Metabolite-level model support summary.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_key_genes'])}.pdf|svg|png</code></td><td>Top key genes across metabolites.</td></tr>",
+    ])
+
+    html_text = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>DeepOmics Report - {html.escape(cfg.project_name)}</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 32px; line-height: 1.5; color: #111827; }}
+    h1, h2 {{ color: #1f2937; }}
+    .hero {{
+      background: #f8fafc;
+      border: 1px solid #d1d5db;
+      border-radius: 14px;
+      padding: 20px 24px;
+      margin-bottom: 24px;
+    }}
+    .link-card {{
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 24px;
+    }}
+    table {{ border-collapse: collapse; width: 100%; margin-bottom: 24px; }}
+    th, td {{ border: 1px solid #d1d5db; padding: 8px; text-align: left; vertical-align: top; }}
+    th {{ background: #f3f4f6; }}
+    code {{ background: #f3f4f6; padding: 2px 6px; border-radius: 6px; }}
+    a {{ color: #1d4ed8; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+  </style>
+</head>
+<body>
+  <div class="hero">
+    <h1>DeepOmics Report: {html.escape(cfg.project_name)}</h1>
+    <p>This page summarizes structured association tables and figure file names.</p>
+  </div>
+
+  <h2>Run Summary</h2>
+  <ul>
+    <li>Samples: {engine.adata.n_obs}</li>
+    <li>Genes: {engine.adata.n_vars}</li>
+    <li>Metabolites: {len(engine.adata.uns.get("metabolite_names", []))}</li>
+    <li>Output directory: <code>{html.escape(str(cfg.output_dir))}</code></li>
+  </ul>
+
+  <div class="link-card">
+    <strong>Interactive report:</strong>
+    Open <a href="DeepOmics_Interactive_Report.html"><code>DeepOmics_Interactive_Report.html</code></a>
+    for lightweight browser-native visualization preview and SVG export.
+  </div>
+
+  <h2>Main Output Tables</h2>
+  <table>
+    <thead><tr><th>File</th><th>Description</th></tr></thead>
+    <tbody>{table_rows}</tbody>
+  </table>
+
+  <h2>Generated Figures</h2>
+  <table>
+    <thead><tr><th>File</th><th>Description</th></tr></thead>
+    <tbody>{figure_rows}</tbody>
+  </table>
+
+  <h2>Metabolite-Level Summary</h2>
+  {metabolite_summary.to_html(index=False, escape=True)}
+
+  <h2>Key Gene Summary</h2>
+  {key_gene_summary.to_html(index=False, escape=True)}
+</body>
+</html>
+"""
+    Path(report_path).write_text(html_text, encoding="utf-8")
+
 
 
 def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int | None = None) -> None:
@@ -1589,6 +1903,7 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
 </html>
 """
     Path(report_path).write_text(html_text, encoding="utf-8")
+
 
 
 
