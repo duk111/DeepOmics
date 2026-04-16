@@ -887,52 +887,51 @@ def _build_circos_module_color_map(module_names: list[str]) -> dict[str, str]:
     ordered_modules = [str(name) for name in module_names if str(name).strip()]
     unique_modules = _ordered_unique_nonempty(ordered_modules)
 
-    # Fixed WGCNA-like palette to keep module colors stable across runs and figures.
-    # Larger / earlier modules receive earlier canonical colors.
-    wgcna_palette = [
-        "#40E0D0",  # turquoise
-        "#1F77B4",  # blue
-        "#8B4513",  # brown
-        "#FFD700",  # yellow
-        "#2CA02C",  # green
-        "#D62728",  # red
-        "#000000",  # black
-        "#FFC0CB",  # pink
-        "#FF00FF",  # magenta
-        "#800080",  # purple
-        "#D2B48C",  # tan
-        "#FA8072",  # salmon
-        "#00FFFF",  # cyan
-        "#191970",  # midnightblue
-        "#E0FFFF",  # lightcyan
-        "#4169E1",  # royalblue
-        "#8B0000",  # darkred
-        "#006400",  # darkgreen
-        "#00CED1",  # darkturquoise
-        "#A9A9A9",  # darkgrey
-        "#FFA500",  # orange
-        "#FFFFFF",  # white
-        "#87CEEB",  # skyblue
-        "#A0522D",  # sienna / saddlebrown-like
-        "#4682B4",  # steelblue
-        "#AFEEEE",  # paleturquoise
-        "#EE82EE",  # violet
-        "#FF8C00",  # darkorange
-        "#8B008B",  # darkmagenta
-    ]
+    canonical_map = {
+        "turquoise": "#40E0D0",
+        "blue": "#1F77B4",
+        "brown": "#8B4513",
+        "yellow": "#FFD700",
+        "green": "#2CA02C",
+        "red": "#D62728",
+        "black": "#000000",
+        "pink": "#FFC0CB",
+        "magenta": "#FF00FF",
+        "purple": "#800080",
+        "greenyellow": "#ADFF2F",
+        "tan": "#D2B48C",
+        "salmon": "#FA8072",
+        "cyan": "#00FFFF",
+        "midnightblue": "#191970",
+        "lightcyan": "#E0FFFF",
+        "royalblue": "#4169E1",
+        "darkred": "#8B0000",
+        "darkgreen": "#006400",
+        "darkturquoise": "#00CED1",
+        "darkgrey": "#A9A9A9",
+        "orange": "#FFA500",
+        "white": "#FFFFFF",
+        "skyblue": "#87CEEB",
+        "saddlebrown": "#8B4513",
+        "steelblue": "#4682B4",
+        "paleturquoise": "#AFEEEE",
+        "violet": "#EE82EE",
+        "darkorange": "#FF8C00",
+        "darkmagenta": "#8B008B",
+        "grey": "#E5E7EB",
+    }
 
-    non_grey = [name for name in unique_modules if str(name).lower() != "grey"]
+    fallback_palette = _categorical_colors(len(unique_modules))
     color_map: dict[str, str] = {}
-
-    for idx, module_name in enumerate(non_grey):
-        color_map[module_name] = wgcna_palette[idx % len(wgcna_palette)]
-
-    color_map["grey"] = "#BEBEBE"
+    for idx, module_name in enumerate(unique_modules):
+        key = str(module_name).strip().lower()
+        color_map[module_name] = canonical_map.get(key, fallback_palette[idx % len(fallback_palette)] if fallback_palette else "#9ca3af")
     return color_map
 
 def _attach_circos_module_annotations(engine, gene_summary: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
     work = gene_summary.copy()
     work["Module"] = "grey"
+    work["ModuleColor"] = "#E5E7EB"
     work["ModuleSize"] = 0
     work["kME"] = np.nan
     work["IntramodularDegree"] = np.nan
@@ -944,6 +943,7 @@ def _attach_circos_module_annotations(engine, gene_summary: pd.DataFrame) -> tup
         keep_cols = [
             "Gene",
             "Module",
+            "ModuleColorHex",
             "ModuleSize",
             "kME",
             "IntramodularDegree",
@@ -952,25 +952,18 @@ def _attach_circos_module_annotations(engine, gene_summary: pd.DataFrame) -> tup
         module_keep = module_df.loc[:, [col for col in keep_cols if col in module_df.columns]].copy()
         module_keep = module_keep.rename(columns={"Gene": "Node"})
         module_keep["Node"] = module_keep["Node"].astype(str)
-        if "Module" in module_keep.columns:
-            module_keep["Module"] = module_keep["Module"].astype(str).replace("", "grey")
+        module_keep["Module"] = module_keep["Module"].astype(str).replace("", "grey")
         work = work.merge(module_keep, on="Node", how="left", suffixes=("", "_Module"))
 
-        for column, default_value in {
-            "Module_Module": "grey",
-            "ModuleSize_Module": 0,
-            "kME_Module": np.nan,
-            "IntramodularDegree_Module": np.nan,
-            "IsGrey_Module": 1,
-        }.items():
-            if column not in work.columns:
-                work[column] = default_value
+        work["Module"] = work.get("Module_Module", work["Module"]).fillna("grey").astype(str)
+        work["ModuleSize"] = pd.to_numeric(work.get("ModuleSize_Module", 0), errors="coerce").fillna(0).astype(int)
+        work["kME"] = pd.to_numeric(work.get("kME_Module", np.nan), errors="coerce").astype(float)
+        work["IntramodularDegree"] = pd.to_numeric(work.get("IntramodularDegree_Module", np.nan), errors="coerce").astype(float)
+        work["IsGrey"] = pd.to_numeric(work.get("IsGrey_Module", 1), errors="coerce").fillna(1).astype(int)
 
-        work["Module"] = work["Module_Module"].fillna("grey").astype(str)
-        work["ModuleSize"] = pd.to_numeric(work["ModuleSize_Module"], errors="coerce").fillna(0).astype(int)
-        work["kME"] = pd.to_numeric(work["kME_Module"], errors="coerce").astype(float)
-        work["IntramodularDegree"] = pd.to_numeric(work["IntramodularDegree_Module"], errors="coerce").astype(float)
-        work["IsGrey"] = pd.to_numeric(work["IsGrey_Module"], errors="coerce").fillna(1).astype(int)
+        if "ModuleColorHex_Module" in work.columns:
+            work["ModuleColor"] = work["ModuleColorHex_Module"].fillna("#E5E7EB").astype(str)
+
         drop_cols = [col for col in work.columns if col.endswith("_Module")]
         if drop_cols:
             work = work.drop(columns=drop_cols)
@@ -988,7 +981,9 @@ def _attach_circos_module_annotations(engine, gene_summary: pd.DataFrame) -> tup
         module_order.append("grey")
 
     module_color_map = _build_circos_module_color_map(module_order)
-    work["ModuleColor"] = work["Module"].map(module_color_map).fillna("#d1d5db")
+    missing_color_mask = work["ModuleColor"].isna() | work["ModuleColor"].astype(str).eq("")
+    work.loc[missing_color_mask, "ModuleColor"] = work.loc[missing_color_mask, "Module"].map(module_color_map).fillna("#E5E7EB")
+    work["ModuleColor"] = work["Module"].map(module_color_map).fillna(work["ModuleColor"]).fillna("#E5E7EB")
 
     work = work.sort_values(
         ["IsGrey", "ModuleSize", "Module", "kME", "IntramodularDegree", "WeightedDegree", "Node"],
@@ -996,7 +991,6 @@ def _attach_circos_module_annotations(engine, gene_summary: pd.DataFrame) -> tup
         kind="mergesort",
     ).reset_index(drop=True)
     return work, module_color_map
-
 
 def _compute_gene_module_spans(gene_summary: pd.DataFrame, layout: dict[str, dict[str, float | str]]) -> list[dict[str, object]]:
     if gene_summary.empty or not layout:
@@ -1264,6 +1258,265 @@ def plot_high_confidence_network(engine, save_stem: str | Path, cfg) -> None:
     _plot_association_network(edge_df, "High-Confidence Gene-Metabolite Association Network", save_stem, cfg)
 
 
+
+
+def _robust_abs_scale(values) -> float:
+    arr = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return 1.0
+    scale = float(np.nanpercentile(np.abs(arr), 95))
+    return max(scale, 1e-6)
+
+
+def _positive_scale(values) -> float:
+    arr = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return 1.0
+    scale = float(np.nanmax(arr))
+    return max(scale, 1e-6)
+
+
+def _prepare_group1_mean_track_data(feature_df: pd.DataFrame, group_df: pd.DataFrame | None) -> dict[str, object] | None:
+    if feature_df.empty:
+        return None
+
+    feature_work = feature_df.copy()
+    feature_work.index = feature_work.index.astype(str)
+
+    if group_df is None or "sample_id" not in group_df.columns or "group1" not in group_df.columns:
+        mean_series = feature_work.mean(axis=0).astype(float)
+        return {
+            "mode": "overall_mean",
+            "feature_to_values": {str(feature): [float(mean_series.get(feature, np.nan))] for feature in feature_work.columns.astype(str)},
+            "abs_scale": _robust_abs_scale(mean_series.tolist()),
+            "group1_order": [],
+        }
+
+    group_work = group_df.copy()
+    group_work["sample_id"] = group_work["sample_id"].astype(str).str.strip()
+    group_work["group1"] = group_work["group1"].astype(str).str.strip()
+    group_work = group_work.loc[group_work["sample_id"].isin(feature_work.index)].copy()
+    if group_work.empty:
+        mean_series = feature_work.mean(axis=0).astype(float)
+        return {
+            "mode": "overall_mean",
+            "feature_to_values": {str(feature): [float(mean_series.get(feature, np.nan))] for feature in feature_work.columns.astype(str)},
+            "abs_scale": _robust_abs_scale(mean_series.tolist()),
+            "group1_order": [],
+        }
+
+    group_work = group_work.drop_duplicates(subset=["sample_id"], keep="first").set_index("sample_id", drop=True)
+    aligned_samples = [sample for sample in feature_work.index.tolist() if sample in group_work.index]
+    if not aligned_samples:
+        mean_series = feature_work.mean(axis=0).astype(float)
+        return {
+            "mode": "overall_mean",
+            "feature_to_values": {str(feature): [float(mean_series.get(feature, np.nan))] for feature in feature_work.columns.astype(str)},
+            "abs_scale": _robust_abs_scale(mean_series.tolist()),
+            "group1_order": [],
+        }
+
+    feature_work = feature_work.loc[aligned_samples].copy()
+    aligned_group = group_work.reindex(aligned_samples).copy()
+    group1_order = _ordered_unique_nonempty(aligned_group["group1"].tolist())
+    if not group1_order:
+        mean_series = feature_work.mean(axis=0).astype(float)
+        return {
+            "mode": "overall_mean",
+            "feature_to_values": {str(feature): [float(mean_series.get(feature, np.nan))] for feature in feature_work.columns.astype(str)},
+            "abs_scale": _robust_abs_scale(mean_series.tolist()),
+            "group1_order": [],
+        }
+
+    agg_input = feature_work.copy()
+    agg_input["group1"] = aligned_group["group1"].astype(str).to_numpy()
+    agg_df = agg_input.groupby("group1", sort=False)[feature_work.columns.astype(str).tolist()].mean()
+    feature_to_values = {
+        str(feature): [float(agg_df.loc[group_name, feature]) for group_name in group1_order if group_name in agg_df.index]
+        for feature in feature_work.columns.astype(str).tolist()
+    }
+    flattened = [float(v) for values in feature_to_values.values() for v in values if np.isfinite(v)]
+    return {
+        "mode": "group1_mean",
+        "feature_to_values": feature_to_values,
+        "abs_scale": _robust_abs_scale(flattened),
+        "group1_order": group1_order,
+    }
+
+
+def _draw_track_baseline(ax: plt.Axes, theta_start: float, theta_end: float, radius: float, *, color: str = "#d1d5db", linewidth: float = 0.18, alpha: float = 1.0, zorder: float = 2.7) -> None:
+    n_points = 32
+    thetas = np.linspace(theta_start, theta_end, n_points)
+    xs = radius * np.cos(thetas)
+    ys = radius * np.sin(thetas)
+    ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha, zorder=zorder)
+
+
+def _draw_group1_scatter_track(
+    ax: plt.Axes,
+    theta_start: float,
+    theta_end: float,
+    r_inner: float,
+    r_outer: float,
+    *,
+    values: list[float],
+    value_scale: float,
+    random_state: int,
+    zorder: float = 3.1,
+) -> None:
+    _add_annular_segment(
+        ax,
+        theta_start,
+        theta_end,
+        r_inner,
+        r_outer,
+        facecolor="#fbfbfb",
+        edgecolor="#eef2f7",
+        linewidth=0.14,
+        alpha=1.0,
+        zorder=int(zorder),
+    )
+    r_mid = 0.5 * (r_inner + r_outer)
+    _draw_track_baseline(ax, theta_start, theta_end, r_mid, color="#d1d5db", linewidth=0.18, alpha=0.9, zorder=zorder)
+
+    clean_values = [float(v) for v in values if np.isfinite(v)]
+    if not clean_values:
+        return
+
+    rng_seed = int(random_state + round(float(theta_start) * 1e6)) % (2**32 - 1)
+    rng = np.random.default_rng(rng_seed)
+
+    theta_width = float(theta_end - theta_start)
+    span_scale = max(theta_width * 0.06, np.deg2rad(0.08))
+    radial_half_span = 0.42 * (r_outer - r_inner)
+    scale = max(float(value_scale), 1e-6)
+
+    for value in clean_values:
+        theta = 0.5 * (theta_start + theta_end) + float(rng.uniform(-span_scale, span_scale))
+        clipped = float(np.clip(value, -scale, scale))
+        radius = r_mid + (clipped / scale) * radial_half_span
+        x, y = _polar_to_xy(theta, radius)
+        ax.scatter([x], [y], s=5.0, c=["#6b7280"], edgecolors="none", alpha=0.92, zorder=zorder + 0.15)
+
+
+def _draw_mean_hist_track(
+    ax: plt.Axes,
+    theta_start: float,
+    theta_end: float,
+    r_inner: float,
+    r_outer: float,
+    *,
+    value: float,
+    value_scale: float,
+    color: str = "#6b7280",
+    zorder: float = 3.0,
+) -> None:
+    _add_annular_segment(
+        ax,
+        theta_start,
+        theta_end,
+        r_inner,
+        r_outer,
+        facecolor="#fbfbfb",
+        edgecolor="#eef2f7",
+        linewidth=0.14,
+        alpha=1.0,
+        zorder=int(zorder),
+    )
+    r_mid = 0.5 * (r_inner + r_outer)
+    _draw_track_baseline(ax, theta_start, theta_end, r_mid, color="#d1d5db", linewidth=0.18, alpha=0.9, zorder=zorder)
+
+    scale = max(float(value_scale), 1e-6)
+    clipped = float(np.clip(value, -scale, scale))
+    if clipped >= 0:
+        bar_inner = r_mid
+        bar_outer = r_mid + (clipped / scale) * (r_outer - r_mid)
+    else:
+        bar_inner = r_mid + (clipped / scale) * (r_mid - r_inner)
+        bar_outer = r_mid
+
+    _add_annular_segment(
+        ax,
+        theta_start,
+        theta_end,
+        bar_inner,
+        bar_outer,
+        facecolor=color,
+        edgecolor="none",
+        linewidth=0.0,
+        alpha=0.88,
+        zorder=int(zorder + 0.1),
+    )
+
+
+def _prepare_metabolite_module_core_map(engine) -> pd.Series:
+    assoc_df = engine.ml_results.get("module_metabolite_assoc_df", pd.DataFrame())
+    if isinstance(assoc_df, pd.DataFrame) and not assoc_df.empty and {"Metabolite", "SpearmanRho"}.issubset(assoc_df.columns):
+        work = assoc_df.copy()
+        work["Metabolite"] = work["Metabolite"].astype(str)
+        work["AbsRho"] = pd.to_numeric(work["SpearmanRho"], errors="coerce").abs()
+        best = work.groupby("Metabolite", sort=False)["AbsRho"].max()
+        return best.astype(float)
+    edge_df = engine.ml_results.get("high_confidence_network_df", pd.DataFrame())
+    if isinstance(edge_df, pd.DataFrame) and not edge_df.empty and {"Metabolite", "EdgeWeight"}.issubset(edge_df.columns):
+        fallback = edge_df.groupby("Metabolite", sort=False)["EdgeWeight"].sum()
+        return fallback.astype(float)
+    return pd.Series(dtype=float)
+
+
+def _prepare_module_legend_items(gene_summary: pd.DataFrame) -> list[tuple[str, str]]:
+    if gene_summary.empty or "Module" not in gene_summary.columns:
+        return []
+    seen: set[str] = set()
+    items: list[tuple[str, str]] = []
+    for row in gene_summary.loc[:, ["Module", "ModuleColor"]].drop_duplicates().itertuples(index=False):
+        module_name = str(row.Module)
+        if module_name in seen:
+            continue
+        seen.add(module_name)
+        items.append((module_name, str(row.ModuleColor)))
+    return items
+
+
+def _add_corner_module_legend(
+    ax: plt.Axes,
+    legend_items: list[tuple[str, str]],
+    *,
+    x_left: float,
+    y_top: float,
+    row_height: float = 0.072,
+    swatch_width: float = 0.12,
+    swatch_height: float = 0.028,
+) -> None:
+    if not legend_items:
+        return
+
+    for idx, (module_name, module_color) in enumerate(legend_items):
+        y = y_top - idx * row_height
+        rect = plt.Rectangle(
+            (x_left, y - 0.5 * swatch_height),
+            swatch_width,
+            swatch_height,
+            facecolor=module_color,
+            edgecolor="#9ca3af",
+            linewidth=0.3,
+            zorder=7,
+        )
+        ax.add_patch(rect)
+        ax.text(
+            x_left + swatch_width + 0.03,
+            y,
+            module_name,
+            ha="left",
+            va="center",
+            fontsize=8.0,
+            color="#374151",
+            zorder=7,
+        )
+
+
 def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
     """Plot a compact static Circos figure using only T03 nodes and edges."""
     edge_df, gene_summary, metabolite_summary = _prepare_circos_node_tables(engine)
@@ -1272,53 +1525,56 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
 
     gene_summary, _module_color_map = _attach_circos_module_annotations(engine, gene_summary)
 
+    metabolite_module_core = _prepare_metabolite_module_core_map(engine)
+    metabolite_summary = metabolite_summary.copy()
+    metabolite_summary["Module"] = ""
+    metabolite_summary["ModuleColor"] = "#c9ad85"
+    metabolite_summary["ModuleCore"] = metabolite_summary["Node"].map(metabolite_module_core).astype(float)
+
+    gene_summary["ModuleCore"] = pd.to_numeric(gene_summary.get("kME", np.nan), errors="coerce").abs()
     gene_nodes = gene_summary["Node"].astype(str).tolist()
     metabolite_nodes = metabolite_summary["Node"].astype(str).tolist()
     layout = _compute_circos_layout(gene_nodes, metabolite_nodes)
     if not layout:
         return
 
-    module_spans = _compute_gene_module_spans(gene_summary, layout)
-
-    metabolite_summary = metabolite_summary.copy()
-    metabolite_summary["Module"] = ""
-    metabolite_summary["ModuleColor"] = "#c9ad85"
-
     node_df = pd.concat([gene_summary, metabolite_summary], ignore_index=True)
     node_df["Node"] = node_df["Node"].astype(str)
 
-    z_clip = float(np.nanpercentile(np.abs(node_df["MeanZScore"]), 95)) if not node_df.empty else 1.0
-    max_abs_z = max(z_clip, 1e-6)
-    max_weighted_degree = float(node_df["WeightedDegree"].max()) if not node_df.empty else 1.0
-    max_weighted_degree = max(max_weighted_degree, 1e-6)
-    max_variability = float(node_df["InterSampleVariability"].max()) if "InterSampleVariability" in node_df.columns and not node_df.empty else 1.0
-    max_variability = max(max_variability, 1e-6)
+    gene_mean_scale = _robust_abs_scale(gene_summary["MeanZScore"])
+    metabolite_mean_scale = _robust_abs_scale(metabolite_summary["MeanZScore"])
+    gene_degree_scale = _positive_scale(gene_summary["WeightedDegree"])
+    metabolite_degree_scale = _positive_scale(metabolite_summary["WeightedDegree"])
+    gene_core_scale = _positive_scale(gene_summary["ModuleCore"])
+    metabolite_core_scale = _positive_scale(metabolite_summary["ModuleCore"])
 
-    mean_norm = colors.TwoSlopeNorm(vmin=-max_abs_z, vcenter=0.0, vmax=max_abs_z)
+    gene_mean_norm = colors.TwoSlopeNorm(vmin=-gene_mean_scale, vcenter=0.0, vmax=gene_mean_scale)
+    metabolite_mean_norm = colors.TwoSlopeNorm(vmin=-metabolite_mean_scale, vcenter=0.0, vmax=metabolite_mean_scale)
     bias_norm = colors.TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
     mean_cmap = plt.get_cmap("RdBu_r")
     bias_cmap = plt.get_cmap("RdBu_r")
 
+    group_df = _load_pca_group_table(cfg)
+    gene_track_data = _prepare_group1_mean_track_data(_gene_expression_df(engine.adata), group_df)
+    metabolite_track_data = _prepare_group1_mean_track_data(_metabolomics_df(engine.adata), group_df)
+
     radii = {
         "outer_strip_inner": 0.992,
         "outer_strip_outer": 1.035,
-        "module_band_inner": 1.041,
-        "module_band_outer": 1.058,
-        "track1a_inner": 0.86,
-        "track1a_outer": 0.975,
-        "track1b_inner": 0.795,
-        "track1b_outer": 0.85,
-        "track2_inner": 0.685,
-        "track2_outer": 0.775,
-        "track3_inner": 0.605,
-        "track3_outer": 0.655,
-        "track4_inner": 0.53,
-        "track4_outer": 0.58,
+        "track_meanbar_inner": 0.86,
+        "track_meanbar_outer": 0.975,
+        "track_meanheat_inner": 0.795,
+        "track_meanheat_outer": 0.85,
+        "track_degree_inner": 0.685,
+        "track_degree_outer": 0.775,
+        "track_core_inner": 0.605,
+        "track_core_outer": 0.675,
+        "track_bias_inner": 0.53,
+        "track_bias_outer": 0.58,
         "link_radius": 0.47,
     }
-    track1a_mid = 0.5 * (radii["track1a_inner"] + radii["track1a_outer"])
 
-    fig, ax = plt.subplots(figsize=(10.7, 10.7))
+    fig, ax = plt.subplots(figsize=(11.7, 10.8))
     ax.set_aspect("equal")
     ax.axis("off")
     fig.patch.set_facecolor("white")
@@ -1340,13 +1596,13 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
             continue
 
         edge_weight = float(np.clip(getattr(row, "EdgeWeight", 0.0), 0.0, None))
-        line_width = 0.20 + 1.80 * np.sqrt(min(1.0, edge_weight))
+        line_width = 0.18 + 1.72 * np.sqrt(min(1.0, edge_weight))
 
         model_support = float(getattr(row, "ModelSupportCount", 0.0))
         if support_max > support_min:
-            line_alpha = 0.06 + 0.32 * (model_support - support_min) / (support_max - support_min)
+            line_alpha = 0.05 + 0.30 * (model_support - support_min) / (support_max - support_min)
         else:
-            line_alpha = 0.24 if support_max > 0 else 0.10
+            line_alpha = 0.22 if support_max > 0 else 0.08
 
         line_color = PALETTE["edge_positive"] if str(row.Sign).lower() == "positive" else PALETTE["edge_negative"]
         _add_circos_link(
@@ -1356,7 +1612,7 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
             radii["link_radius"],
             color=line_color,
             linewidth=line_width,
-            alpha=float(np.clip(line_alpha, 0.05, 0.95)),
+            alpha=float(np.clip(line_alpha, 0.04, 0.92)),
             zorder=0,
         )
 
@@ -1372,11 +1628,22 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
         mean_value = float(row.MeanZScore)
         degree_value = float(max(0.0, row.WeightedDegree))
         direction_bias = float(np.clip(row.DirectionBias, -1.0, 1.0))
+        core_value = float(max(0.0, getattr(row, "ModuleCore", np.nan))) if pd.notna(getattr(row, "ModuleCore", np.nan)) else 0.0
 
         if node_type == "gene":
             outer_color = getattr(row, "ModuleColor", "#7db8ab")
+            mean_norm = gene_mean_norm
+            degree_scale = gene_degree_scale
+            core_scale = gene_core_scale
+            track_data = gene_track_data
+            core_color = outer_color
         else:
             outer_color = "#c9ad85"
+            mean_norm = metabolite_mean_norm
+            degree_scale = metabolite_degree_scale
+            core_scale = metabolite_core_scale
+            track_data = metabolite_track_data
+            core_color = "#8c6d46"
 
         _add_annular_segment(
             ax,
@@ -1396,69 +1663,72 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
             ax,
             theta_start,
             theta_end,
-            radii["track1b_inner"],
-            radii["track1b_outer"],
+            radii["track_meanheat_inner"],
+            radii["track_meanheat_outer"],
             facecolor=mean_color,
             edgecolor="#ffffff",
-            linewidth=0.25,
+            linewidth=0.22,
             alpha=1.0,
-            zorder=3,
+            zorder=3.2,
         )
 
-        if mean_value != 0.0:
-            if mean_value > 0:
-                max_len = radii["track1a_outer"] - track1a_mid
-                bar_outer = track1a_mid + max_len * min(1.0, abs(mean_value) / max_abs_z)
-                bar_inner = track1a_mid
-            else:
-                max_len = track1a_mid - radii["track1a_inner"]
-                bar_outer = track1a_mid
-                bar_inner = track1a_mid - max_len * min(1.0, abs(mean_value) / max_abs_z)
-
-            _add_annular_segment(
+        track_values = track_data["feature_to_values"].get(node_id, []) if track_data is not None else []
+        if track_data is not None and str(track_data.get("mode", "")) == "group1_mean":
+            _draw_group1_scatter_track(
                 ax,
                 theta_start,
                 theta_end,
-                bar_inner,
-                bar_outer,
-                facecolor=mean_color,
-                edgecolor="none",
-                linewidth=0.0,
-                alpha=0.95,
-                zorder=3,
+                radii["track_meanbar_inner"],
+                radii["track_meanbar_outer"],
+                values=list(track_values),
+                value_scale=float(track_data.get("abs_scale", 1.0)),
+                random_state=int(getattr(cfg, "random_state", 42)),
+                zorder=3.45,
+            )
+        else:
+            mean_value_for_bar = float(track_values[0]) if track_values else float(mean_value)
+            _draw_mean_hist_track(
+                ax,
+                theta_start,
+                theta_end,
+                radii["track_meanbar_inner"],
+                radii["track_meanbar_outer"],
+                value=mean_value_for_bar,
+                value_scale=float(track_data.get("abs_scale", 1.0) if track_data is not None else max(gene_mean_scale, metabolite_mean_scale)),
+                color="#6b7280",
+                zorder=3.45,
             )
 
-        degree_outer = radii["track2_inner"] + (radii["track2_outer"] - radii["track2_inner"]) * min(
-            1.0, degree_value / max_weighted_degree
+        degree_outer = radii["track_degree_inner"] + (radii["track_degree_outer"] - radii["track_degree_inner"]) * min(
+            1.0, degree_value / max(degree_scale, 1e-6)
         )
         _add_annular_segment(
             ax,
             theta_start,
             theta_end,
-            radii["track2_inner"],
+            radii["track_degree_inner"],
             degree_outer,
             facecolor="#4b5563",
             edgecolor="none",
             linewidth=0.0,
             alpha=0.92,
-            zorder=2.2,
+            zorder=2.3,
         )
 
-        variability_value = float(max(0.0, getattr(row, "InterSampleVariability", 0.0)))
-        variability_outer = radii["track3_inner"] + (radii["track3_outer"] - radii["track3_inner"]) * min(
-            1.0, variability_value / max_variability
+        core_outer = radii["track_core_inner"] + (radii["track_core_outer"] - radii["track_core_inner"]) * min(
+            1.0, core_value / max(core_scale, 1e-6)
         )
         _add_annular_segment(
             ax,
             theta_start,
             theta_end,
-            radii["track3_inner"],
-            variability_outer,
-            facecolor="#9ca3af",
+            radii["track_core_inner"],
+            core_outer,
+            facecolor=core_color,
             edgecolor="none",
             linewidth=0.0,
-            alpha=0.72,
-            zorder=1.6,
+            alpha=0.92,
+            zorder=1.8,
         )
 
         bias_color = bias_cmap(bias_norm(direction_bias))
@@ -1466,35 +1736,30 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
             ax,
             theta_start,
             theta_end,
-            radii["track4_inner"],
-            radii["track4_outer"],
+            radii["track_bias_inner"],
+            radii["track_bias_outer"],
             facecolor=bias_color,
             edgecolor="#ffffff",
-            linewidth=0.25,
+            linewidth=0.22,
             alpha=1.0,
             zorder=1.0,
         )
 
-    for span in module_spans:
-        module_name = str(span["Module"])
-        if not module_name or module_name.lower() == "grey":
-            continue
-        _add_annular_segment(
-            ax,
-            float(span["ThetaStart"]),
-            float(span["ThetaEnd"]),
-            radii["module_band_inner"],
-            radii["module_band_outer"],
-            facecolor=str(span["Color"]),
-            edgecolor="#ffffff",
-            linewidth=0.55,
-            alpha=1.0,
-            zorder=4.8,
-        )
+    legend_items = _prepare_module_legend_items(gene_summary)
+    _add_corner_module_legend(
+        ax,
+        legend_items,
+        x_left=-1.48,
+        y_top=-0.46,
+        row_height=0.072,
+        swatch_width=0.11,
+        swatch_height=0.026,
+    )
 
-    outer_limit = radii["module_band_outer"] + 0.05
-    ax.set_xlim(-outer_limit, outer_limit)
-    ax.set_ylim(-outer_limit, outer_limit)
+    outer_limit_x = 1.58
+    outer_limit_y = 1.12
+    ax.set_xlim(-outer_limit_x, 1.12)
+    ax.set_ylim(-outer_limit_y, outer_limit_y)
     _save_figure(fig, save_stem, cfg)
 
 def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
