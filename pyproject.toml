@@ -47,6 +47,7 @@ dependencies = [
     "adjustText>=0.8",
     "python-igraph>=0.11.0",
     "leidenalg>=0.10.0",
+    "colorspacious>=1.1.2",
 ]
 
 [project.optional-dependencies]
