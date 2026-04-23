@@ -80,6 +80,10 @@ FIGURE_FILE_PREFIXES = {
     "metabolome_pca": "F03_Metabolome_PCA",
     "transcriptome_pca_subgroups": "F02B_Transcriptome_PCA_Subgroups",
     "metabolome_pca_subgroups": "F03B_Metabolome_PCA_Subgroups",
+    "transcriptome_pca_pairs": "F02C_Transcriptome_PCA_Pairs",
+    "metabolome_pca_pairs": "F03C_Metabolome_PCA_Pairs",
+    "transcriptome_pca_pairs_subgroups": "F02D_Transcriptome_PCA_Pairs_Subgroups",
+    "metabolome_pca_pairs_subgroups": "F03D_Metabolome_PCA_Pairs_Subgroups",
     "top_gene_metabolite_pairs": "F04_Top_Gene_Metabolite_Pairs",
     "module_metabolite_association_heatmap": "F05_Module_Metabolite_Association_Heatmap",
     "compressed_circos_network": "F06_Compressed_Circos_Network",
@@ -129,10 +133,11 @@ def _save_figure(fig: plt.Figure, save_stem: str | Path, cfg) -> None:
     save_stem = Path(save_stem)
     save_stem.parent.mkdir(parents=True, exist_ok=True)
 
-    try:
-        fig.tight_layout()
-    except Exception:
-        pass
+    if not getattr(fig, "_skip_default_tight_layout", False):
+        try:
+            fig.tight_layout()
+        except Exception:
+            pass
 
     savefig_kwargs = {
         "bbox_inches": "tight",
@@ -784,7 +789,7 @@ def _plot_pca_from_matrix(
                     linestyle="",
                     markersize=legend_marker_size,
                     markerfacecolor="black",
-                    markeredgecolor="black",
+                    markeredgecolor="white",
                     markeredgewidth=0.8,
                     label=group_name,
                 )
@@ -880,6 +885,237 @@ def _plot_pca_from_matrix(
     ax.set_ylabel(f"PC2 ({var_exp[1]:.1f}%)")
     _save_figure(fig, save_stem, cfg)
 
+def _plot_pca_pairs_from_matrix(
+    matrix: np.ndarray,
+    sample_names: list[str],
+    title: str,
+    save_stem: str | Path,
+    cfg,
+    *,
+    group_df: pd.DataFrame | None = None,
+    primary_group_col: str = "group1",
+    secondary_group_col: str | None = None,
+    max_components: int = 10,
+) -> None:
+    plot_matrix, _, plot_group_df = _prepare_grouped_pca_inputs(
+        matrix=np.asarray(matrix, dtype=np.float32),
+        sample_names=sample_names,
+        title=title,
+        group_df=group_df,
+    )
+
+    if plot_matrix.shape[0] < 2 or plot_matrix.shape[1] < 2:
+        logger.warning("[%s] PCA pairs plot was skipped because fewer than 2 samples or features remained for plotting.", title)
+        return
+
+    n_components = min(int(max_components), int(plot_matrix.shape[0]), int(plot_matrix.shape[1]))
+    if n_components < 2:
+        logger.warning("[%s] PCA pairs plot was skipped because fewer than 2 principal components were available.", title)
+        return
+
+    pca = PCA(n_components=n_components, random_state=cfg.random_state)
+    coords = pca.fit_transform(plot_matrix)
+    var_exp = pca.explained_variance_ratio_ * 100.0
+
+    panel_size = 1.12
+    fig_size = max(7.8, panel_size * n_components + 1.8)
+    fig, axes = plt.subplots(n_components, n_components, figsize=(fig_size, fig_size))
+    axes = np.asarray(axes, dtype=object)
+
+    legend_handles: list[Line2D] = []
+    ordered_groups: list[str] = []
+    color_map: dict[str, str] = {}
+    marker_map: dict[str, str] = {}
+    secondary_groups: list[str] = []
+    has_secondary = False
+
+    if plot_group_df is not None and primary_group_col in plot_group_df.columns:
+        plot_group_df = plot_group_df.copy()
+        plot_group_df[primary_group_col] = plot_group_df[primary_group_col].astype(str).str.strip()
+        group_orders = plot_group_df["_group_table_order"].tolist() if "_group_table_order" in plot_group_df.columns else None
+        ordered_groups = _ordered_unique_with_order(
+            plot_group_df[primary_group_col].tolist(),
+            group_orders,
+        )
+        marker_map = _group_marker_map(ordered_groups)
+
+        has_secondary = (
+            secondary_group_col is not None
+            and secondary_group_col in plot_group_df.columns
+            and plot_group_df[secondary_group_col].notna().any()
+        )
+
+        if has_secondary:
+            subgroup_values = (
+                plot_group_df[secondary_group_col].astype("string").fillna("").astype(str).str.strip()
+            )
+            subgroup_values = subgroup_values.where(subgroup_values.ne(""), "Missing")
+            plot_group_df["_subgroup_label"] = subgroup_values
+
+            secondary_groups, color_map = _global_secondary_group_color_map(
+                plot_group_df["_subgroup_label"].astype(str).tolist(),
+                group_orders,
+            )
+
+            color_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    linestyle="",
+                    markersize=7.5,
+                    markerfacecolor=color_map[group_name],
+                    markeredgecolor="white",
+                    markeredgewidth=0.9,
+                    label=group_name,
+                )
+                for group_name in secondary_groups
+            ]
+            shape_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker=marker_map[group_name],
+                    linestyle="",
+                    markersize=7.5,
+                    markerfacecolor="black",
+                    markeredgecolor="white",
+                    markeredgewidth=0.9,
+                    label=group_name,
+                )
+                for group_name in ordered_groups
+            ]
+            legend_handles = color_handles + shape_handles
+        else:
+            color_map = _group_color_map(ordered_groups)
+            legend_handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    linestyle="",
+                    markersize=7.5,
+                    markerfacecolor=color_map[group_name],
+                    markeredgecolor="white",
+                    markeredgewidth=0.9,
+                    label=group_name,
+                )
+                for group_name in ordered_groups
+            ]
+
+    for row_idx in range(n_components):
+        for col_idx in range(n_components):
+            ax = axes[row_idx, col_idx]
+
+            if col_idx < row_idx:
+                ax.axis("off")
+                continue
+
+            if col_idx == row_idx:
+                ax.axis("off")
+                ax.text(
+                    0.5,
+                    0.56,
+                    f"PC{row_idx + 1},\n{var_exp[row_idx]:.2f}%",
+                    ha="center",
+                    va="center",
+                    fontsize=11,
+                    fontweight="bold",
+                    transform=ax.transAxes,
+                )
+                continue
+
+            x = coords[:, col_idx]
+            y = coords[:, row_idx]
+            ax.axhline(0, color="#7a7a7a", linewidth=0.55, linestyle=(0, (6, 4)), zorder=1)
+            ax.axvline(0, color="#7a7a7a", linewidth=0.55, linestyle=(0, (6, 4)), zorder=1)
+
+            if ordered_groups:
+                if has_secondary:
+                    for subgroup_name in secondary_groups:
+                        subgroup_df = plot_group_df.loc[plot_group_df["_subgroup_label"].astype(str) == subgroup_name]
+                        for primary_group_name in ordered_groups:
+                            group_points_df = subgroup_df.loc[
+                                subgroup_df[primary_group_col].astype(str) == primary_group_name
+                            ]
+                            if group_points_df.empty:
+                                continue
+                            mask = group_points_df.index.to_numpy(dtype=int, copy=False)
+                            ax.scatter(
+                                x[mask],
+                                y[mask],
+                                s=10,
+                                alpha=0.85,
+                                color=color_map[subgroup_name],
+                                marker=marker_map[primary_group_name],
+                                edgecolors="white",
+                                linewidths=0.45,
+                                zorder=2,
+                            )
+                else:
+                    for group_name in ordered_groups:
+                        mask = plot_group_df[primary_group_col].astype(str).eq(group_name).to_numpy(dtype=bool, copy=False)
+                        if not np.any(mask):
+                            continue
+                        ax.scatter(
+                            x[mask],
+                            y[mask],
+                            s=9,
+                            alpha=0.85,
+                            color=color_map[group_name],
+                            marker=marker_map.get(group_name, "o"),
+                            edgecolors="white",
+                            linewidths=0.45,
+                            zorder=2,
+                        )
+            else:
+                ax.scatter(
+                    x,
+                    y,
+                    s=9,
+                    alpha=0.85,
+                    color=PALETTE["pca_scatter"],
+                    edgecolors="white",
+                    linewidths=0.45,
+                    zorder=2,
+                )
+
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.tick_params(length=0)
+            for spine in ax.spines.values():
+                spine.set_visible(True)
+                spine.set_linewidth(0.7)
+                spine.set_edgecolor("#6b7280")
+            ax.set_facecolor("white")
+
+    fig.suptitle(title, fontsize=23, fontweight="bold", y=0.985)
+    if legend_handles:
+        legend_ncol = 1 if len(legend_handles) <= 12 else 2 if len(legend_handles) <= 24 else 3
+        fig.legend(
+            handles=legend_handles,
+            loc="lower left",
+            bbox_to_anchor=(0.055, 0.06),
+            ncol=legend_ncol,
+            frameon=False,
+            fontsize=11,
+            handletextpad=0.45,
+            columnspacing=1.0,
+            labelspacing=0.5,
+            borderaxespad=0.0,
+        )
+
+    fig.subplots_adjust(
+        left=0.08,
+        right=0.985,
+        bottom=0.06,
+        top=0.93,
+        wspace=0.14,
+        hspace=0.14,
+    )
+    _save_figure(fig, save_stem, cfg)
+
+
 def plot_sample_dendrogram(adata, save_stem: str | Path, cfg) -> None:
     if adata.n_obs < 2:
         return
@@ -940,7 +1176,7 @@ def plot_transcriptome_pca_subgroups(adata, save_stem: str | Path, cfg, group_df
     _plot_pca_from_matrix(
         matrix=np.asarray(adata.X, dtype=np.float32),
         sample_names=adata.obs_names.astype(str).tolist(),
-        title="Transcriptome PCA (Detailed)",
+        title="Transcriptome PCA",
         save_stem=save_stem,
         cfg=cfg,
         group_df=group_df,
@@ -956,7 +1192,7 @@ def plot_metabolome_pca_subgroups(adata, save_stem: str | Path, cfg, group_df: p
     _plot_pca_from_matrix(
         matrix=matrix,
         sample_names=adata.obs_names.astype(str).tolist(),
-        title="Metabolome PCA (Detailed)",
+        title="Metabolome PCA",
         save_stem=save_stem,
         cfg=cfg,
         group_df=group_df,
@@ -964,6 +1200,61 @@ def plot_metabolome_pca_subgroups(adata, save_stem: str | Path, cfg, group_df: p
         secondary_group_col="group2",
         add_group_envelope=False,
     )
+
+def plot_transcriptome_pca_pairs(adata, save_stem: str | Path, cfg, group_df: pd.DataFrame | None = None) -> None:
+    _plot_pca_pairs_from_matrix(
+        matrix=np.asarray(adata.X, dtype=np.float32),
+        sample_names=adata.obs_names.astype(str).tolist(),
+        title="Transcriptome PCA Pairs Plot",
+        save_stem=save_stem,
+        cfg=cfg,
+        group_df=group_df,
+        primary_group_col="group1",
+    )
+
+
+
+def plot_metabolome_pca_pairs(adata, save_stem: str | Path, cfg, group_df: pd.DataFrame | None = None) -> None:
+    metab_df = adata.obsm.get("metabolomics_scaled", adata.obsm.get("metabolomics"))
+    matrix = metab_df.to_numpy(dtype=np.float32, copy=False) if isinstance(metab_df, pd.DataFrame) else np.asarray(metab_df, dtype=np.float32)
+    _plot_pca_pairs_from_matrix(
+        matrix=matrix,
+        sample_names=adata.obs_names.astype(str).tolist(),
+        title="Metabolome PCA Pairs Plot",
+        save_stem=save_stem,
+        cfg=cfg,
+        group_df=group_df,
+        primary_group_col="group1",
+    )
+
+
+def plot_transcriptome_pca_pairs_subgroups(adata, save_stem: str | Path, cfg, group_df: pd.DataFrame | None = None) -> None:
+    _plot_pca_pairs_from_matrix(
+        matrix=np.asarray(adata.X, dtype=np.float32),
+        sample_names=adata.obs_names.astype(str).tolist(),
+        title="Transcriptome PCA Pairs Plot",
+        save_stem=save_stem,
+        cfg=cfg,
+        group_df=group_df,
+        primary_group_col="group1",
+        secondary_group_col="group2",
+    )
+
+
+def plot_metabolome_pca_pairs_subgroups(adata, save_stem: str | Path, cfg, group_df: pd.DataFrame | None = None) -> None:
+    metab_df = adata.obsm.get("metabolomics_scaled", adata.obsm.get("metabolomics"))
+    matrix = metab_df.to_numpy(dtype=np.float32, copy=False) if isinstance(metab_df, pd.DataFrame) else np.asarray(metab_df, dtype=np.float32)
+    _plot_pca_pairs_from_matrix(
+        matrix=matrix,
+        sample_names=adata.obs_names.astype(str).tolist(),
+        title="Metabolome PCA Pairs Plot",
+        save_stem=save_stem,
+        cfg=cfg,
+        group_df=group_df,
+        primary_group_col="group1",
+        secondary_group_col="group2",
+    )
+
 
 def _build_signed_count_summary(edge_df: pd.DataFrame, node_column: str) -> pd.DataFrame:
     """Aggregate node-level weighted degree and direction bias from T03 edges."""
@@ -1968,6 +2259,8 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         f"- `plots/{FIGURE_FILE_PREFIXES['sample_clustering_dendrogram']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['transcriptome_pca']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_pca']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png`",
@@ -1993,6 +2286,8 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['sample_clustering_dendrogram'])}.pdf|svg|png</code></td><td>Sample clustering dendrogram.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_pca'])}.pdf|svg|png</code></td><td>Transcriptome PCA scatter plot.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_pca'])}.pdf|svg|png</code></td><td>Metabolome PCA scatter plot.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_pca_pairs'])}.pdf|svg|png</code></td><td>Transcriptome PCA pairs plot using the first principal components.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_pca_pairs'])}.pdf|svg|png</code></td><td>Metabolome PCA pairs plot using the first principal components.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs'])}.pdf|svg|png</code></td><td>Top association pair scatter panels ranked by EdgeWeight.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap'])}.pdf|svg|png</code></td><td>Module-metabolite association heatmap colored by Spearman rho with significance stars.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['compressed_circos_network'])}.pdf|svg|png</code></td><td>Compact Circos overview using all unique genes and metabolites from T03 only.</td></tr>",
@@ -2090,8 +2385,8 @@ def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int 
     n_panels = len(ranked)
     n_cols = 2
     n_rows = int(np.ceil(n_panels / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(11, 4.8 * n_rows))
-    fig.subplots_adjust(top=0.90, hspace=0.42, wspace=0.35)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(10.0, 4.15 * n_rows))
+    fig._skip_default_tight_layout = True
     axes = np.atleast_1d(axes).ravel()
 
     for ax, row in zip(axes, ranked.itertuples(index=False)):
@@ -2103,24 +2398,54 @@ def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int 
 
         x = gene_df[gene].to_numpy(dtype=float, copy=False)
         y = metab_df[metab].to_numpy(dtype=float, copy=False)
+        valid_mask = np.isfinite(x) & np.isfinite(y)
+        x = x[valid_mask]
+        y = y[valid_mask]
+
+        if x.size < 2 or y.size < 2:
+            ax.axis("off")
+            continue
 
         sns.regplot(
             x=x,
             y=y,
             ax=ax,
             color=PALETTE["gene"],
-            scatter_kws={"s": 34, "alpha": 0.85, "edgecolor": "white", "linewidths": 0.4},
-            line_kws={"lw": 1.5},
+            scatter_kws={"s": 26, "alpha": 0.85, "edgecolor": "white", "linewidths": 0.35},
+            line_kws={"lw": 1.3},
             ci=95,
         )
-        ax.set_title(f"{gene} vs {metab}", fontsize=11, pad=6)
+
+        if np.nanstd(x) > 0 and np.nanstd(y) > 0:
+            r_value = float(np.corrcoef(x, y)[0, 1])
+            r_text = f"r = {r_value:.2f}" if np.isfinite(r_value) else "r = NA"
+        else:
+            r_text = "r = NA"
+
+        ax.text(
+            0.03,
+            0.97,
+            r_text,
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9.5,
+            fontweight="bold",
+            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 1.5},
+        )
+        ax.set_title(f"{gene} vs {metab}", fontsize=10.5, pad=9)
         ax.set_xlabel(gene)
         ax.set_ylabel(metab)
 
     for ax in axes[n_panels:]:
         ax.axis("off")
 
-    fig.suptitle("Top Gene-Metabolite Association Pairs", y=0.965, fontsize=13)
+    fig.suptitle("Top Gene-Metabolite Association Pairs", y=0.985, fontsize=13)
+    fig.subplots_adjust(top=0.84, hspace=0.62, wspace=0.38)
+    try:
+        fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.88))
+    except Exception:
+        pass
     _save_figure(fig, save_stem, cfg)
 
 
@@ -2347,6 +2672,8 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         f"- `plots/{FIGURE_FILE_PREFIXES['sample_clustering_dendrogram']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['transcriptome_pca']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_pca']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png`",
@@ -2372,6 +2699,8 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['sample_clustering_dendrogram'])}.pdf|svg|png</code></td><td>Sample clustering dendrogram.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_pca'])}.pdf|svg|png</code></td><td>Transcriptome PCA scatter plot.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_pca'])}.pdf|svg|png</code></td><td>Metabolome PCA scatter plot.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_pca_pairs'])}.pdf|svg|png</code></td><td>Transcriptome PCA pairs plot using the first principal components.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_pca_pairs'])}.pdf|svg|png</code></td><td>Metabolome PCA pairs plot using the first principal components.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs'])}.pdf|svg|png</code></td><td>Top association pair scatter panels ranked by EdgeWeight.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap'])}.pdf|svg|png</code></td><td>Module-metabolite association heatmap colored by Spearman rho with significance stars.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['compressed_circos_network'])}.pdf|svg|png</code></td><td>Compact Circos overview using all unique genes and metabolites from T03 only.</td></tr>",
@@ -2460,6 +2789,18 @@ def generate_report_plots(engine, cfg) -> None:
     plot_sample_dendrogram(engine.adata, plots_dir / FIGURE_FILE_PREFIXES["sample_clustering_dendrogram"], cfg)
     plot_transcriptome_pca(engine.adata, plots_dir / FIGURE_FILE_PREFIXES["transcriptome_pca"], cfg, group_df=pca_group_df)
     plot_metabolome_pca(engine.adata, plots_dir / FIGURE_FILE_PREFIXES["metabolome_pca"], cfg, group_df=pca_group_df)
+    plot_transcriptome_pca_pairs(
+        engine.adata,
+        plots_dir / FIGURE_FILE_PREFIXES["transcriptome_pca_pairs"],
+        cfg,
+        group_df=pca_group_df,
+    )
+    plot_metabolome_pca_pairs(
+        engine.adata,
+        plots_dir / FIGURE_FILE_PREFIXES["metabolome_pca_pairs"],
+        cfg,
+        group_df=pca_group_df,
+    )
 
     if _has_secondary_grouping(pca_group_df):
         plot_transcriptome_pca_subgroups(
@@ -2471,6 +2812,18 @@ def generate_report_plots(engine, cfg) -> None:
         plot_metabolome_pca_subgroups(
             engine.adata,
             plots_dir / FIGURE_FILE_PREFIXES["metabolome_pca_subgroups"],
+            cfg,
+            group_df=pca_group_df,
+        )
+        plot_transcriptome_pca_pairs_subgroups(
+            engine.adata,
+            plots_dir / FIGURE_FILE_PREFIXES["transcriptome_pca_pairs_subgroups"],
+            cfg,
+            group_df=pca_group_df,
+        )
+        plot_metabolome_pca_pairs_subgroups(
+            engine.adata,
+            plots_dir / FIGURE_FILE_PREFIXES["metabolome_pca_pairs_subgroups"],
             cfg,
             group_df=pca_group_df,
         )
@@ -2489,10 +2842,14 @@ def generate_report_plots(engine, cfg) -> None:
         f"2. Use {TABLE_FILE_PREFIXES['total_network']} for broad association recovery.\n"
         f"3. Use {TABLE_FILE_PREFIXES['high_confidence_network']} for the stricter high-confidence subset of the total network.\n"
         f"4. Use {TABLE_FILE_PREFIXES['cytoscape_network']} for Cytoscape import.\n"
-        f"5. Use plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png for the top regression-panel overview.\n"
-        f"6. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png for the module-metabolite association heatmap.\n"
-        f"7. Use plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png for the compact T03-only Circos overview.\n"
-        "8. Use DeepOmics_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
+        f"5. Use plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs']}.pdf|svg|png for the transcriptome PCA pairs overview (group1).\n"
+        f"6. Use plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs']}.pdf|svg|png for the metabolome PCA pairs overview (group1).\n"
+        f"7. Use plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs_subgroups']}.pdf|svg|png for the transcriptome PCA pairs overview (group2).\n"
+        f"8. Use plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs_subgroups']}.pdf|svg|png for the metabolome PCA pairs overview (group2).\n"
+        f"9. Use plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png for the top regression-panel overview.\n"
+        f"10. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png for the module-metabolite association heatmap.\n"
+        f"11. Use plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png for the compact T03-only Circos overview.\n"
+        "12. Use DeepOmics_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
     )
     (plots_dir / "visualization_notes.txt").write_text(notes, encoding="utf-8")
 

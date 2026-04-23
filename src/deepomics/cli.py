@@ -77,6 +77,11 @@ def main() -> None:
 @click.option("--module-method", type=click.Choice(["leiden", "hierarchical"], case_sensitive=False), default="leiden", show_default=True, help="Community detection backend for gene modules.")
 @click.option("--module-resolution", type=float, default=1.0, show_default=True, help="Resolution parameter for module partitioning.")
 @click.option("--module-min-size", type=int, default=5, show_default=True, help="Modules smaller than this size are collapsed into grey.")
+@click.option(
+    "--log-transform",
+    is_flag=True,
+    help="Apply log2(x+1) before missing-value imputation, variance filtering, and z-score scaling.",
+)
 def run(
     genes: Path,
     metabs: Path,
@@ -97,6 +102,7 @@ def run(
     module_method: str,
     module_resolution: float,
     module_min_size: int,
+    log_transform: str,
 ) -> None:
     """Run the end-to-end DeepOmics workflow."""
     output_dir = safe_mkdir(output)
@@ -128,7 +134,7 @@ def run(
 
     try:
         adata = load_as_anndata(genes, metabs)
-        adata = preprocess_adata(adata)
+        adata = preprocess_adata(adata, log_transform=log_transform)
 
         engine = MultiOmicsEngine(adata, cfg)
         engine.run_all(generate_plots=not no_plots)

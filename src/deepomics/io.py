@@ -61,6 +61,27 @@ def _impute_missing_with_column_mean(df: pd.DataFrame) -> pd.DataFrame:
     return df.fillna(df.mean(axis=0))
 
 
+
+
+def _apply_log2p1(df: pd.DataFrame, label: str) -> pd.DataFrame:
+    """Apply log2(x+1) to a non-negative matrix before missing-value imputation."""
+    values = df.to_numpy(dtype=np.float32, copy=False)
+
+    finite_values = values[np.isfinite(values)]
+    if finite_values.size == 0:
+        raise ValueError(f"{label} table does not contain finite numeric values.")
+
+    min_value = float(np.nanmin(finite_values))
+    if min_value < 0:
+        raise ValueError(
+            f"{label} contains negative values; log2(x+1) cannot be applied safely."
+        )
+
+    transformed = np.log2(values + 1.0).astype(np.float32)
+    logger.info("Applied log2(x+1) transformation to %s before missing-value imputation.", label)
+    return pd.DataFrame(transformed, index=df.index.copy(), columns=df.columns.copy())
+
+
 def load_as_anndata(gene_path: str | Path, metab_path: str | Path) -> ad.AnnData:
     """Load transcriptome and metabolome matrices into a single AnnData object."""
     logger.info("Loading transcriptome data from %s", gene_path)
@@ -73,6 +94,7 @@ def load_as_anndata(gene_path: str | Path, metab_path: str | Path) -> ad.AnnData
     df_metab_t = _impute_missing_with_column_mean(df_metab.T)
 
     common_samples = df_gene_t.index.intersection(df_metab_t.index, sort=False)
+    common_samples = pd.Index(sorted(common_samples.astype(str)), name="SampleID")
     if len(common_samples) == 0:
         raise ValueError("No shared sample IDs were found between transcriptome and metabolomics tables.")
 
@@ -100,7 +122,11 @@ def load_as_anndata(gene_path: str | Path, metab_path: str | Path) -> ad.AnnData
     return adata
 
 
-def preprocess_adata(adata: ad.AnnData, scale: bool = True) -> ad.AnnData:
+def preprocess_adata(
+    adata: ad.AnnData,
+    scale: bool = True,
+    log_transform: bool = False,
+) -> ad.AnnData:
     """Apply basic preprocessing to the AnnData object."""
     if "metabolomics" not in adata.obsm:
         raise KeyError("adata.obsm['metabolomics'] is required.")
@@ -110,7 +136,15 @@ def preprocess_adata(adata: ad.AnnData, scale: bool = True) -> ad.AnnData:
         index=adata.obs_names.astype(str),
         columns=adata.var_names.astype(str),
     )
+    if log_transform:
+        gene_df = _apply_log2p1(gene_df, label="Transcriptome")
     gene_df = _impute_missing_with_column_mean(gene_df)
+    gene_log_info = {
+        "label": "Transcriptome",
+        "applied": bool(log_transform),
+        "method": "log2(x+1)" if log_transform else "none",
+        "stage": "before_missing_value_imputation" if log_transform else "not_applied",
+    }
 
     gene_var = np.nanvar(gene_df.to_numpy(dtype=np.float32, copy=False), axis=0)
     keep_genes = gene_var > 0
@@ -133,7 +167,16 @@ def preprocess_adata(adata: ad.AnnData, scale: bool = True) -> ad.AnnData:
     metab_df = metab_df.copy()
     metab_df.index = adata.obs_names.astype(str)
     metab_df.columns = metab_df.columns.astype(str)
-    metab_df = _impute_missing_with_column_mean(metab_df.astype(np.float32, copy=False))
+    metab_df = metab_df.astype(np.float32, copy=False)
+    if log_transform:
+        metab_df = _apply_log2p1(metab_df, label="Metabolomics")
+    metab_df = _impute_missing_with_column_mean(metab_df)
+    metab_log_info = {
+        "label": "Metabolomics",
+        "applied": bool(log_transform),
+        "method": "log2(x+1)" if log_transform else "none",
+        "stage": "before_missing_value_imputation" if log_transform else "not_applied",
+    }
 
     metab_var = np.nanvar(metab_df.to_numpy(dtype=np.float32, copy=False), axis=0)
     keep_metabs = metab_var > 0
@@ -172,6 +215,9 @@ def preprocess_adata(adata: ad.AnnData, scale: bool = True) -> ad.AnnData:
         "n_genes": int(adata.n_vars),
         "n_metabolites": int(len(adata.uns["metabolite_names"])),
         "scaled": bool(scale),
+        "log_transform": bool(log_transform),
+        "transcriptome_log2p1": gene_log_info,
+        "metabolomics_log2p1": metab_log_info,
     }
     return adata
 
