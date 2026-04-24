@@ -1758,6 +1758,7 @@ def _prepare_group1_mean_track_data(feature_df: pd.DataFrame, group_df: pd.DataF
             "feature_to_values": {str(feature): [float(mean_series.get(feature, np.nan))] for feature in feature_work.columns.astype(str)},
             "abs_scale": _robust_abs_scale(mean_series.tolist()),
             "group1_order": [],
+            "group1_color_map": {},
         }
 
     group_work = group_df.copy()
@@ -1771,6 +1772,7 @@ def _prepare_group1_mean_track_data(feature_df: pd.DataFrame, group_df: pd.DataF
             "feature_to_values": {str(feature): [float(mean_series.get(feature, np.nan))] for feature in feature_work.columns.astype(str)},
             "abs_scale": _robust_abs_scale(mean_series.tolist()),
             "group1_order": [],
+            "group1_color_map": {},
         }
 
     group_work = group_work.drop_duplicates(subset=["sample_id"], keep="first").set_index("sample_id", drop=True)
@@ -1782,6 +1784,7 @@ def _prepare_group1_mean_track_data(feature_df: pd.DataFrame, group_df: pd.DataF
             "feature_to_values": {str(feature): [float(mean_series.get(feature, np.nan))] for feature in feature_work.columns.astype(str)},
             "abs_scale": _robust_abs_scale(mean_series.tolist()),
             "group1_order": [],
+            "group1_color_map": {},
         }
 
     feature_work = feature_work.loc[aligned_samples].copy()
@@ -1794,6 +1797,7 @@ def _prepare_group1_mean_track_data(feature_df: pd.DataFrame, group_df: pd.DataF
             "feature_to_values": {str(feature): [float(mean_series.get(feature, np.nan))] for feature in feature_work.columns.astype(str)},
             "abs_scale": _robust_abs_scale(mean_series.tolist()),
             "group1_order": [],
+            "group1_color_map": {},
         }
 
     agg_input = feature_work.copy()
@@ -1809,6 +1813,7 @@ def _prepare_group1_mean_track_data(feature_df: pd.DataFrame, group_df: pd.DataF
         "feature_to_values": feature_to_values,
         "abs_scale": _robust_abs_scale(flattened),
         "group1_order": group1_order,
+        "group1_color_map": _group_color_map(group1_order),
     }
 
 
@@ -1830,6 +1835,8 @@ def _draw_group1_scatter_track(
     values: list[float],
     value_scale: float,
     random_state: int,
+    group_names: list[str] | None = None,
+    group_color_map: dict[str, str] | None = None,
     zorder: float = 3.1,
 ) -> None:
     _add_annular_segment(
@@ -1847,8 +1854,16 @@ def _draw_group1_scatter_track(
     r_mid = 0.5 * (r_inner + r_outer)
     _draw_track_baseline(ax, theta_start, theta_end, r_mid, color="#d1d5db", linewidth=0.18, alpha=0.9, zorder=zorder)
 
-    clean_values = [float(v) for v in values if np.isfinite(v)]
-    if not clean_values:
+    if group_names is not None and len(group_names) == len(values):
+        clean_entries = [
+            (float(value), str(group_name))
+            for value, group_name in zip(values, group_names)
+            if np.isfinite(value)
+        ]
+    else:
+        clean_entries = [(float(value), "") for value in values if np.isfinite(value)]
+
+    if not clean_entries:
         return
 
     rng_seed = int(random_state + round(float(theta_start) * 1e6)) % (2**32 - 1)
@@ -1859,12 +1874,15 @@ def _draw_group1_scatter_track(
     radial_half_span = 0.42 * (r_outer - r_inner)
     scale = max(float(value_scale), 1e-6)
 
-    for value in clean_values:
+    for value, group_name in clean_entries:
         theta = 0.5 * (theta_start + theta_end) + float(rng.uniform(-span_scale, span_scale))
         clipped = float(np.clip(value, -scale, scale))
         radius = r_mid + (clipped / scale) * radial_half_span
+        point_color = "#6b7280"
+        if group_color_map is not None and group_name:
+            point_color = str(group_color_map.get(group_name, point_color))
         x, y = _polar_to_xy(theta, radius)
-        ax.scatter([x], [y], s=5.0, c=["#6b7280"], edgecolors="none", alpha=0.92, zorder=zorder + 0.15)
+        ax.scatter([x], [y], s=5.0, c=[point_color], edgecolors="none", alpha=0.92, zorder=zorder + 0.15)
 
 
 def _draw_mean_hist_track(
@@ -1981,6 +1999,184 @@ def _add_corner_module_legend(
             color="#374151",
             zorder=7,
         )
+
+
+def _prepare_group1_legend_items(track_data: dict[str, object] | None) -> list[tuple[str, str]]:
+    if track_data is None or str(track_data.get("mode", "")) != "group1_mean":
+        return []
+
+    group1_order = [str(value) for value in track_data.get("group1_order", []) if str(value).strip()]
+    color_map = {str(key): str(value) for key, value in dict(track_data.get("group1_color_map", {})).items()}
+
+    items: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for group_name in group1_order:
+        if group_name in seen:
+            continue
+        seen.add(group_name)
+        items.append((group_name, color_map.get(group_name, "#6b7280")))
+    return items
+
+
+
+def _add_corner_group_legend(
+    ax: plt.Axes,
+    legend_items: list[tuple[str, str]],
+    *,
+    title: str,
+    x_left: float,
+    y_top: float,
+    row_height: float = 0.072,
+    marker_diameter: float = 0.026,
+) -> None:
+    if not legend_items:
+        return
+
+    title_y = y_top
+    ax.text(
+        x_left,
+        title_y,
+        title,
+        ha="left",
+        va="bottom",
+        fontsize=8.5,
+        fontweight="bold",
+        color="#111827",
+        zorder=7,
+    )
+
+    marker_radius = 0.5 * marker_diameter
+    for idx, (group_name, group_color) in enumerate(legend_items):
+        y = y_top - (idx + 1) * row_height
+        circle = plt.Circle(
+            (x_left + marker_radius, y),
+            radius=marker_radius,
+            facecolor=group_color,
+            edgecolor="#9ca3af",
+            linewidth=0.3,
+            zorder=7,
+        )
+        ax.add_patch(circle)
+        ax.text(
+            x_left + marker_diameter + 0.03,
+            y,
+            group_name,
+            ha="left",
+            va="center",
+            fontsize=8.0,
+            color="#374151",
+            zorder=7,
+        )
+
+
+
+def _compute_circos_outer_gap_theta(
+    layout: dict[str, dict[str, float | str]],
+    gene_nodes: list[str],
+    metabolite_nodes: list[str],
+) -> float:
+    if not layout or not gene_nodes or not metabolite_nodes:
+        return float(np.pi / 2.0)
+
+    first_gene = str(gene_nodes[0])
+    last_metabolite = str(metabolite_nodes[-1])
+    if first_gene not in layout or last_metabolite not in layout:
+        return float(np.pi / 2.0)
+
+    gap_start = float(layout[last_metabolite]["theta_end"])
+    gap_end = float(layout[first_gene]["theta_start"]) + 2.0 * np.pi
+    return float((0.5 * (gap_start + gap_end)) % (2.0 * np.pi))
+
+
+
+def _add_circos_track_number_labels(
+    ax: plt.Axes,
+    radii: dict[str, float],
+    label_theta: float,
+    *,
+    fontsize: float = 8.5,
+) -> None:
+    track_radii = [
+        0.5 * (radii["outer_strip_inner"] + radii["outer_strip_outer"]),
+        0.5 * (radii["track_meanbar_inner"] + radii["track_meanbar_outer"]),
+        0.5 * (radii["track_meanheat_inner"] + radii["track_meanheat_outer"]),
+        0.5 * (radii["track_degree_inner"] + radii["track_degree_outer"]),
+        0.5 * (radii["track_core_inner"] + radii["track_core_outer"]),
+        0.5 * (radii["track_bias_inner"] + radii["track_bias_outer"]),
+    ]
+
+    x_shift = 0.024 if np.cos(label_theta) >= -0.05 else -0.024
+    ha = "left" if x_shift >= 0 else "right"
+
+    for idx, radius in enumerate(track_radii, start=1):
+        x, y = _polar_to_xy(label_theta, radius)
+        ax.text(
+            x + x_shift,
+            y,
+            str(idx),
+            ha=ha,
+            va="center",
+            fontsize=fontsize,
+            fontweight="bold",
+            color="#374151",
+            zorder=7,
+        )
+
+
+
+def _add_track_annotation_legend(
+    ax: plt.Axes,
+    *,
+    x_left: float,
+    y_top: float,
+    row_height: float = 0.072,
+    label_width: float = 0.18,
+) -> None:
+    legend_rows = [
+        ("track 1", "sector strip"),
+        ("track 2", "group-wise mean"),
+        ("track 3", "mean z-score heatmap"),
+        ("track 4", "weighted degree"),
+        ("track 5", "module/core strength"),
+        ("track 6", "direction bias"),
+    ]
+
+    ax.text(
+        x_left,
+        y_top,
+        "Track annotations",
+        ha="left",
+        va="bottom",
+        fontsize=8.5,
+        fontweight="bold",
+        color="#111827",
+        zorder=7,
+    )
+
+    for idx, (track_label, description) in enumerate(legend_rows):
+        y = y_top - (idx + 1) * row_height
+        ax.text(
+            x_left,
+            y,
+            track_label,
+            ha="left",
+            va="center",
+            fontsize=8.0,
+            fontweight="bold",
+            color="#374151",
+            zorder=7,
+        )
+        ax.text(
+            x_left + label_width,
+            y,
+            description,
+            ha="left",
+            va="center",
+            fontsize=8.0,
+            color="#6b7280",
+            zorder=7,
+        )
+
 
 
 def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
@@ -2149,6 +2345,8 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
                 values=list(track_values),
                 value_scale=float(track_data.get("abs_scale", 1.0)),
                 random_state=int(getattr(cfg, "random_state", 42)),
+                group_names=[str(name) for name in track_data.get("group1_order", [])],
+                group_color_map={str(key): str(value) for key, value in dict(track_data.get("group1_color_map", {})).items()},
                 zorder=3.45,
             )
         else:
@@ -2211,6 +2409,17 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
             zorder=1.0,
         )
 
+    group_legend_items = _prepare_group1_legend_items(gene_track_data)
+    _add_corner_group_legend(
+        ax,
+        group_legend_items,
+        title="Track 2 group colors",
+        x_left=-1.48,
+        y_top=-0.08,
+        row_height=0.072,
+        marker_diameter=0.026,
+    )
+
     legend_items = _prepare_module_legend_items(gene_summary)
     _add_corner_module_legend(
         ax,
@@ -2220,6 +2429,16 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
         row_height=0.072,
         swatch_width=0.11,
         swatch_height=0.026,
+    )
+
+    label_theta = _compute_circos_outer_gap_theta(layout, gene_nodes, metabolite_nodes)
+    _add_circos_track_number_labels(ax, radii, label_theta)
+    _add_track_annotation_legend(
+        ax,
+        x_left=-1.48,
+        y_top=0.98,
+        row_height=0.072,
+        label_width=0.18,
     )
 
     outer_limit_x = 1.58
