@@ -111,33 +111,6 @@ class MultiOmicsEngine:
         logger.info("All analyses finished. Results saved to: %s", self.config.output_dir)
 
     @staticmethod
-    def _infer_association_sign(row: pd.Series) -> str:
-        pearson_r = float(row.get("PearsonR", 0.0)) if pd.notna(row.get("PearsonR", np.nan)) else 0.0
-        spearman_rho = float(row.get("SpearmanRho", 0.0)) if pd.notna(row.get("SpearmanRho", np.nan)) else 0.0
-        basis = pearson_r if abs(pearson_r) >= abs(spearman_rho) else spearman_rho
-        return "positive" if basis >= 0 else "negative"
-
-    @staticmethod
-    def _compute_group_weights(group_df: pd.DataFrame) -> pd.DataFrame:
-        group = group_df.copy()
-        n_candidates = int(len(group))
-        if n_candidates <= 1:
-            group["RRAWeight"] = 1.0
-        else:
-            group["RRAWeight"] = 1.0 - (group["RRARank"].astype(float) - 1.0) / float(n_candidates - 1)
-
-        group["CorrScore"] = np.maximum(group["PearsonR"].abs(), group["SpearmanRho"].abs()).clip(0.0, 1.0)
-        group["ModelScore"] = (group["ModelSupportCount"].astype(float) / 2.0).clip(0.0, 1.0)
-        group["ScreenScore"] = (group["ScreenSupportCount"].astype(float) / 3.0).clip(0.0, 1.0)
-        group["EdgeWeight"] = (
-            0.45 * group["RRAWeight"]
-            + 0.25 * group["CorrScore"]
-            + 0.20 * group["ModelScore"]
-            + 0.10 * group["ScreenScore"]
-        ).clip(0.0, 1.0)
-        return group
-
-    @staticmethod
     def _compute_group_weights_vectorized(gene_scores_df: pd.DataFrame) -> pd.DataFrame:
         if gene_scores_df.empty:
             return gene_scores_df
@@ -400,6 +373,12 @@ class MultiOmicsEngine:
             "Processing %d metabolites using three-way screening + ElasticNet/XGBoost/RRA.",
             len(self._metabolite_names),
         )
+        logger.info("Precomputing reusable Pearson/Spearman screening correlations across all metabolites.")
+        screening_correlation_cache = selectors.prepare_screening_correlation_cache(
+            self._gene_matrix,
+            self._metabolomics_matrix,
+            feature_names=self._gene_names,
+        )
 
         for metab_idx, metab_name in enumerate(tqdm(self._metabolite_names, desc="Association Modeling")):
             y = self._metabolomics_matrix[:, metab_idx]
@@ -409,6 +388,8 @@ class MultiOmicsEngine:
                 y,
                 self.config,
                 feature_names=self._gene_names,
+                correlation_cache=screening_correlation_cache,
+                target_index=metab_idx,
             )
             if screen_df.empty:
                 continue

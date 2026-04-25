@@ -113,6 +113,108 @@ def _vectorized_spearman(X_arr: np.ndarray, y_arr: np.ndarray) -> tuple[np.ndarr
     return _vectorized_pearson(X_rank, y_rank)
 
 
+class ScreeningCorrelationCache:
+    """Reusable Pearson/Spearman screening state for one feature matrix and many targets."""
+
+    def __init__(
+        self,
+        *,
+        feature_names: Sequence[str],
+        pearson_r: np.ndarray,
+        spearman_rho: np.ndarray,
+        feature_nonconstant_mask: np.ndarray,
+        n_samples: int,
+    ) -> None:
+        self.feature_names = np.asarray(feature_names, dtype=str)
+        self.pearson_r = np.asarray(pearson_r, dtype=float)
+        self.spearman_rho = np.asarray(spearman_rho, dtype=float)
+        self.feature_nonconstant_mask = np.asarray(feature_nonconstant_mask, dtype=bool)
+        self.n_samples = int(n_samples)
+
+        if self.pearson_r.shape != self.spearman_rho.shape:
+            raise ValueError("pearson_r and spearman_rho must have the same shape.")
+        if self.pearson_r.shape[0] != len(self.feature_names):
+            raise ValueError("Correlation matrices must contain one row per feature name.")
+        if len(self.feature_nonconstant_mask) != len(self.feature_names):
+            raise ValueError("feature_nonconstant_mask length must match feature_names.")
+
+    def correlations_for(self, target_index: int) -> tuple[np.ndarray, np.ndarray]:
+        target_index = int(target_index)
+        if target_index < 0 or target_index >= self.pearson_r.shape[1]:
+            raise IndexError("target_index is out of range for the screening correlation cache.")
+        return (
+            self.pearson_r[:, target_index].astype(float, copy=False),
+            self.spearman_rho[:, target_index].astype(float, copy=False),
+        )
+
+
+def _standardize_columns_for_correlation(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.ndim != 2:
+        raise ValueError("values must be a 2D array.")
+
+    centered = arr - arr.mean(axis=0, keepdims=True)
+    std = centered.std(axis=0, ddof=1)
+    valid = np.isfinite(std) & (std > 0)
+
+    standardized = np.zeros_like(centered, dtype=np.float64)
+    if np.any(valid):
+        standardized[:, valid] = centered[:, valid] / std[valid]
+    return standardized, valid
+
+
+def _correlation_p_values(correlations: np.ndarray, n_samples: int) -> np.ndarray:
+    corr = np.clip(np.nan_to_num(np.asarray(correlations, dtype=float), nan=0.0), -1.0, 1.0)
+    if int(n_samples) < 3:
+        raise ValueError("At least 3 samples are required for correlation screening.")
+
+    denom = np.maximum(1.0 - corr**2, 1e-12)
+    t_stat = corr * np.sqrt((int(n_samples) - 2) / denom)
+    p_values = 2.0 * (1.0 - t.cdf(np.abs(t_stat), df=int(n_samples) - 2))
+    return np.clip(p_values.astype(float), 0.0, 1.0)
+
+
+def prepare_screening_correlation_cache(
+    X: pd.DataFrame | np.ndarray,
+    Y: pd.DataFrame | np.ndarray,
+    feature_names: Optional[Sequence[str]] = None,
+) -> ScreeningCorrelationCache:
+    """Precompute reusable Pearson/Spearman correlations for all screening targets.
+
+    The feature matrix is standardized and rank-transformed once, then multiplied
+    against all target columns at once. This avoids repeating the same gene-matrix
+    centering, scaling, and rank transformation for every metabolite.
+    """
+    X_arr, names = _as_array_and_names(X, feature_names=feature_names)
+    Y_arr = np.asarray(Y, dtype=np.float32)
+    if Y_arr.ndim == 1:
+        Y_arr = Y_arr.reshape(-1, 1)
+    if Y_arr.ndim != 2:
+        raise ValueError("Y must be a 1D or 2D target array/DataFrame.")
+    if X_arr.shape[0] != Y_arr.shape[0]:
+        raise ValueError("X and Y must contain the same number of samples.")
+    if X_arr.shape[0] < 3:
+        raise ValueError("At least 3 samples are required for correlation screening.")
+
+    X_z, feature_nonconstant_mask = _standardize_columns_for_correlation(X_arr)
+    Y_z, _ = _standardize_columns_for_correlation(Y_arr)
+    pearson_r = np.clip((X_z.T @ Y_z) / float(X_arr.shape[0] - 1), -1.0, 1.0)
+
+    X_rank = np.apply_along_axis(rankdata, 0, np.asarray(X_arr, dtype=np.float64))
+    Y_rank = np.apply_along_axis(rankdata, 0, np.asarray(Y_arr, dtype=np.float64))
+    X_rank_z, _ = _standardize_columns_for_correlation(X_rank)
+    Y_rank_z, _ = _standardize_columns_for_correlation(Y_rank)
+    spearman_rho = np.clip((X_rank_z.T @ Y_rank_z) / float(X_arr.shape[0] - 1), -1.0, 1.0)
+
+    return ScreeningCorrelationCache(
+        feature_names=names,
+        pearson_r=pearson_r,
+        spearman_rho=spearman_rho,
+        feature_nonconstant_mask=feature_nonconstant_mask,
+        n_samples=int(X_arr.shape[0]),
+    )
+
+
 def _top_names_from_series(
     series: pd.Series,
     top_k: int,
@@ -144,6 +246,9 @@ def screen_genes_three_way(
     y: pd.Series | np.ndarray,
     config,
     feature_names: Optional[Sequence[str]] = None,
+    *,
+    correlation_cache: ScreeningCorrelationCache | None = None,
+    target_index: int | None = None,
 ) -> pd.DataFrame:
     """Three-way gene screening using Pearson, Spearman, and mutual information."""
     X_arr, names = _as_array_and_names(X, feature_names=feature_names)
@@ -171,13 +276,25 @@ def screen_genes_three_way(
             index=pd.Index([], name="Gene"),
         )
 
-    pearson_r, pearson_p = _vectorized_pearson(X_arr, y_arr)
-    pearson_fdr = _bh_fdr(pearson_p)
+    if correlation_cache is not None:
+        if target_index is None:
+            raise ValueError("target_index must be provided when correlation_cache is used.")
+        if correlation_cache.n_samples != X_arr.shape[0]:
+            raise ValueError("correlation_cache sample count does not match X.")
+        if not np.array_equal(correlation_cache.feature_names.astype(str), names.astype(str)):
+            raise ValueError("correlation_cache feature names do not match X/feature_names.")
+        pearson_r, spearman_rho = correlation_cache.correlations_for(int(target_index))
+        pearson_p = _correlation_p_values(pearson_r, X_arr.shape[0])
+        spearman_p = _correlation_p_values(spearman_rho, X_arr.shape[0])
+        valid_mask = correlation_cache.feature_nonconstant_mask
+    else:
+        pearson_r, pearson_p = _vectorized_pearson(X_arr, y_arr)
+        spearman_rho, spearman_p = _vectorized_spearman(X_arr, y_arr)
+        valid_mask = _safe_nonconstant_mask(X_arr)
 
-    spearman_rho, spearman_p = _vectorized_spearman(X_arr, y_arr)
+    pearson_fdr = _bh_fdr(pearson_p)
     spearman_fdr = _bh_fdr(spearman_p)
 
-    valid_mask = _safe_nonconstant_mask(X_arr)
     mi_scores = np.zeros(X_arr.shape[1], dtype=float)
     if np.any(valid_mask) and np.nanstd(y_arr, ddof=1) > 0:
         try:
