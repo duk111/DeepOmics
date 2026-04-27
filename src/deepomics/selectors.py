@@ -7,6 +7,8 @@ import pandas as pd
 from scipy.stats import beta, rankdata, t
 from sklearn.feature_selection import mutual_info_regression
 from sklearn.linear_model import ElasticNet, ElasticNetCV
+from sklearn.model_selection import KFold
+import xgboost as xgb
 from xgboost import XGBRegressor
 
 from .utils import get_logger
@@ -320,44 +322,47 @@ def screen_genes_three_way(
         index=pd.Index(names, name="Gene"),
     ).replace([np.inf, -np.inf], np.nan)
 
-    top_k = max(1, int(getattr(config, "screen_top_k_per_method", 1000)))
-    use_fdr = bool(getattr(config, "use_fdr", False))
-    fdr_alpha = float(getattr(config, "fdr_alpha", 0.05))
+    corr_abs_threshold = 0.3
+    fdr_alpha = 0.05
+    mi_top_fraction = 0.10
 
-    if use_fdr:
-        pcc_mask = screen_df["PearsonFDR"].fillna(1.0) <= fdr_alpha
-        pcc_primary = screen_df.loc[pcc_mask, "PearsonR"]
-        pcc_secondary = screen_df.loc[pcc_mask, "PearsonFDR"]
-    else:
-        pcc_primary = screen_df["PearsonR"]
-        pcc_secondary = screen_df["PearsonFDR"]
+    pcc_mask = (
+        (screen_df["PearsonR"].abs() > corr_abs_threshold)
+        & (screen_df["PearsonFDR"].fillna(1.0) < fdr_alpha)
+    )
+    spearman_mask = (
+        (screen_df["SpearmanRho"].abs() > corr_abs_threshold)
+        & (screen_df["SpearmanFDR"].fillna(1.0) < fdr_alpha)
+    )
+
+    max_screen_genes = max(1, int(getattr(config, "screen_top_k_per_method", 800)))
 
     pcc_genes = set(
         _top_names_from_series(
-            pcc_primary,
-            top_k,
+            screen_df.loc[pcc_mask, "PearsonR"],
+            max_screen_genes,
             absolute=True,
-            secondary=pcc_secondary,
+            secondary=screen_df.loc[pcc_mask, "PearsonFDR"],
         )
     )
-
-    if use_fdr:
-        spearman_mask = screen_df["SpearmanFDR"].fillna(1.0) <= fdr_alpha
-        spearman_primary = screen_df.loc[spearman_mask, "SpearmanRho"]
-        spearman_secondary = screen_df.loc[spearman_mask, "SpearmanFDR"]
-    else:
-        spearman_primary = screen_df["SpearmanRho"]
-        spearman_secondary = screen_df["SpearmanFDR"]
-
     spearman_genes = set(
         _top_names_from_series(
-            spearman_primary,
-            top_k,
+            screen_df.loc[spearman_mask, "SpearmanRho"],
+            max_screen_genes,
             absolute=True,
-            secondary=spearman_secondary,
+            secondary=screen_df.loc[spearman_mask, "SpearmanFDR"],
         )
     )
-    mi_genes = set(_top_names_from_series(screen_df["MIScore"], top_k, absolute=False))
+
+    mi_top_k = max(1, int(np.ceil(screen_df.shape[0] * mi_top_fraction)))
+    mi_top_k = min(mi_top_k, max_screen_genes)
+    mi_genes = set(
+        _top_names_from_series(
+            screen_df["MIScore"],
+            mi_top_k,
+            absolute=False,
+        )
+    )
 
     candidate_genes = pcc_genes | spearman_genes | mi_genes
     if not candidate_genes:
@@ -391,7 +396,12 @@ def _fit_elastic_net_prepared(
 ) -> np.ndarray:
     try:
         if config.elastic_net_alpha_search and X_work.shape[0] >= 4:
-            cv = _resolved_cv_folds(X_work.shape[0], config.cv_folds)
+            n_splits = _resolved_cv_folds(X_work.shape[0], config.cv_folds)
+            cv = KFold(
+                n_splits=n_splits,
+                shuffle=True,
+                random_state=config.random_state,
+            )
             model = ElasticNetCV(
                 l1_ratio=config.elastic_net_l1_ratio_grid,
                 cv=cv,
@@ -459,6 +469,13 @@ def _fit_xgboost_prepared(
     y_arr: np.ndarray,
     config,
 ) -> np.ndarray:
+    """Fit XGBoost and score features by mean absolute SHAP contribution.
+
+    XGBoost native pred_contribs=True returns Tree SHAP contributions for
+    each feature plus a final bias column. We drop the bias column and use
+    mean(abs(SHAP value)) as the feature importance score so the downstream
+    rank and selection logic can remain unchanged.
+    """
     try:
         model = XGBRegressor(
             n_estimators=config.xgb_n_estimators,
@@ -473,9 +490,18 @@ def _fit_xgboost_prepared(
             verbosity=0,
         )
         model.fit(X_work, y_arr)
-        return np.asarray(model.feature_importances_, dtype=float)
+
+        booster = model.get_booster()
+        shap_contribs = booster.predict(
+            xgb.DMatrix(np.asarray(X_work, dtype=np.float32)),
+            pred_contribs=True,
+        )
+        shap_values = np.asarray(shap_contribs, dtype=float)[:, :-1]
+        if shap_values.shape[1] != X_work.shape[1]:
+            raise ValueError("Unexpected SHAP contribution matrix shape from XGBoost.")
+        return np.mean(np.abs(shap_values), axis=0)
     except Exception as exc:  # pragma: no cover
-        logger.warning("XGBoost fitting failed; using zero scores for this metabolite. Reason: %s", exc)
+        logger.warning("XGBoost SHAP scoring failed; using zero scores for this metabolite. Reason: %s", exc)
         return np.zeros(X_work.shape[1], dtype=float)
 
 

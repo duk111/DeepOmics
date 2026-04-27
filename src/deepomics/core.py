@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Dict, List
+import re
 
 import anndata as ad
 import numpy as np
@@ -15,6 +17,7 @@ logger = get_logger()
 
 TABLE_FILE_PREFIXES = {
     "gene_scores": "T01_Metabolite_Gene_Scoring_Table.csv",
+    "screening_summary": "T01b_Metabolite_Screening_Summary.csv",
     "total_network": "T02_Total_Association_Network.csv",
     "high_confidence_network": "T03_High_Confidence_Network.csv",
     "key_gene_summary": "T04_Key_Gene_Summary.csv",
@@ -31,7 +34,8 @@ class MultiOmicsEngine:
     """Core analysis engine for transcriptome-metabolome association modeling."""
 
     def __init__(self, adata: ad.AnnData, cfg: config.AnalysisConfig):
-        self.adata = adata
+        self.unaggregated_adata = adata.copy()
+        self.adata = self._average_replicates_for_association(adata, cfg)
         self.config = cfg
         self._validate_adata()
 
@@ -46,6 +50,7 @@ class MultiOmicsEngine:
 
         self.ml_results: Dict[str, object] = {
             "gene_scores_df": pd.DataFrame(),
+            "screening_summary_df": pd.DataFrame(),
             "total_association_network_df": pd.DataFrame(),
             "high_confidence_network_df": pd.DataFrame(),
             "key_gene_summary_df": pd.DataFrame(),
@@ -60,7 +65,181 @@ class MultiOmicsEngine:
             "n_samples": int(self.adata.n_obs),
             "n_genes": int(self.adata.n_vars),
             "n_metabolites": int(len(self.adata.uns.get("metabolite_names", []))),
+            "n_plot_samples": int(self.unaggregated_adata.n_obs),
         }
+
+    @staticmethod
+    def _normalize_group_columns(group_df: pd.DataFrame) -> pd.DataFrame:
+        normalized_columns = {
+            str(column).replace("\ufeff", "").strip().lower(): column
+            for column in group_df.columns
+        }
+        required = {"sample_id", "group1", "group2"}
+        missing = sorted(required.difference(normalized_columns))
+        if missing:
+            raise ValueError(
+                "Group table used for replicate averaging must contain columns: "
+                f"sample_id, group1, group2. Missing: {missing}"
+            )
+        result = group_df.loc[
+            :,
+            [
+                normalized_columns["sample_id"],
+                normalized_columns["group1"],
+                normalized_columns["group2"],
+            ],
+        ].rename(
+            columns={
+                normalized_columns["sample_id"]: "sample_id",
+                normalized_columns["group1"]: "group1",
+                normalized_columns["group2"]: "group2",
+            }
+        )
+        for column in ("sample_id", "group1", "group2"):
+            result[column] = result[column].astype(str).str.strip()
+        result = result.loc[
+            result["sample_id"].ne("") & result["group1"].ne("") & result["group2"].ne("")
+        ].copy()
+        if result.empty:
+            raise ValueError("Group table has no valid sample_id + group1 + group2 rows.")
+        return result
+
+    @staticmethod
+    def _shared_sample_id_field(sample_ids: list[str], fallback: str) -> str:
+        clean_ids = [str(sample_id).strip() for sample_id in sample_ids if str(sample_id).strip()]
+        if not clean_ids:
+            return str(fallback)
+        if len(clean_ids) == 1:
+            return clean_ids[0]
+
+        split_tokens = [re.split(r"[^A-Za-z0-9]+", sample_id) for sample_id in clean_ids]
+        min_len = min(len(tokens) for tokens in split_tokens)
+        shared_tokens = []
+        for idx in range(min_len):
+            token = split_tokens[0][idx]
+            if token and all(tokens[idx] == token for tokens in split_tokens[1:]):
+                shared_tokens.append(token)
+            else:
+                break
+        if shared_tokens:
+            return "_".join(shared_tokens)
+
+        common_prefix = clean_ids[0]
+        for sample_id in clean_ids[1:]:
+            while common_prefix and not sample_id.startswith(common_prefix):
+                common_prefix = common_prefix[:-1]
+        common_prefix = re.sub(r"[^A-Za-z0-9]+$", "", common_prefix.strip())
+        if common_prefix:
+            return common_prefix
+        return str(fallback)
+
+    @staticmethod
+    def _average_dataframe_rows(df: pd.DataFrame, sample_groups: list[tuple[str, list[str]]]) -> pd.DataFrame:
+        averaged_rows = []
+        averaged_index = []
+        for output_sample_id, member_sample_ids in sample_groups:
+            averaged_rows.append(df.loc[member_sample_ids].mean(axis=0).to_numpy(dtype=np.float32))
+            averaged_index.append(output_sample_id)
+        return pd.DataFrame(averaged_rows, index=pd.Index(averaged_index, name=df.index.name), columns=df.columns)
+
+    @classmethod
+    def _average_replicates_for_association(cls, adata: ad.AnnData, cfg: config.AnalysisConfig) -> ad.AnnData:
+        group_table_path = getattr(cfg, "group_table_path", None)
+        if not group_table_path:
+            return adata.copy()
+
+        group_path = Path(group_table_path)
+        if not group_path.exists():
+            raise FileNotFoundError(f"Group table not found: {group_path}")
+
+        group_df = pd.read_csv(group_path, sep=None, engine="python", encoding="utf-8-sig")
+        group_df = cls._normalize_group_columns(group_df)
+
+        obs_index = pd.Index(adata.obs_names.astype(str), name="sample_id")
+        group_df = group_df.loc[group_df["sample_id"].isin(obs_index)].copy()
+        if group_df.empty:
+            logger.warning(
+                "No group table samples overlap with the omics matrices; association analysis will use unaveraged samples."
+            )
+            return adata.copy()
+
+        sample_groups: list[tuple[str, list[str]]] = []
+        used_samples: set[str] = set()
+        for (group1, group2), sub_df in group_df.groupby(["group1", "group2"], sort=False):
+            member_ids = [str(sample_id) for sample_id in sub_df["sample_id"].tolist() if str(sample_id) in obs_index]
+            if not member_ids:
+                continue
+            fallback_id = f"{group1}_{group2}"
+            output_id = cls._shared_sample_id_field(member_ids, fallback=fallback_id)
+            sample_groups.append((output_id, member_ids))
+            used_samples.update(member_ids)
+
+        for sample_id in obs_index.tolist():
+            if sample_id not in used_samples:
+                sample_groups.append((str(sample_id), [str(sample_id)]))
+
+        if len(sample_groups) == adata.n_obs and all(len(members) == 1 and output_id == members[0] for output_id, members in sample_groups):
+            logger.info("No repeated group1 + group2 measurements found; association analysis will use unaveraged samples.")
+            return adata.copy()
+
+        output_ids = [output_id for output_id, _ in sample_groups]
+        if len(output_ids) != len(set(output_ids)):
+            deduped: list[str] = []
+            counts: dict[str, int] = {}
+            for output_id in output_ids:
+                counts[output_id] = counts.get(output_id, 0) + 1
+                deduped.append(output_id if counts[output_id] == 1 else f"{output_id}_{counts[output_id]}")
+            sample_groups = [(deduped[idx], members) for idx, (_, members) in enumerate(sample_groups)]
+            output_ids = deduped
+
+        gene_df = pd.DataFrame(
+            np.asarray(adata.X, dtype=np.float32),
+            index=obs_index,
+            columns=adata.var_names.astype(str),
+        )
+        averaged_gene_df = cls._average_dataframe_rows(gene_df, sample_groups)
+
+        averaged = ad.AnnData(
+            X=averaged_gene_df.to_numpy(dtype=np.float32, copy=False),
+            obs=pd.DataFrame(index=pd.Index(output_ids, name=adata.obs_names.name or "SampleID")),
+            var=adata.var.copy(),
+            uns=adata.uns.copy(),
+        )
+
+        for key, value in adata.layers.items():
+            layer_df = pd.DataFrame(
+                np.asarray(value, dtype=np.float32),
+                index=obs_index,
+                columns=adata.var_names.astype(str),
+            )
+            averaged.layers[key] = cls._average_dataframe_rows(layer_df, sample_groups).to_numpy(dtype=np.float32, copy=False)
+
+        for key, value in adata.obsm.items():
+            if isinstance(value, pd.DataFrame):
+                obsm_df = value.copy()
+                obsm_df.index = obs_index
+            else:
+                obsm_df = pd.DataFrame(np.asarray(value), index=obs_index)
+            if obsm_df.shape[0] != adata.n_obs:
+                continue
+            averaged.obsm[key] = cls._average_dataframe_rows(obsm_df, sample_groups)
+
+        averaged.uns["replicate_averaging"] = {
+            "enabled": True,
+            "group_table_path": str(group_path),
+            "grouping_columns": ["group1", "group2"],
+            "n_input_samples": int(adata.n_obs),
+            "n_output_samples": int(averaged.n_obs),
+            "n_averaged_groups": int(sum(1 for _, members in sample_groups if len(members) > 1)),
+            "used_for": "gene_metabolite_association_network_screening_and_modeling",
+            "not_used_for": "F01_sample_clustering_and_F02_F03_PCA_plots",
+        }
+        logger.info(
+            "Averaged repeated group1 + group2 measurements for association analysis: %d input samples -> %d analysis samples.",
+            adata.n_obs,
+            averaged.n_obs,
+        )
+        return averaged
 
     def _validate_adata(self) -> None:
         if self.adata.n_obs < 3:
@@ -422,6 +601,7 @@ class MultiOmicsEngine:
 
         if not per_metabolite_tables:
             self.ml_results["gene_scores_df"] = pd.DataFrame()
+            self.ml_results["screening_summary_df"] = pd.DataFrame()
             self.ml_results["total_association_network_df"] = pd.DataFrame()
             self.ml_results["high_confidence_network_df"] = pd.DataFrame()
             self.ml_results["key_gene_summary_df"] = pd.DataFrame()
@@ -429,6 +609,32 @@ class MultiOmicsEngine:
             return
 
         gene_scores_df = pd.concat(per_metabolite_tables, ignore_index=True)
+        screening_summary_df = (
+            gene_scores_df.groupby("Metabolite", sort=False)
+            .agg(
+                PCCSelectedGenes=("In_PCC", "sum"),
+                SpearmanSelectedGenes=("In_Spearman", "sum"),
+                MISelectedGenes=("In_MI", "sum"),
+                TotalSelectedGenes=("Gene", "nunique"),
+            )
+            .reset_index()
+        )
+        screening_summary_df[
+            [
+                "PCCSelectedGenes",
+                "SpearmanSelectedGenes",
+                "MISelectedGenes",
+                "TotalSelectedGenes",
+            ]
+        ] = screening_summary_df[
+            [
+                "PCCSelectedGenes",
+                "SpearmanSelectedGenes",
+                "MISelectedGenes",
+                "TotalSelectedGenes",
+            ]
+        ].astype(int)
+
         gene_scores_df = self._compute_group_weights_vectorized(gene_scores_df)
 
         gene_scores_df = gene_scores_df.loc[
@@ -479,6 +685,7 @@ class MultiOmicsEngine:
         )
 
         self.ml_results["gene_scores_df"] = gene_scores_df
+        self.ml_results["screening_summary_df"] = screening_summary_df
         self.ml_results["total_association_network_df"] = total_network_df
         self.ml_results["high_confidence_network_df"] = high_confidence_network_df
         self.ml_results["key_gene_summary_df"] = key_gene_summary_df
@@ -521,6 +728,10 @@ class MultiOmicsEngine:
         gene_scores_df = self.ml_results.get("gene_scores_df", pd.DataFrame())
         if isinstance(gene_scores_df, pd.DataFrame) and not gene_scores_df.empty:
             gene_scores_df.to_csv(out_dir / TABLE_FILE_PREFIXES["gene_scores"], index=False)
+
+        screening_summary_df = self.ml_results.get("screening_summary_df", pd.DataFrame())
+        if isinstance(screening_summary_df, pd.DataFrame) and not screening_summary_df.empty:
+            screening_summary_df.to_csv(out_dir / TABLE_FILE_PREFIXES["screening_summary"], index=False)
 
         total_network_df = self.ml_results.get("total_association_network_df", pd.DataFrame())
         if isinstance(total_network_df, pd.DataFrame) and not total_network_df.empty:

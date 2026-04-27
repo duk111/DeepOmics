@@ -2849,9 +2849,10 @@ def generate_report_plots(engine, cfg) -> None:
     plots_dir = safe_mkdir(Path(cfg.output_dir) / "plots")
     pca_group_df = _load_pca_group_table(cfg)
 
-    sample_names = engine.adata.obs_names.astype(str).tolist()
-    transcriptome_matrix = np.asarray(engine.adata.X, dtype=np.float32)
-    metabolomics_source = engine.adata.obsm.get("metabolomics_scaled", engine.adata.obsm.get("metabolomics"))
+    pca_adata = getattr(engine, "unaggregated_adata", engine.adata)
+    sample_names = pca_adata.obs_names.astype(str).tolist()
+    transcriptome_matrix = np.asarray(pca_adata.X, dtype=np.float32)
+    metabolomics_source = pca_adata.obsm.get("metabolomics_scaled", pca_adata.obsm.get("metabolomics"))
     metabolome_matrix = (
         metabolomics_source.to_numpy(dtype=np.float32, copy=False)
         if isinstance(metabolomics_source, pd.DataFrame)
@@ -2874,30 +2875,30 @@ def generate_report_plots(engine, cfg) -> None:
         max_components=10,
     )
 
-    plot_sample_dendrogram(engine.adata, plots_dir / FIGURE_FILE_PREFIXES["sample_clustering_dendrogram"], cfg)
+    plot_sample_dendrogram(pca_adata, plots_dir / FIGURE_FILE_PREFIXES["sample_clustering_dendrogram"], cfg)
     plot_transcriptome_pca(
-        engine.adata,
+        pca_adata,
         plots_dir / FIGURE_FILE_PREFIXES["transcriptome_pca"],
         cfg,
         group_df=pca_group_df,
         pca_result=transcriptome_pca_result,
     )
     plot_metabolome_pca(
-        engine.adata,
+        pca_adata,
         plots_dir / FIGURE_FILE_PREFIXES["metabolome_pca"],
         cfg,
         group_df=pca_group_df,
         pca_result=metabolome_pca_result,
     )
     plot_transcriptome_pca_pairs(
-        engine.adata,
+        pca_adata,
         plots_dir / FIGURE_FILE_PREFIXES["transcriptome_pca_pairs"],
         cfg,
         group_df=pca_group_df,
         pca_result=transcriptome_pca_result,
     )
     plot_metabolome_pca_pairs(
-        engine.adata,
+        pca_adata,
         plots_dir / FIGURE_FILE_PREFIXES["metabolome_pca_pairs"],
         cfg,
         group_df=pca_group_df,
@@ -2906,28 +2907,28 @@ def generate_report_plots(engine, cfg) -> None:
 
     if _has_secondary_grouping(pca_group_df):
         plot_transcriptome_pca_subgroups(
-            engine.adata,
+            pca_adata,
             plots_dir / FIGURE_FILE_PREFIXES["transcriptome_pca_subgroups"],
             cfg,
             group_df=pca_group_df,
             pca_result=transcriptome_pca_result,
         )
         plot_metabolome_pca_subgroups(
-            engine.adata,
+            pca_adata,
             plots_dir / FIGURE_FILE_PREFIXES["metabolome_pca_subgroups"],
             cfg,
             group_df=pca_group_df,
             pca_result=metabolome_pca_result,
         )
         plot_transcriptome_pca_pairs_subgroups(
-            engine.adata,
+            pca_adata,
             plots_dir / FIGURE_FILE_PREFIXES["transcriptome_pca_pairs_subgroups"],
             cfg,
             group_df=pca_group_df,
             pca_result=transcriptome_pca_result,
         )
         plot_metabolome_pca_pairs_subgroups(
-            engine.adata,
+            pca_adata,
             plots_dir / FIGURE_FILE_PREFIXES["metabolome_pca_pairs_subgroups"],
             cfg,
             group_df=pca_group_df,
