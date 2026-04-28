@@ -34,7 +34,7 @@ class MultiOmicsEngine:
     """Core analysis engine for transcriptome-metabolome association modeling."""
 
     def __init__(self, adata: ad.AnnData, cfg: config.AnalysisConfig):
-        self.unaggregated_adata = adata.copy()
+        self.plot_adata = adata.copy()
         self.adata = self._average_replicates_for_association(adata, cfg)
         self.config = cfg
         self._validate_adata()
@@ -65,7 +65,7 @@ class MultiOmicsEngine:
             "n_samples": int(self.adata.n_obs),
             "n_genes": int(self.adata.n_vars),
             "n_metabolites": int(len(self.adata.uns.get("metabolite_names", []))),
-            "n_plot_samples": int(self.unaggregated_adata.n_obs),
+            "n_plot_samples": int(self.plot_adata.n_obs),
         }
 
     @staticmethod

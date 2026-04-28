@@ -2091,8 +2091,9 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
     bias_cmap = plt.get_cmap("RdBu_r")
 
     group_df = _load_pca_group_table(cfg)
-    gene_track_data = _prepare_group1_mean_track_data(_gene_expression_df(engine.adata), group_df)
-    metabolite_track_data = _prepare_group1_mean_track_data(_metabolomics_df(engine.adata), group_df)
+    circos_track_adata = getattr(engine, "plot_adata", getattr(engine, "unaggregated_adata", engine.adata))
+    gene_track_data = _prepare_group1_mean_track_data(_gene_expression_df(circos_track_adata), group_df)
+    metabolite_track_data = _prepare_group1_mean_track_data(_metabolomics_df(circos_track_adata), group_df)
 
     radii = {
         "outer_strip_inner": 0.992,
@@ -2849,7 +2850,7 @@ def generate_report_plots(engine, cfg) -> None:
     plots_dir = safe_mkdir(Path(cfg.output_dir) / "plots")
     pca_group_df = _load_pca_group_table(cfg)
 
-    pca_adata = getattr(engine, "unaggregated_adata", engine.adata)
+    pca_adata = getattr(engine, "plot_adata", getattr(engine, "unaggregated_adata", engine.adata))
     sample_names = pca_adata.obs_names.astype(str).tolist()
     transcriptome_matrix = np.asarray(pca_adata.X, dtype=np.float32)
     metabolomics_source = pca_adata.obsm.get("metabolomics_scaled", pca_adata.obsm.get("metabolomics"))
