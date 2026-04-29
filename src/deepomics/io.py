@@ -5,6 +5,7 @@ from pathlib import Path
 import anndata as ad
 import numpy as np
 import pandas as pd
+from sklearn.impute import KNNImputer
 from sklearn.preprocessing import StandardScaler
 
 from .utils import get_logger
@@ -47,24 +48,8 @@ def _read_feature_table(path: str | Path, label: str) -> pd.DataFrame:
     return numeric_df
 
 
-def _impute_missing_with_column_mean(df: pd.DataFrame) -> pd.DataFrame:
-    """Fill missing values using column means."""
-    if not df.isna().values.any():
-        return df
-
-    all_missing = df.columns[df.isna().all(axis=0)].tolist()
-    if all_missing:
-        raise ValueError(
-            "The following features contain only missing values and cannot be imputed: "
-            f"{all_missing[:5]}"
-        )
-    return df.fillna(df.mean(axis=0))
-
-
-
-
 def _apply_log2p1(df: pd.DataFrame, label: str) -> pd.DataFrame:
-    """Apply log2(x+1) to a non-negative matrix before missing-value imputation."""
+    """Apply log2(x+1) to a matrix whose finite values are greater than -1."""
     values = df.to_numpy(dtype=np.float32, copy=False)
 
     finite_values = values[np.isfinite(values)]
@@ -72,17 +57,179 @@ def _apply_log2p1(df: pd.DataFrame, label: str) -> pd.DataFrame:
         raise ValueError(f"{label} table does not contain finite numeric values.")
 
     min_value = float(np.nanmin(finite_values))
-    if min_value < 0:
+    if min_value <= -1:
         raise ValueError(
-            f"{label} contains negative values; log2(x+1) cannot be applied safely."
+            f"{label} contains values less than or equal to -1; log2(x+1) cannot be applied safely."
         )
 
     transformed = np.log2(values + 1.0).astype(np.float32)
-    logger.info("Applied log2(x+1) transformation to %s before missing-value imputation.", label)
+    logger.info("Applied log2(x+1) transformation to %s.", label)
     return pd.DataFrame(transformed, index=df.index.copy(), columns=df.columns.copy())
 
 
-def load_as_anndata(gene_path: str | Path, metab_path: str | Path) -> ad.AnnData:
+def _filter_high_missing_features(
+    df: pd.DataFrame,
+    *,
+    label: str,
+    missing_feature_threshold: float,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Drop features missing in more than the configured fraction of samples."""
+    threshold = float(missing_feature_threshold)
+    if not (0.0 <= threshold < 1.0):
+        raise ValueError("missing_feature_threshold must be within [0, 1).")
+
+    missing_fraction = df.isna().mean(axis=0)
+    keep_mask = missing_fraction <= threshold
+    dropped = int((~keep_mask).sum())
+    if dropped > 0:
+        logger.warning(
+            "Removed %d %s features with missing values in more than %.0f%% of samples.",
+            dropped,
+            label,
+            threshold * 100.0,
+        )
+
+    filtered = df.loc[:, keep_mask].copy()
+    if filtered.shape[1] == 0:
+        raise ValueError(
+            f"No {label} features remain after filtering features with missing values "
+            f"in more than {threshold:.0%} of samples."
+        )
+
+    return filtered, {
+        "threshold": threshold,
+        "n_before": int(df.shape[1]),
+        "n_after": int(filtered.shape[1]),
+        "n_removed": dropped,
+    }
+
+
+def _impute_missing_with_knn(
+    df: pd.DataFrame,
+    *,
+    label: str,
+    n_neighbors: int,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Fill missing values with KNN imputation across samples."""
+    neighbors = max(1, int(n_neighbors))
+    missing_before = int(df.isna().sum().sum())
+    if missing_before == 0:
+        return df, {
+            "method": "none",
+            "n_neighbors": neighbors,
+            "missing_before": 0,
+            "missing_after": 0,
+        }
+
+    resolved_neighbors = min(neighbors, max(1, df.shape[0] - 1))
+    imputer = KNNImputer(n_neighbors=resolved_neighbors)
+    imputed = imputer.fit_transform(df.to_numpy(dtype=np.float32, copy=False)).astype(np.float32)
+    result = pd.DataFrame(imputed, index=df.index.copy(), columns=df.columns.copy())
+
+    missing_after = int(result.isna().sum().sum())
+    if missing_after > 0:
+        raise ValueError(f"KNN imputation left {missing_after} missing values in {label}.")
+
+    logger.info(
+        "Imputed %d missing values in %s using KNNImputer(n_neighbors=%d).",
+        missing_before,
+        label,
+        resolved_neighbors,
+    )
+    return result, {
+        "method": "knn",
+        "n_neighbors": resolved_neighbors,
+        "missing_before": missing_before,
+        "missing_after": missing_after,
+    }
+
+
+def _read_group_sample_order(group_table_path: str | Path) -> list[str]:
+    """Read sample_id values from a group table in file order."""
+    group_path = Path(group_table_path)
+    if not group_path.exists():
+        raise FileNotFoundError(f"Group table not found: {group_path}")
+
+    group_df = pd.read_csv(group_path, sep=None, engine="python", encoding="utf-8-sig")
+    normalized_columns = {
+        str(column).replace("\ufeff", "").strip().lower(): column
+        for column in group_df.columns
+    }
+    if "sample_id" not in normalized_columns:
+        raise ValueError("Group table must contain a sample_id column for sample ordering.")
+
+    sample_ids = group_df[normalized_columns["sample_id"]].astype(str).str.strip()
+    sample_ids = sample_ids.loc[sample_ids.ne("")]
+    duplicated_mask = sample_ids.duplicated(keep=False)
+    if duplicated_mask.any():
+        duplicated_ids = sample_ids.loc[duplicated_mask].unique().tolist()
+        raise ValueError(
+            "Group table contains duplicated sample_id values: "
+            f"{duplicated_ids[:5]}"
+        )
+    return sample_ids.tolist()
+
+
+def _order_common_samples(
+    common_samples: pd.Index,
+    group_table_path: str | Path | None,
+) -> tuple[pd.Index, dict[str, object]]:
+    """Order shared samples by group table sample_id order when available."""
+    common_sample_ids = [str(sample_id) for sample_id in common_samples.astype(str).tolist()]
+
+    if group_table_path is None:
+        return pd.Index(common_sample_ids, name="SampleID"), {
+            "method": "shared_sample_input_order",
+            "group_table_path": None,
+            "n_group_ordered_samples": 0,
+            "n_appended_samples": 0,
+        }
+
+    group_order = _read_group_sample_order(group_table_path)
+    common_set = set(common_sample_ids)
+    ordered = []
+    seen = set()
+    for sample_id in group_order:
+        if sample_id in common_set and sample_id not in seen:
+            ordered.append(sample_id)
+            seen.add(sample_id)
+
+    appended = [sample_id for sample_id in common_sample_ids if sample_id not in seen]
+    if appended:
+        logger.warning(
+            "Appended %d shared samples not present in group table after group-table ordered samples.",
+            len(appended),
+        )
+    if not ordered:
+        logger.warning(
+            "No shared samples were found in the group table; falling back to shared sample input order."
+        )
+        ordered = common_sample_ids
+        appended = []
+    else:
+        ordered.extend(appended)
+
+    ignored_group_rows = len([sample_id for sample_id in group_order if sample_id not in common_set])
+    if ignored_group_rows > 0:
+        logger.info(
+            "Ignored %d group table sample_id values not present in both omics matrices.",
+            ignored_group_rows,
+        )
+
+    return pd.Index(ordered, name="SampleID"), {
+        "method": "group_table_sample_id_order",
+        "group_table_path": str(group_table_path),
+        "n_group_ordered_samples": int(len(seen)),
+        "n_appended_samples": int(len(appended)),
+        "n_ignored_group_table_samples": int(ignored_group_rows),
+    }
+
+
+def load_as_anndata(
+    gene_path: str | Path,
+    metab_path: str | Path,
+    group_table_path: str | Path | None = None,
+) -> ad.AnnData:
     """Load transcriptome and metabolome matrices into a single AnnData object."""
     logger.info("Loading transcriptome data from %s", gene_path)
     df_gene = _read_feature_table(gene_path, label="Transcriptome")
@@ -90,13 +237,14 @@ def load_as_anndata(gene_path: str | Path, metab_path: str | Path) -> ad.AnnData
     logger.info("Loading metabolomics data from %s", metab_path)
     df_metab = _read_feature_table(metab_path, label="Metabolomics")
 
-    df_gene_t = _impute_missing_with_column_mean(df_gene.T)
-    df_metab_t = _impute_missing_with_column_mean(df_metab.T)
+    df_gene_t = df_gene.T
+    df_metab_t = df_metab.T
 
     common_samples = df_gene_t.index.intersection(df_metab_t.index, sort=False)
-    common_samples = pd.Index(sorted(common_samples.astype(str)), name="SampleID")
+    common_samples = pd.Index(common_samples.astype(str), name="SampleID")
     if len(common_samples) == 0:
         raise ValueError("No shared sample IDs were found between transcriptome and metabolomics tables.")
+    common_samples, sample_order_info = _order_common_samples(common_samples, group_table_path)
 
     logger.info("Sample alignment completed. Shared samples: %d", len(common_samples))
 
@@ -118,6 +266,7 @@ def load_as_anndata(gene_path: str | Path, metab_path: str | Path) -> ad.AnnData
         "n_samples": int(adata.n_obs),
         "n_genes": int(adata.n_vars),
         "n_metabolites": int(len(adata.uns["metabolite_names"])),
+        "sample_order": sample_order_info,
     }
     return adata
 
@@ -125,9 +274,11 @@ def load_as_anndata(gene_path: str | Path, metab_path: str | Path) -> ad.AnnData
 def preprocess_adata(
     adata: ad.AnnData,
     scale: bool = True,
-    log_transform: bool = False,
+    log_transform: bool = True,
+    missing_feature_threshold: float = 0.5,
+    knn_neighbors: int = 5,
 ) -> ad.AnnData:
-    """Apply basic preprocessing to the AnnData object."""
+    """Apply filtering, log transformation, KNN imputation, variance filtering, and scaling."""
     if "metabolomics" not in adata.obsm:
         raise KeyError("adata.obsm['metabolomics'] is required.")
 
@@ -136,14 +287,23 @@ def preprocess_adata(
         index=adata.obs_names.astype(str),
         columns=adata.var_names.astype(str),
     )
+    gene_df, gene_missing_filter_info = _filter_high_missing_features(
+        gene_df,
+        label="Transcriptome",
+        missing_feature_threshold=missing_feature_threshold,
+    )
     if log_transform:
         gene_df = _apply_log2p1(gene_df, label="Transcriptome")
-    gene_df = _impute_missing_with_column_mean(gene_df)
+    gene_df, gene_impute_info = _impute_missing_with_knn(
+        gene_df,
+        label="Transcriptome",
+        n_neighbors=knn_neighbors,
+    )
     gene_log_info = {
         "label": "Transcriptome",
         "applied": bool(log_transform),
         "method": "log2(x+1)" if log_transform else "none",
-        "stage": "before_missing_value_imputation" if log_transform else "not_applied",
+        "stage": "after_high_missing_filter_before_knn_imputation" if log_transform else "not_applied",
     }
 
     gene_var = np.nanvar(gene_df.to_numpy(dtype=np.float32, copy=False), axis=0)
@@ -152,11 +312,11 @@ def preprocess_adata(
         dropped = int((~keep_genes).sum())
         logger.warning("Removed %d constant genes before modeling.", dropped)
         gene_df = gene_df.loc[:, keep_genes]
-        adata = adata[:, keep_genes].copy()
 
     if gene_df.shape[1] == 0:
         raise ValueError("No genes remain after preprocessing.")
 
+    adata = adata[:, pd.Index(gene_df.columns.astype(str))].copy()
     adata.X = gene_df.to_numpy(dtype=np.float32, copy=False)
     adata.var_names = pd.Index(gene_df.columns.astype(str), name="Gene")
 
@@ -168,14 +328,23 @@ def preprocess_adata(
     metab_df.index = adata.obs_names.astype(str)
     metab_df.columns = metab_df.columns.astype(str)
     metab_df = metab_df.astype(np.float32, copy=False)
+    metab_df, metab_missing_filter_info = _filter_high_missing_features(
+        metab_df,
+        label="Metabolomics",
+        missing_feature_threshold=missing_feature_threshold,
+    )
     if log_transform:
         metab_df = _apply_log2p1(metab_df, label="Metabolomics")
-    metab_df = _impute_missing_with_column_mean(metab_df)
+    metab_df, metab_impute_info = _impute_missing_with_knn(
+        metab_df,
+        label="Metabolomics",
+        n_neighbors=knn_neighbors,
+    )
     metab_log_info = {
         "label": "Metabolomics",
         "applied": bool(log_transform),
         "method": "log2(x+1)" if log_transform else "none",
-        "stage": "before_missing_value_imputation" if log_transform else "not_applied",
+        "stage": "after_high_missing_filter_before_knn_imputation" if log_transform else "not_applied",
     }
 
     metab_var = np.nanvar(metab_df.to_numpy(dtype=np.float32, copy=False), axis=0)
@@ -216,7 +385,13 @@ def preprocess_adata(
         "n_metabolites": int(len(adata.uns["metabolite_names"])),
         "scaled": bool(scale),
         "log_transform": bool(log_transform),
+        "missing_feature_threshold": float(missing_feature_threshold),
+        "knn_neighbors": int(knn_neighbors),
+        "transcriptome_missing_filter": gene_missing_filter_info,
+        "transcriptome_imputation": gene_impute_info,
         "transcriptome_log2p1": gene_log_info,
+        "metabolomics_missing_filter": metab_missing_filter_info,
+        "metabolomics_imputation": metab_impute_info,
         "metabolomics_log2p1": metab_log_info,
     }
     return adata

@@ -66,6 +66,7 @@ class MultiOmicsEngine:
             "n_genes": int(self.adata.n_vars),
             "n_metabolites": int(len(self.adata.uns.get("metabolite_names", []))),
             "n_plot_samples": int(self.plot_adata.n_obs),
+            "preprocess_summary": self.adata.uns.get("preprocess_summary", {}),
         }
 
     @staticmethod

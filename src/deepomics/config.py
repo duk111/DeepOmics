@@ -20,6 +20,9 @@ class AnalysisConfig:
     group_table_path: str | None = None
     random_state: int = 42
 
+    missing_feature_threshold: float = 0.5
+    knn_neighbors: int = 5
+
     screen_top_k_per_method: int = 1000
     use_fdr: bool = False
     fdr_alpha: float = 0.05
@@ -83,6 +86,10 @@ class AnalysisConfig:
             raise ValueError(f"log_level must be one of: {sorted(_VALID_LOG_LEVELS)}.")
         if self.screen_top_k_per_method < 1:
             raise ValueError("screen_top_k_per_method must be at least 1.")
+        if not (0 <= self.missing_feature_threshold < 1):
+            raise ValueError("missing_feature_threshold must be within [0, 1).")
+        if self.knn_neighbors < 1:
+            raise ValueError("knn_neighbors must be at least 1.")
         if not (0 < self.fdr_alpha <= 1):
             raise ValueError("fdr_alpha must be within (0, 1].")
         if not (0 < self.selection_ratio <= 1):
