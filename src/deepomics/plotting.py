@@ -87,6 +87,7 @@ FIGURE_FILE_PREFIXES = {
     "metabolome_pca_pairs_subgroups": "F03D_Metabolome_PCA_Pairs_Subgroups",
     "top_gene_metabolite_pairs": "F04_Top_Gene_Metabolite_Pairs",
     "module_eigengene_heatmap": "F05A_Module_Eigengene_Heatmap",
+    "module_eigengene_heatmap_group2": "F05B_Module_Eigengene_Heatmap_Group2",
     "module_metabolite_association_heatmap": "F05_Module_Metabolite_Association_Heatmap",
     "compressed_circos_network": "F06_Compressed_Circos_Network",
     "floating_cnet_circos_network": "F07_Floating_CNet_Circos_Network",
@@ -2828,49 +2829,12 @@ def _group_color_orders_from_table(
     return group1_order, group1_color_map, group2_order, group2_color_map
 
 
-def plot_module_eigengene_heatmap(
-    engine,
-    save_stem: str | Path,
-    cfg,
-    group_df: pd.DataFrame | None = None,
-) -> None:
-    eigengenes_df = _coerce_module_eigengene_df(engine.ml_results.get("module_eigengenes_df", pd.DataFrame()))
-    if eigengenes_df.empty:
-        return
-
-    module_order = _module_order_from_summary(
-        engine.ml_results.get("module_summary_df", pd.DataFrame()),
-        eigengenes_df.columns.astype(str).tolist(),
-    )
-    eigengenes_df = eigengenes_df.loc[:, [module for module in module_order if module in eigengenes_df.columns]].copy()
-    if eigengenes_df.empty:
-        return
-
-    sample_names = eigengenes_df.index.astype(str).tolist()
-    annotation_df = _align_group_annotations_to_samples(sample_names, group_df)
-    if not annotation_df.empty:
-        sort_df = annotation_df.loc[:, ["_has_group_annotation", "_group_table_order", "_original_sample_order"]].copy()
-        sort_df["_missing_rank"] = np.where(sort_df["_has_group_annotation"], 0, 1)
-        sorted_samples = (
-            sort_df.sort_values(
-                ["_missing_rank", "_group_table_order", "_original_sample_order"],
-                ascending=[True, True, True],
-                kind="mergesort",
-            )
-            .index.astype(str)
-            .tolist()
-        )
-        eigengenes_df = eigengenes_df.reindex(sorted_samples)
-        annotation_df = annotation_df.reindex(sorted_samples)
-
-    heatmap_df = _row_zscore(eigengenes_df.T)
-    if heatmap_df.empty:
-        return
-
-    group_orders = annotation_df["_group_table_order"].astype(int).tolist() if not annotation_df.empty else None
-    group1_labels = annotation_df["group1"].astype(str).tolist() if not annotation_df.empty else ["Missing"] * heatmap_df.shape[1]
-    group2_labels = annotation_df["group2"].astype(str).tolist() if not annotation_df.empty else ["Missing"] * heatmap_df.shape[1]
-
+def _module_group_orders_and_colors(
+    group_df: pd.DataFrame | None,
+    group1_labels: list[str],
+    group2_labels: list[str],
+    group_orders: list[int] | None,
+) -> tuple[dict[str, list[str]], dict[str, dict[str, str]]]:
     used_group1_order = _ordered_unique_with_order(group1_labels, group_orders)
     used_group2_order = _ordered_unique_with_order(group2_labels, group_orders)
     full_group1_order, group1_color_map, full_group2_order, group2_color_map = _group_color_orders_from_table(group_df)
@@ -2895,6 +2859,111 @@ def plot_module_eigengene_heatmap(
     if "Missing" in used_group2_order:
         group2_color_map["Missing"] = "#d1d5db"
 
+    return (
+        {"group1": group1_order, "group2": group2_order},
+        {"group1": group1_color_map, "group2": group2_color_map},
+    )
+
+
+def _sort_module_eigengene_samples(
+    eigengenes_df: pd.DataFrame,
+    annotation_df: pd.DataFrame,
+    *,
+    block_group_col: str,
+    group_orders_by_col: dict[str, list[str]],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if annotation_df.empty:
+        return eigengenes_df, annotation_df
+
+    inner_group_col = "group2" if block_group_col == "group1" else "group1"
+    block_order = {group_name: idx for idx, group_name in enumerate(group_orders_by_col.get(block_group_col, []))}
+    inner_order = {group_name: idx for idx, group_name in enumerate(group_orders_by_col.get(inner_group_col, []))}
+
+    sort_df = annotation_df.loc[:, ["_has_group_annotation", "_group_table_order", "_original_sample_order"]].copy()
+    sort_df["_missing_rank"] = np.where(sort_df["_has_group_annotation"], 0, 1)
+    sort_df["_block_rank"] = [
+        block_order.get(str(label), len(block_order) + idx)
+        for idx, label in enumerate(annotation_df[block_group_col].astype(str).tolist())
+    ]
+    sort_df["_inner_rank"] = [
+        inner_order.get(str(label), len(inner_order) + idx)
+        for idx, label in enumerate(annotation_df[inner_group_col].astype(str).tolist())
+    ]
+
+    sorted_samples = (
+        sort_df.sort_values(
+            ["_missing_rank", "_block_rank", "_inner_rank", "_group_table_order", "_original_sample_order"],
+            ascending=[True, True, True, True, True],
+            kind="mergesort",
+        )
+        .index.astype(str)
+        .tolist()
+    )
+    return eigengenes_df.reindex(sorted_samples), annotation_df.reindex(sorted_samples)
+
+
+def _plot_module_eigengene_heatmap_variant(
+    engine,
+    save_stem: str | Path,
+    cfg,
+    group_df: pd.DataFrame | None = None,
+    *,
+    top_group_col: str,
+    bottom_group_col: str,
+    block_group_col: str,
+) -> None:
+    eigengenes_df = _coerce_module_eigengene_df(engine.ml_results.get("module_eigengenes_df", pd.DataFrame()))
+    if eigengenes_df.empty:
+        return
+
+    module_order = _module_order_from_summary(
+        engine.ml_results.get("module_summary_df", pd.DataFrame()),
+        eigengenes_df.columns.astype(str).tolist(),
+    )
+    eigengenes_df = eigengenes_df.loc[:, [module for module in module_order if module in eigengenes_df.columns]].copy()
+    if eigengenes_df.empty:
+        return
+
+    sample_names = eigengenes_df.index.astype(str).tolist()
+    annotation_df = _align_group_annotations_to_samples(sample_names, group_df)
+
+    group_orders = annotation_df["_group_table_order"].astype(int).tolist() if not annotation_df.empty else None
+    group1_labels_unsorted = annotation_df["group1"].astype(str).tolist() if not annotation_df.empty else ["Missing"] * eigengenes_df.shape[0]
+    group2_labels_unsorted = annotation_df["group2"].astype(str).tolist() if not annotation_df.empty else ["Missing"] * eigengenes_df.shape[0]
+    group_orders_by_col, color_maps_by_col = _module_group_orders_and_colors(
+        group_df,
+        group1_labels_unsorted,
+        group2_labels_unsorted,
+        group_orders,
+    )
+
+    eigengenes_df, annotation_df = _sort_module_eigengene_samples(
+        eigengenes_df,
+        annotation_df,
+        block_group_col=block_group_col,
+        group_orders_by_col=group_orders_by_col,
+    )
+
+    heatmap_df = _row_zscore(eigengenes_df.T)
+    if heatmap_df.empty:
+        return
+
+    if not annotation_df.empty:
+        labels_by_col = {
+            "group1": annotation_df["group1"].astype(str).tolist(),
+            "group2": annotation_df["group2"].astype(str).tolist(),
+        }
+    else:
+        labels_by_col = {
+            "group1": ["Missing"] * heatmap_df.shape[1],
+            "group2": ["Missing"] * heatmap_df.shape[1],
+        }
+
+    top_order = group_orders_by_col.get(top_group_col, [])
+    bottom_order = group_orders_by_col.get(bottom_group_col, [])
+    top_color_map = color_maps_by_col.get(top_group_col, {})
+    bottom_color_map = color_maps_by_col.get(bottom_group_col, {})
+
     n_modules, n_samples = heatmap_df.shape
     fig_width = max(8.5, min(28.0, 0.18 * max(1, n_samples) + 3.6))
     fig_height = max(5.8, min(18.0, 0.28 * max(1, n_modules) + 3.4))
@@ -2902,7 +2971,7 @@ def plot_module_eigengene_heatmap(
     fig = plt.figure(figsize=(fig_width, fig_height))
     fig._skip_default_tight_layout = True
     heatmap_height = max(3.0, 0.28 * max(1, n_modules))
-    legend_height = 0.72 if len(group1_order) + len(group2_order) <= 20 else 0.96
+    legend_height = 0.72 if len(top_order) + len(bottom_order) <= 20 else 0.96
     gs = fig.add_gridspec(
         nrows=5,
         ncols=1,
@@ -2911,8 +2980,8 @@ def plot_module_eigengene_heatmap(
     )
 
     ax_heatmap = fig.add_subplot(gs[0, 0])
-    ax_group2 = fig.add_subplot(gs[1, 0], sharex=ax_heatmap)
-    ax_group1 = fig.add_subplot(gs[2, 0], sharex=ax_heatmap)
+    ax_top_group = fig.add_subplot(gs[1, 0], sharex=ax_heatmap)
+    ax_bottom_group = fig.add_subplot(gs[2, 0], sharex=ax_heatmap)
     cbar_grid = gs[3, 0].subgridspec(1, 3, width_ratios=[1.0, 0.42, 1.0])
     cbar_ax = fig.add_subplot(cbar_grid[0, 1])
     legend_ax = fig.add_subplot(gs[4, 0])
@@ -2958,9 +3027,9 @@ def plot_module_eigengene_heatmap(
         spine.set_linewidth(0.7)
         spine.set_edgecolor("#6b7280")
 
-    _add_group_annotation_bar(ax_group2, group2_labels, group2_color_map)
-    _add_group_annotation_bar(ax_group1, group1_labels, group1_color_map)
-    _add_heatmap_group_separators([ax_heatmap, ax_group2, ax_group1], group1_labels)
+    _add_group_annotation_bar(ax_top_group, labels_by_col[top_group_col], top_color_map)
+    _add_group_annotation_bar(ax_bottom_group, labels_by_col[bottom_group_col], bottom_color_map)
+    _add_heatmap_group_separators([ax_heatmap, ax_top_group, ax_bottom_group], labels_by_col[block_group_col])
 
     cbar = fig.colorbar(image, cax=cbar_ax, orientation="horizontal")
     cbar.set_ticks([-1.5, 0.0, 1.5])
@@ -2977,21 +3046,21 @@ def plot_module_eigengene_heatmap(
         fontsize=10,
     )
 
-    group2_handles = [
-        Patch(facecolor=group2_color_map[group_name], edgecolor="none", label=group_name)
-        for group_name in group2_order
+    top_handles = [
+        Patch(facecolor=top_color_map[group_name], edgecolor="none", label=group_name)
+        for group_name in top_order
     ]
-    group1_handles = [
-        Patch(facecolor=group1_color_map[group_name], edgecolor="none", label=group_name)
-        for group_name in group1_order
+    bottom_handles = [
+        Patch(facecolor=bottom_color_map[group_name], edgecolor="none", label=group_name)
+        for group_name in bottom_order
     ]
 
-    if group2_handles:
-        group2_legend = legend_ax.legend(
-            handles=group2_handles,
+    if top_handles:
+        top_legend = legend_ax.legend(
+            handles=top_handles,
             loc="upper center",
             bbox_to_anchor=(0.5, 0.80),
-            ncol=_legend_column_count(len(group2_handles), fig_width),
+            ncol=_legend_column_count(len(top_handles), fig_width),
             frameon=False,
             handlelength=1.4,
             handleheight=0.8,
@@ -3001,14 +3070,14 @@ def plot_module_eigengene_heatmap(
             borderaxespad=0.0,
             fontsize=9,
         )
-        legend_ax.add_artist(group2_legend)
+        legend_ax.add_artist(top_legend)
 
-    if group1_handles:
+    if bottom_handles:
         legend_ax.legend(
-            handles=group1_handles,
+            handles=bottom_handles,
             loc="lower center",
             bbox_to_anchor=(0.5, 0.18),
-            ncol=_legend_column_count(len(group1_handles), fig_width),
+            ncol=_legend_column_count(len(bottom_handles), fig_width),
             frameon=False,
             handlelength=1.4,
             handleheight=0.8,
@@ -3022,6 +3091,40 @@ def plot_module_eigengene_heatmap(
     left_margin = 0.14 if n_modules < 40 else 0.17
     fig.subplots_adjust(left=left_margin, right=0.985, top=0.985, bottom=0.045)
     _save_figure(fig, save_stem, cfg)
+
+
+def plot_module_eigengene_heatmap(
+    engine,
+    save_stem: str | Path,
+    cfg,
+    group_df: pd.DataFrame | None = None,
+) -> None:
+    _plot_module_eigengene_heatmap_variant(
+        engine,
+        save_stem,
+        cfg,
+        group_df=group_df,
+        top_group_col="group2",
+        bottom_group_col="group1",
+        block_group_col="group1",
+    )
+
+
+def plot_module_eigengene_heatmap_group2(
+    engine,
+    save_stem: str | Path,
+    cfg,
+    group_df: pd.DataFrame | None = None,
+) -> None:
+    _plot_module_eigengene_heatmap_variant(
+        engine,
+        save_stem,
+        cfg,
+        group_df=group_df,
+        top_group_col="group1",
+        bottom_group_col="group2",
+        block_group_col="group2",
+    )
 
 
 def plot_module_metabolite_association_heatmap(engine, save_stem: str | Path, cfg) -> None:
@@ -3191,6 +3294,7 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap_group2']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png`",
@@ -3220,6 +3324,7 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_pca_pairs'])}.pdf|svg|png</code></td><td>Metabolome PCA pairs plot using the first principal components.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs'])}.pdf|svg|png</code></td><td>Top association pair scatter panels ranked by EdgeWeight.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_heatmap'])}.pdf|svg|png</code></td><td>Module eigengene heatmap with group2 and group1 annotation tracks using PCA group colors.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_heatmap_group2'])}.pdf|svg|png</code></td><td>Module eigengene heatmap with group1 and group2 annotation tracks, grouped by group2.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap'])}.pdf|svg|png</code></td><td>Module-metabolite association heatmap colored by Spearman rho with significance stars.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['compressed_circos_network'])}.pdf|svg|png</code></td><td>Compact Circos overview using all unique genes and metabolites from T03 only.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['floating_cnet_circos_network'])}.pdf|svg|png</code></td><td>Floating circular cnetplot-style network using T03 only, with circular non-overlapping nodes and metabolite-colored edges.</td></tr>",
@@ -3398,6 +3503,12 @@ def generate_report_plots(engine, cfg) -> None:
         cfg,
         group_df=pca_group_df,
     )
+    plot_module_eigengene_heatmap_group2(
+        engine,
+        plots_dir / FIGURE_FILE_PREFIXES["module_eigengene_heatmap_group2"],
+        cfg,
+        group_df=pca_group_df,
+    )
     plot_module_metabolite_association_heatmap(
         engine,
         plots_dir / FIGURE_FILE_PREFIXES["module_metabolite_association_heatmap"],
@@ -3418,10 +3529,11 @@ def generate_report_plots(engine, cfg) -> None:
         f"8. Use plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs_subgroups']}.pdf|svg|png for the metabolome PCA pairs overview (group2).\n"
         f"9. Use plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png for the top regression-panel overview.\n"
         f"10. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap']}.pdf|svg|png for the module eigengene heatmap with group2/group1 annotation tracks.\n"
-        f"11. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png for the module-metabolite association heatmap.\n"
-        f"12. Use plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png for the compact T03-only Circos overview.\n"
-        f"13. Use plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png for the floating circular T03-only cnetplot-style overview.\n"
-        "14. Use DeepOmics_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
+        f"11. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap_group2']}.pdf|svg|png for the module eigengene heatmap grouped by group2.\n"
+        f"12. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png for the module-metabolite association heatmap.\n"
+        f"13. Use plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png for the compact T03-only Circos overview.\n"
+        f"14. Use plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png for the floating circular T03-only cnetplot-style overview.\n"
+        "15. Use DeepOmics_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
     )
     (plots_dir / "visualization_notes.txt").write_text(notes, encoding="utf-8")
 
