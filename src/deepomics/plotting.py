@@ -88,6 +88,8 @@ FIGURE_FILE_PREFIXES = {
     "top_gene_metabolite_pairs": "F04_Top_Gene_Metabolite_Pairs",
     "module_eigengene_heatmap": "F05A_Module_Eigengene_Heatmap",
     "module_eigengene_heatmap_group2": "F05B_Module_Eigengene_Heatmap_Group2",
+    "module_zscore_line_panels": "F05C_Module_Zscore_Line_Panels",
+    "module_gene_zscore_line_panels": "F05D_Module_Gene_Zscore_Line_Panels",
     "module_metabolite_association_heatmap": "F05_Module_Metabolite_Association_Heatmap",
     "compressed_circos_network": "F06_Compressed_Circos_Network",
     "floating_cnet_circos_network": "F07_Floating_CNet_Circos_Network",
@@ -153,7 +155,7 @@ def _save_figure(fig: plt.Figure, save_stem: str | Path, cfg) -> None:
     if cfg.export_svg:
         fig.savefig(save_stem.with_suffix(".svg"), **savefig_kwargs)
     if getattr(cfg, "export_png", True):
-        fig.savefig(save_stem.with_suffix(".png"), dpi=300, **savefig_kwargs)
+        fig.savefig(save_stem.with_suffix(".png"), dpi=int(getattr(fig, "_png_dpi", 300)), **savefig_kwargs)
     plt.close(fig)
 
 
@@ -183,7 +185,7 @@ def _load_pca_group_table(cfg) -> pd.DataFrame | None:
         return None
 
     group_table_path = Path(group_table_path)
-    group_df = pd.read_csv(group_table_path, sep=None, engine="python", encoding="utf-8-sig")
+    group_df = pd.read_csv(group_table_path, sep=None, engine="python", encoding="utf-8-sig", dtype=str)
     normalized_columns = {
         str(column).replace("\ufeff", "").strip().lower(): column
         for column in group_df.columns
@@ -3127,6 +3129,508 @@ def plot_module_eigengene_heatmap_group2(
     )
 
 
+def _add_group2_color_strip(
+    ax: plt.Axes,
+    group2_order: list[str],
+    group2_color_map: dict[str, str],
+    *,
+    missing_color: str = "#d1d5db",
+) -> None:
+    if not group2_order:
+        ax.axis("off")
+        return
+
+    rgba = np.array(
+        [[colors.to_rgba(group2_color_map.get(str(group_name), missing_color)) for group_name in group2_order]],
+        dtype=float,
+    )
+    ax.imshow(rgba, aspect="auto", interpolation="nearest")
+    ax.set_xlim(-0.5, len(group2_order) - 0.5)
+    ax.set_xticks(np.arange(len(group2_order)))
+    ax.set_xticklabels([])
+    ax.set_yticks([])
+    ax.tick_params(axis="both", length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+
+def _centered_point_offsets(n_points: int, width: float = 0.14) -> np.ndarray:
+    if n_points <= 1:
+        return np.zeros(max(1, int(n_points)), dtype=float)
+    return np.linspace(-float(width), float(width), int(n_points), dtype=float)
+
+
+def plot_module_zscore_line_panels(
+    engine,
+    save_stem: str | Path,
+    cfg,
+    group_df: pd.DataFrame | None = None,
+) -> None:
+    eigengenes_df = _coerce_module_eigengene_df(engine.ml_results.get("module_eigengenes_df", pd.DataFrame()))
+    if eigengenes_df.empty:
+        return
+
+    module_order = _module_order_from_summary(
+        engine.ml_results.get("module_summary_df", pd.DataFrame()),
+        eigengenes_df.columns.astype(str).tolist(),
+    )
+    eigengenes_df = eigengenes_df.loc[:, [module for module in module_order if module in eigengenes_df.columns]].copy()
+    if eigengenes_df.empty:
+        return
+
+    zscore_df = _row_zscore(eigengenes_df.T)
+    if zscore_df.empty:
+        return
+
+    sample_names = zscore_df.columns.astype(str).tolist()
+    annotation_df = _align_group_annotations_to_samples(sample_names, group_df)
+    if annotation_df.empty:
+        return
+
+    group_orders = annotation_df["_group_table_order"].astype(int).tolist()
+    group_orders_by_col, color_maps_by_col = _module_group_orders_and_colors(
+        group_df,
+        annotation_df["group1"].astype(str).tolist(),
+        annotation_df["group2"].astype(str).tolist(),
+        group_orders,
+    )
+    group1_order = group_orders_by_col.get("group1", [])
+    group2_order = group_orders_by_col.get("group2", [])
+    if not group1_order or not group2_order:
+        return
+
+    group1_color_map = color_maps_by_col.get("group1", {})
+    group2_color_map = color_maps_by_col.get("group2", {})
+
+    annotation_df = annotation_df.reindex(sample_names)
+    sample_groups: dict[tuple[str, str], list[str]] = {}
+    for group1_name in group1_order:
+        for group2_name in group2_order:
+            mask = (
+                annotation_df["group1"].astype(str).eq(str(group1_name))
+                & annotation_df["group2"].astype(str).eq(str(group2_name))
+            )
+            sample_groups[(str(group1_name), str(group2_name))] = annotation_df.index[mask].astype(str).tolist()
+
+    finite_values = zscore_df.to_numpy(dtype=float, copy=False)
+    finite_values = finite_values[np.isfinite(finite_values)]
+    if finite_values.size == 0:
+        return
+    y_min = float(np.nanmin(finite_values))
+    y_max = float(np.nanmax(finite_values))
+    if np.isclose(y_min, y_max):
+        y_min -= 1.0
+        y_max += 1.0
+    y_pad = max(0.15, 0.08 * (y_max - y_min))
+    y_min -= y_pad
+    y_max += y_pad
+
+    n_modules = len(zscore_df.index)
+    n_group1 = len(group1_order)
+    n_group2 = len(group2_order)
+    panel_width = max(1.10, min(1.65, 0.045 * n_group2 + 0.85))
+    panel_height = 0.76 if n_modules <= 10 else 0.62
+    fig_width = max(6.2, min(18.0, panel_width * n_group1 + 1.35))
+    fig_height = max(4.8, min(28.0, panel_height * n_modules + 1.45))
+
+    legend_ncol = _legend_column_count(len(group2_order), fig_width)
+    legend_rows = int(np.ceil(len(group2_order) / max(1, legend_ncol)))
+    bottom_margin = max(0.12, min(0.24, 0.075 + 0.035 * legend_rows))
+
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    fig._skip_default_tight_layout = True
+    fig._png_dpi = 180
+    gs = fig.add_gridspec(
+        nrows=n_modules + 1,
+        ncols=n_group1,
+        height_ratios=[1.0] * n_modules + [0.12],
+        hspace=0.12,
+        wspace=0.18,
+    )
+
+    x_positions = np.arange(n_group2, dtype=float)
+    for row_idx, module_name in enumerate(zscore_df.index.astype(str).tolist()):
+        module_values = zscore_df.loc[module_name]
+        for col_idx, group1_name in enumerate(group1_order):
+            ax = fig.add_subplot(gs[row_idx, col_idx])
+            if row_idx == 0:
+                ax.set_title(str(group1_name), fontsize=10, fontweight="normal", pad=4)
+
+            mean_x: list[float] = []
+            mean_y: list[float] = []
+            point_color = group1_color_map.get(str(group1_name), "#4b5563")
+            for group2_idx, group2_name in enumerate(group2_order):
+                grouped_samples = sample_groups.get((str(group1_name), str(group2_name)), [])
+                if not grouped_samples:
+                    continue
+
+                y_values = pd.to_numeric(module_values.reindex(grouped_samples), errors="coerce").dropna()
+                if y_values.empty:
+                    continue
+
+                y_array = y_values.to_numpy(dtype=float, copy=False)
+                offsets = _centered_point_offsets(len(y_array))
+                ax.scatter(
+                    np.full(len(y_array), float(group2_idx), dtype=float) + offsets,
+                    y_array,
+                    s=15,
+                    color=point_color,
+                    edgecolors="white",
+                    linewidths=0.35,
+                    alpha=0.88,
+                    zorder=3,
+                )
+                mean_x.append(float(group2_idx))
+                mean_y.append(float(np.nanmean(y_array)))
+
+            if mean_x:
+                ax.plot(mean_x, mean_y, color="black", linewidth=1.15, alpha=0.95, zorder=4)
+
+            ax.set_xlim(-0.5, n_group2 - 0.5)
+            ax.set_ylim(y_min, y_max)
+            ax.set_xticks(x_positions)
+            ax.set_xticklabels([])
+            ax.tick_params(axis="x", length=2.0, width=0.55, labelbottom=False)
+            ax.tick_params(axis="y", length=2.5, width=0.6, labelsize=7)
+            if col_idx > 0:
+                ax.set_yticklabels([])
+                ax.tick_params(axis="y", length=0)
+            ax.set_axisbelow(True)
+            ax.grid(axis="y", color="#e5e7eb", linewidth=0.45)
+            ax.grid(axis="x", color="#eef2f7", linewidth=0.42)
+            for spine in ax.spines.values():
+                spine.set_visible(True)
+                spine.set_linewidth(0.65)
+                spine.set_edgecolor("#6b7280")
+
+            if col_idx == n_group1 - 1:
+                ax.text(
+                    1.035,
+                    0.5,
+                    str(module_name),
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="center",
+                    fontsize=8,
+                    rotation=270,
+                )
+
+    for col_idx in range(n_group1):
+        strip_ax = fig.add_subplot(gs[n_modules, col_idx])
+        _add_group2_color_strip(strip_ax, group2_order, group2_color_map)
+
+    legend_handles = [
+        Patch(facecolor=group2_color_map.get(str(group_name), "#d1d5db"), edgecolor="none", label=str(group_name))
+        for group_name in group2_order
+    ]
+    if legend_handles:
+        fig.legend(
+            handles=legend_handles,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.018),
+            ncol=legend_ncol,
+            frameon=False,
+            handlelength=1.3,
+            handleheight=0.75,
+            handletextpad=0.42,
+            columnspacing=0.85,
+            labelspacing=0.42,
+            borderaxespad=0.0,
+            fontsize=9,
+        )
+
+    fig.text(0.028, 0.54, "z score", rotation=90, ha="center", va="center", fontsize=11)
+    fig.subplots_adjust(left=0.08, right=0.965, top=0.965, bottom=bottom_margin)
+    _save_figure(fig, save_stem, cfg)
+
+
+def _coerce_engine_gene_expression_df(engine) -> pd.DataFrame:
+    if hasattr(engine, "gene_expression_df"):
+        try:
+            expr_df = engine.gene_expression_df()
+        except Exception:
+            expr_df = pd.DataFrame()
+    else:
+        expr_df = pd.DataFrame()
+
+    if (not isinstance(expr_df, pd.DataFrame) or expr_df.empty) and hasattr(engine, "adata"):
+        expr_df = _gene_expression_df(engine.adata)
+
+    if not isinstance(expr_df, pd.DataFrame) or expr_df.empty:
+        return pd.DataFrame()
+
+    work = expr_df.copy()
+    work.index = pd.Index(work.index.astype(str).str.strip(), name=work.index.name or "SampleID")
+    work.columns = pd.Index(work.columns.astype(str).str.strip(), name=work.columns.name)
+    work = work.loc[work.index.astype(str).str.len() > 0, work.columns.astype(str).str.len() > 0].copy()
+    work = work.loc[~work.index.duplicated(keep="first"), ~work.columns.duplicated(keep="first")].copy()
+    return work.apply(pd.to_numeric, errors="coerce")
+
+
+def _module_gene_map_from_assignment(
+    gene_module_assignment_df: pd.DataFrame,
+    module_order: list[str],
+    available_genes: pd.Index,
+) -> dict[str, list[str]]:
+    if not isinstance(gene_module_assignment_df, pd.DataFrame) or gene_module_assignment_df.empty:
+        return {}
+    if not {"Gene", "Module"}.issubset(gene_module_assignment_df.columns):
+        return {}
+
+    available_gene_set = set(available_genes.astype(str).tolist())
+    work = gene_module_assignment_df.loc[:, ["Gene", "Module"]].copy()
+    work["Gene"] = work["Gene"].astype(str).str.strip()
+    work["Module"] = work["Module"].astype(str).str.strip()
+    work = work.loc[work["Gene"].ne("") & work["Module"].ne("") & work["Gene"].isin(available_gene_set)].copy()
+    if work.empty:
+        return {}
+
+    work = work.drop_duplicates(subset=["Module", "Gene"], keep="first")
+    module_gene_map: dict[str, list[str]] = {}
+    for module_name in module_order:
+        genes = work.loc[work["Module"].eq(str(module_name)), "Gene"].astype(str).tolist()
+        if genes:
+            module_gene_map[str(module_name)] = genes
+    return module_gene_map
+
+
+def plot_module_gene_zscore_line_panels(
+    engine,
+    save_stem: str | Path,
+    cfg,
+    group_df: pd.DataFrame | None = None,
+) -> None:
+    eigengenes_df = _coerce_module_eigengene_df(engine.ml_results.get("module_eigengenes_df", pd.DataFrame()))
+    if eigengenes_df.empty:
+        return
+
+    expr_df = _coerce_engine_gene_expression_df(engine)
+    if expr_df.empty:
+        return
+
+    expr_sample_set = set(expr_df.index.astype(str).tolist())
+    shared_samples = [sample for sample in eigengenes_df.index.astype(str).tolist() if sample in expr_sample_set]
+    if not shared_samples:
+        return
+    eigengenes_df = eigengenes_df.reindex(shared_samples)
+    expr_df = expr_df.reindex(shared_samples)
+
+    raw_module_order = _module_order_from_summary(
+        engine.ml_results.get("module_summary_df", pd.DataFrame()),
+        eigengenes_df.columns.astype(str).tolist(),
+    )
+    module_order = [module for module in raw_module_order if module in eigengenes_df.columns]
+    if not module_order:
+        return
+
+    module_gene_map = _module_gene_map_from_assignment(
+        engine.ml_results.get("gene_module_assignment_df", pd.DataFrame()),
+        module_order,
+        expr_df.columns,
+    )
+    module_order = [module for module in module_order if module in module_gene_map]
+    if not module_order:
+        return
+
+    all_module_genes = []
+    seen_genes: set[str] = set()
+    for module_name in module_order:
+        for gene_name in module_gene_map[module_name]:
+            if gene_name in seen_genes:
+                continue
+            seen_genes.add(gene_name)
+            all_module_genes.append(gene_name)
+    if not all_module_genes:
+        return
+
+    module_zscore_df = _row_zscore(eigengenes_df.loc[:, module_order].T)
+    gene_zscore_df = _row_zscore(expr_df.loc[:, all_module_genes].T)
+    if module_zscore_df.empty or gene_zscore_df.empty:
+        return
+
+    sample_names = module_zscore_df.columns.astype(str).tolist()
+    annotation_df = _align_group_annotations_to_samples(sample_names, group_df)
+    if annotation_df.empty:
+        return
+
+    group_orders = annotation_df["_group_table_order"].astype(int).tolist()
+    group_orders_by_col, color_maps_by_col = _module_group_orders_and_colors(
+        group_df,
+        annotation_df["group1"].astype(str).tolist(),
+        annotation_df["group2"].astype(str).tolist(),
+        group_orders,
+    )
+    group1_order = group_orders_by_col.get("group1", [])
+    group2_order = group_orders_by_col.get("group2", [])
+    if not group1_order or not group2_order:
+        return
+
+    group2_color_map = color_maps_by_col.get("group2", {})
+
+    annotation_df = annotation_df.reindex(sample_names)
+    sample_groups: dict[tuple[str, str], list[str]] = {}
+    for group1_name in group1_order:
+        for group2_name in group2_order:
+            mask = (
+                annotation_df["group1"].astype(str).eq(str(group1_name))
+                & annotation_df["group2"].astype(str).eq(str(group2_name))
+            )
+            sample_groups[(str(group1_name), str(group2_name))] = annotation_df.index[mask].astype(str).tolist()
+
+    gene_line_cache: dict[tuple[str, str], pd.DataFrame] = {}
+    module_line_cache: dict[tuple[str, str], np.ndarray] = {}
+    finite_chunks: list[np.ndarray] = []
+
+    for module_name in module_order:
+        module_genes = [gene for gene in module_gene_map[module_name] if gene in gene_zscore_df.index]
+        if not module_genes:
+            continue
+        module_gene_zscores = gene_zscore_df.loc[module_genes]
+        module_zscores = module_zscore_df.loc[str(module_name)]
+        for group1_name in group1_order:
+            gene_lines = pd.DataFrame(index=module_genes, columns=group2_order, dtype=float)
+            module_line = np.full(len(group2_order), np.nan, dtype=float)
+            for group2_idx, group2_name in enumerate(group2_order):
+                grouped_samples = [
+                    sample
+                    for sample in sample_groups.get((str(group1_name), str(group2_name)), [])
+                    if sample in module_gene_zscores.columns
+                ]
+                if not grouped_samples:
+                    continue
+                gene_lines.loc[:, group2_name] = module_gene_zscores.loc[:, grouped_samples].mean(axis=1).to_numpy(dtype=float)
+                module_line[group2_idx] = float(pd.to_numeric(module_zscores.reindex(grouped_samples), errors="coerce").mean())
+
+            gene_line_cache[(str(module_name), str(group1_name))] = gene_lines
+            module_line_cache[(str(module_name), str(group1_name))] = module_line
+
+            gene_values = gene_lines.to_numpy(dtype=float, copy=False)
+            gene_values = gene_values[np.isfinite(gene_values)]
+            if gene_values.size:
+                finite_chunks.append(gene_values)
+            module_values = module_line[np.isfinite(module_line)]
+            if module_values.size:
+                finite_chunks.append(module_values)
+
+    if not finite_chunks:
+        return
+
+    finite_values = np.concatenate(finite_chunks)
+    y_min = float(np.nanmin(finite_values))
+    y_max = float(np.nanmax(finite_values))
+    if np.isclose(y_min, y_max):
+        y_min -= 1.0
+        y_max += 1.0
+    y_pad = max(0.15, 0.08 * (y_max - y_min))
+    y_min -= y_pad
+    y_max += y_pad
+
+    n_modules = len(module_order)
+    n_group1 = len(group1_order)
+    n_group2 = len(group2_order)
+    panel_width = max(1.10, min(1.65, 0.045 * n_group2 + 0.85))
+    panel_height = 0.76 if n_modules <= 10 else 0.62
+    fig_width = max(6.2, min(18.0, panel_width * n_group1 + 1.35))
+    fig_height = max(4.8, min(28.0, panel_height * n_modules + 1.45))
+
+    legend_ncol = _legend_column_count(len(group2_order), fig_width)
+    legend_rows = int(np.ceil(len(group2_order) / max(1, legend_ncol)))
+    bottom_margin = max(0.12, min(0.24, 0.075 + 0.035 * legend_rows))
+
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    fig._skip_default_tight_layout = True
+    fig._png_dpi = 180
+    gs = fig.add_gridspec(
+        nrows=n_modules + 1,
+        ncols=n_group1,
+        height_ratios=[1.0] * n_modules + [0.12],
+        hspace=0.12,
+        wspace=0.18,
+    )
+
+    x_positions = np.arange(n_group2, dtype=float)
+    for row_idx, module_name in enumerate(module_order):
+        for col_idx, group1_name in enumerate(group1_order):
+            ax = fig.add_subplot(gs[row_idx, col_idx])
+            if row_idx == 0:
+                ax.set_title(str(group1_name), fontsize=10, fontweight="normal", pad=4)
+
+            gene_lines = gene_line_cache.get((str(module_name), str(group1_name)), pd.DataFrame())
+            if not gene_lines.empty:
+                for line_values in gene_lines.to_numpy(dtype=float, copy=False):
+                    if np.isfinite(line_values).sum() < 2:
+                        continue
+                    ax.plot(
+                        x_positions,
+                        line_values,
+                        color="#cfd3d8",
+                        linewidth=0.55,
+                        alpha=0.50,
+                        zorder=2,
+                    )
+
+            module_line = module_line_cache.get((str(module_name), str(group1_name)), np.array([], dtype=float))
+            if module_line.size and np.isfinite(module_line).sum() >= 2:
+                ax.plot(x_positions, module_line, color="black", linewidth=1.35, alpha=0.96, zorder=4)
+
+            ax.set_xlim(-0.5, n_group2 - 0.5)
+            ax.set_ylim(y_min, y_max)
+            ax.set_xticks(x_positions)
+            ax.set_xticklabels([])
+            ax.tick_params(axis="x", length=2.0, width=0.55, labelbottom=False)
+            ax.tick_params(axis="y", length=2.5, width=0.6, labelsize=7)
+            if col_idx > 0:
+                ax.set_yticklabels([])
+                ax.tick_params(axis="y", length=0)
+            ax.set_axisbelow(True)
+            ax.grid(axis="y", color="#e5e7eb", linewidth=0.45)
+            ax.grid(axis="x", color="#eef2f7", linewidth=0.42)
+            for spine in ax.spines.values():
+                spine.set_visible(True)
+                spine.set_linewidth(0.65)
+                spine.set_edgecolor("#6b7280")
+
+            if col_idx == n_group1 - 1:
+                ax.text(
+                    1.035,
+                    0.5,
+                    str(module_name),
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="center",
+                    fontsize=8,
+                    rotation=270,
+                )
+
+    for col_idx in range(n_group1):
+        strip_ax = fig.add_subplot(gs[n_modules, col_idx])
+        _add_group2_color_strip(strip_ax, group2_order, group2_color_map)
+
+    legend_handles = [
+        Patch(facecolor=group2_color_map.get(str(group_name), "#d1d5db"), edgecolor="none", label=str(group_name))
+        for group_name in group2_order
+    ]
+    if legend_handles:
+        fig.legend(
+            handles=legend_handles,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.018),
+            ncol=legend_ncol,
+            frameon=False,
+            handlelength=1.3,
+            handleheight=0.75,
+            handletextpad=0.42,
+            columnspacing=0.85,
+            labelspacing=0.42,
+            borderaxespad=0.0,
+            fontsize=9,
+        )
+
+    fig.text(0.028, 0.54, "z score", rotation=90, ha="center", va="center", fontsize=11)
+    fig.subplots_adjust(left=0.08, right=0.965, top=0.965, bottom=bottom_margin)
+    _save_figure(fig, save_stem, cfg)
+
+
 def plot_module_metabolite_association_heatmap(engine, save_stem: str | Path, cfg) -> None:
     assoc_df = engine.ml_results.get("module_metabolite_assoc_df", pd.DataFrame())
     if not isinstance(assoc_df, pd.DataFrame) or assoc_df.empty:
@@ -3295,6 +3799,8 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         f"- `plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap_group2']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['module_zscore_line_panels']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['module_gene_zscore_line_panels']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png`",
@@ -3325,6 +3831,8 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs'])}.pdf|svg|png</code></td><td>Top association pair scatter panels ranked by EdgeWeight.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_heatmap'])}.pdf|svg|png</code></td><td>Module eigengene heatmap with group2 and group1 annotation tracks using PCA group colors.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_heatmap_group2'])}.pdf|svg|png</code></td><td>Module eigengene heatmap with group1 and group2 annotation tracks, grouped by group2.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_zscore_line_panels'])}.pdf|svg|png</code></td><td>Module z-score line panels faceted by group1 with group2 color strips.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_gene_zscore_line_panels'])}.pdf|svg|png</code></td><td>Module gene z-score line panels with grey gene trajectories and black module trajectories.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap'])}.pdf|svg|png</code></td><td>Module-metabolite association heatmap colored by Spearman rho with significance stars.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['compressed_circos_network'])}.pdf|svg|png</code></td><td>Compact Circos overview using all unique genes and metabolites from T03 only.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['floating_cnet_circos_network'])}.pdf|svg|png</code></td><td>Floating circular cnetplot-style network using T03 only, with circular non-overlapping nodes and metabolite-colored edges.</td></tr>",
@@ -3509,6 +4017,18 @@ def generate_report_plots(engine, cfg) -> None:
         cfg,
         group_df=pca_group_df,
     )
+    plot_module_zscore_line_panels(
+        engine,
+        plots_dir / FIGURE_FILE_PREFIXES["module_zscore_line_panels"],
+        cfg,
+        group_df=pca_group_df,
+    )
+    plot_module_gene_zscore_line_panels(
+        engine,
+        plots_dir / FIGURE_FILE_PREFIXES["module_gene_zscore_line_panels"],
+        cfg,
+        group_df=pca_group_df,
+    )
     plot_module_metabolite_association_heatmap(
         engine,
         plots_dir / FIGURE_FILE_PREFIXES["module_metabolite_association_heatmap"],
@@ -3530,10 +4050,12 @@ def generate_report_plots(engine, cfg) -> None:
         f"9. Use plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png for the top regression-panel overview.\n"
         f"10. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap']}.pdf|svg|png for the module eigengene heatmap with group2/group1 annotation tracks.\n"
         f"11. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap_group2']}.pdf|svg|png for the module eigengene heatmap grouped by group2.\n"
-        f"12. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png for the module-metabolite association heatmap.\n"
-        f"13. Use plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png for the compact T03-only Circos overview.\n"
-        f"14. Use plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png for the floating circular T03-only cnetplot-style overview.\n"
-        "15. Use DeepOmics_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
+        f"12. Use plots/{FIGURE_FILE_PREFIXES['module_zscore_line_panels']}.pdf|svg|png for module z-score line panels faceted by group1 with group2 color strips.\n"
+        f"13. Use plots/{FIGURE_FILE_PREFIXES['module_gene_zscore_line_panels']}.pdf|svg|png for module gene z-score line panels with grey gene trajectories and black module trajectories.\n"
+        f"14. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png for the module-metabolite association heatmap.\n"
+        f"15. Use plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png for the compact T03-only Circos overview.\n"
+        f"16. Use plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png for the floating circular T03-only cnetplot-style overview.\n"
+        "17. Use DeepOmics_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
     )
     (plots_dir / "visualization_notes.txt").write_text(notes, encoding="utf-8")
 
