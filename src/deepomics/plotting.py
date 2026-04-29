@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 from pathlib import Path
 
 try:
@@ -19,7 +20,7 @@ import seaborn as sns
 from colorspacious import cspace_convert
 from matplotlib import colors
 from matplotlib.lines import Line2D
-from matplotlib.patches import Ellipse, Polygon, Wedge, PathPatch
+from matplotlib.patches import Ellipse, Patch, Polygon, Wedge, PathPatch
 from matplotlib.path import Path as MplPath
 from scipy.spatial import ConvexHull, QhullError
 from scipy.stats import chi2
@@ -85,6 +86,7 @@ FIGURE_FILE_PREFIXES = {
     "transcriptome_pca_pairs_subgroups": "F02D_Transcriptome_PCA_Pairs_Subgroups",
     "metabolome_pca_pairs_subgroups": "F03D_Metabolome_PCA_Pairs_Subgroups",
     "top_gene_metabolite_pairs": "F04_Top_Gene_Metabolite_Pairs",
+    "module_eigengene_heatmap": "F05A_Module_Eigengene_Heatmap",
     "module_metabolite_association_heatmap": "F05_Module_Metabolite_Association_Heatmap",
     "compressed_circos_network": "F06_Compressed_Circos_Network",
     "floating_cnet_circos_network": "F07_Floating_CNet_Circos_Network",
@@ -2558,6 +2560,470 @@ def _significance_star(value: float) -> str:
     return ""
 
 
+def _shared_sample_id_field(sample_ids: list[str], fallback: str) -> str:
+    clean_ids = [str(sample_id).strip() for sample_id in sample_ids if str(sample_id).strip()]
+    if not clean_ids:
+        return str(fallback)
+    if len(clean_ids) == 1:
+        return clean_ids[0]
+
+    split_tokens = [re.split(r"[^A-Za-z0-9]+", sample_id) for sample_id in clean_ids]
+    min_len = min(len(tokens) for tokens in split_tokens)
+    shared_tokens = []
+    for idx in range(min_len):
+        token = split_tokens[0][idx]
+        if token and all(tokens[idx] == token for tokens in split_tokens[1:]):
+            shared_tokens.append(token)
+        else:
+            break
+    if shared_tokens:
+        return "_".join(shared_tokens)
+
+    common_prefix = clean_ids[0]
+    for sample_id in clean_ids[1:]:
+        while common_prefix and not sample_id.startswith(common_prefix):
+            common_prefix = common_prefix[:-1]
+    common_prefix = re.sub(r"[^A-Za-z0-9]+$", "", common_prefix.strip())
+    if common_prefix:
+        return common_prefix
+    return str(fallback)
+
+
+def _coerce_module_eigengene_df(module_eigengenes_df: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(module_eigengenes_df, pd.DataFrame) or module_eigengenes_df.empty:
+        return pd.DataFrame()
+
+    work = module_eigengenes_df.copy()
+    sample_column = None
+    for column in work.columns:
+        normalized = str(column).replace("\ufeff", "").strip().lower()
+        if normalized in {"sampleid", "sample_id", "sample"}:
+            sample_column = column
+            break
+
+    if sample_column is not None:
+        work = work.set_index(sample_column, drop=True)
+    elif isinstance(work.index, pd.RangeIndex) and work.shape[1] > 1:
+        first_column = work.columns[0]
+        first_values = work[first_column].astype(str).str.strip()
+        numeric_rest = work.iloc[:, 1:].apply(pd.to_numeric, errors="coerce")
+        if first_values.ne("").any() and numeric_rest.notna().any().any():
+            work = work.set_index(first_column, drop=True)
+
+    work.index = pd.Index(work.index.astype(str).str.strip(), name=work.index.name or "SampleID")
+    work = work.loc[work.index.astype(str).str.len() > 0].copy()
+    work = work.loc[~work.index.duplicated(keep="first")].copy()
+
+    numeric_df = work.apply(pd.to_numeric, errors="coerce")
+    numeric_df = numeric_df.loc[:, numeric_df.notna().any(axis=0)].copy()
+    numeric_df.columns = numeric_df.columns.astype(str)
+    return numeric_df
+
+
+def _build_group_annotation_candidates(group_df: pd.DataFrame | None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if group_df is None or group_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    required_columns = {"sample_id", "group1", "group2"}
+    if not required_columns.issubset(group_df.columns):
+        return pd.DataFrame(), pd.DataFrame()
+
+    keep_columns = [col for col in ["sample_id", "group1", "group2", "_group_table_order"] if col in group_df.columns]
+    work = group_df.loc[:, keep_columns].copy()
+    work["sample_id"] = work["sample_id"].astype(str).str.strip()
+    work["group1"] = work["group1"].astype("string").str.strip().replace("", pd.NA)
+    work["group2"] = work["group2"].astype("string").str.strip().replace("", pd.NA)
+    if "_group_table_order" not in work.columns:
+        work["_group_table_order"] = np.arange(len(work), dtype=int)
+    work["_group_table_order"] = pd.to_numeric(work["_group_table_order"], errors="coerce")
+
+    valid_mask = work["sample_id"].ne("") & work["group1"].notna() & work["group2"].notna()
+    work = work.loc[valid_mask].copy()
+    if work.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    exact = (
+        work.sort_values("_group_table_order", kind="mergesort")
+        .drop_duplicates(subset=["sample_id"], keep="first")
+        .set_index("sample_id", drop=False)
+    )
+
+    aggregated_rows: list[dict[str, object]] = []
+    for (group1, group2), sub_df in work.groupby(["group1", "group2"], sort=False):
+        member_ids = sub_df["sample_id"].astype(str).tolist()
+        fallback_id = f"{group1}_{group2}"
+        sample_id = _shared_sample_id_field(member_ids, fallback=fallback_id)
+        aggregated_rows.append(
+            {
+                "sample_id": sample_id,
+                "group1": str(group1),
+                "group2": str(group2),
+                "_group_table_order": int(sub_df["_group_table_order"].min()),
+            }
+        )
+
+    if not aggregated_rows:
+        return exact, pd.DataFrame()
+
+    output_ids = [str(row["sample_id"]) for row in aggregated_rows]
+    if len(output_ids) != len(set(output_ids)):
+        counts: dict[str, int] = {}
+        for row in aggregated_rows:
+            base_id = str(row["sample_id"])
+            counts[base_id] = counts.get(base_id, 0) + 1
+            if counts[base_id] > 1:
+                row["sample_id"] = f"{base_id}_{counts[base_id]}"
+
+    aggregated = pd.DataFrame(aggregated_rows).set_index("sample_id", drop=False)
+    return exact, aggregated
+
+
+def _align_group_annotations_to_samples(sample_names: list[str], group_df: pd.DataFrame | None) -> pd.DataFrame:
+    exact, aggregated = _build_group_annotation_candidates(group_df)
+
+    rows: list[dict[str, object]] = []
+    missing_samples: list[str] = []
+    for sample_idx, sample_name in enumerate(sample_names):
+        sample_id = str(sample_name).strip()
+        if not exact.empty and sample_id in exact.index:
+            row = exact.loc[sample_id]
+            rows.append(
+                {
+                    "sample_id": sample_id,
+                    "group1": str(row["group1"]),
+                    "group2": str(row["group2"]),
+                    "_group_table_order": int(row["_group_table_order"]),
+                    "_original_sample_order": sample_idx,
+                    "_has_group_annotation": True,
+                }
+            )
+        elif not aggregated.empty and sample_id in aggregated.index:
+            row = aggregated.loc[sample_id]
+            rows.append(
+                {
+                    "sample_id": sample_id,
+                    "group1": str(row["group1"]),
+                    "group2": str(row["group2"]),
+                    "_group_table_order": int(row["_group_table_order"]),
+                    "_original_sample_order": sample_idx,
+                    "_has_group_annotation": True,
+                }
+            )
+        else:
+            missing_samples.append(sample_id)
+            rows.append(
+                {
+                    "sample_id": sample_id,
+                    "group1": "Missing",
+                    "group2": "Missing",
+                    "_group_table_order": len(sample_names) + sample_idx,
+                    "_original_sample_order": sample_idx,
+                    "_has_group_annotation": False,
+                }
+            )
+
+    if missing_samples:
+        preview = ", ".join(missing_samples[:10])
+        suffix = " ..." if len(missing_samples) > 10 else ""
+        logger.warning(
+            "[Module eigengene heatmap] %d samples had no group annotation: %s%s",
+            len(missing_samples),
+            preview,
+            suffix,
+        )
+
+    annotation_df = pd.DataFrame(rows)
+    if annotation_df.empty:
+        return annotation_df
+    return annotation_df.set_index("sample_id", drop=False)
+
+
+def _module_order_from_summary(module_summary_df: pd.DataFrame, available_modules: list[str]) -> list[str]:
+    available_set = set(str(module) for module in available_modules)
+    if isinstance(module_summary_df, pd.DataFrame) and not module_summary_df.empty and "Module" in module_summary_df.columns:
+        ordered = [
+            str(module_name)
+            for module_name in module_summary_df["Module"].astype(str).tolist()
+            if str(module_name) in available_set
+        ]
+    else:
+        ordered = []
+
+    for module_name in available_modules:
+        module_name = str(module_name)
+        if module_name not in ordered:
+            ordered.append(module_name)
+    return ordered
+
+
+def _row_zscore(df: pd.DataFrame) -> pd.DataFrame:
+    values = df.to_numpy(dtype=float, copy=True)
+    row_mean = np.nanmean(values, axis=1, keepdims=True)
+    row_std = np.nanstd(values, axis=1, ddof=0, keepdims=True)
+    row_std = np.where(np.isfinite(row_std) & (row_std > 0.0), row_std, 1.0)
+    z_values = (values - row_mean) / row_std
+    z_values = np.where(np.isfinite(z_values), z_values, np.nan)
+    return pd.DataFrame(z_values, index=df.index.copy(), columns=df.columns.copy())
+
+
+def _add_group_annotation_bar(
+    ax: plt.Axes,
+    labels: list[str],
+    color_map: dict[str, str],
+    *,
+    row_label: str | None = None,
+    missing_color: str = "#d1d5db",
+) -> None:
+    if not labels:
+        ax.axis("off")
+        return
+
+    rgba = np.array([[colors.to_rgba(color_map.get(str(label), missing_color)) for label in labels]], dtype=float)
+    ax.imshow(rgba, aspect="auto", interpolation="nearest")
+    if row_label:
+        ax.set_yticks([0])
+        ax.set_yticklabels([row_label], fontsize=9)
+    else:
+        ax.set_yticks([])
+    ax.set_xticks([])
+    ax.tick_params(axis="both", length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+
+def _add_heatmap_group_separators(axes: list[plt.Axes], group_labels: list[str]) -> None:
+    if len(group_labels) < 2:
+        return
+
+    for idx in range(1, len(group_labels)):
+        if str(group_labels[idx]) == str(group_labels[idx - 1]):
+            continue
+        for ax in axes:
+            ax.axvline(idx - 0.5, color="white", linewidth=4.0, zorder=5)
+
+
+def _legend_column_count(n_items: int, fig_width: float) -> int:
+    if n_items <= 0:
+        return 1
+    return min(n_items, max(1, int(fig_width // 0.78)))
+
+
+def _group_color_orders_from_table(
+    group_df: pd.DataFrame | None,
+) -> tuple[list[str], dict[str, str], list[str], dict[str, str]]:
+    exact, _ = _build_group_annotation_candidates(group_df)
+    if exact.empty:
+        return [], {}, [], {}
+
+    color_source = exact.sort_values("_group_table_order", kind="mergesort")
+    color_orders = color_source["_group_table_order"].astype(int).tolist()
+
+    group1_order = _ordered_unique_with_order(color_source["group1"].astype(str).tolist(), color_orders)
+    group1_color_map = _group_color_map(group1_order)
+
+    group2_order, group2_color_map = _global_secondary_group_color_map(
+        color_source["group2"].astype(str).tolist(),
+        color_orders,
+    )
+    return group1_order, group1_color_map, group2_order, group2_color_map
+
+
+def plot_module_eigengene_heatmap(
+    engine,
+    save_stem: str | Path,
+    cfg,
+    group_df: pd.DataFrame | None = None,
+) -> None:
+    eigengenes_df = _coerce_module_eigengene_df(engine.ml_results.get("module_eigengenes_df", pd.DataFrame()))
+    if eigengenes_df.empty:
+        return
+
+    module_order = _module_order_from_summary(
+        engine.ml_results.get("module_summary_df", pd.DataFrame()),
+        eigengenes_df.columns.astype(str).tolist(),
+    )
+    eigengenes_df = eigengenes_df.loc[:, [module for module in module_order if module in eigengenes_df.columns]].copy()
+    if eigengenes_df.empty:
+        return
+
+    sample_names = eigengenes_df.index.astype(str).tolist()
+    annotation_df = _align_group_annotations_to_samples(sample_names, group_df)
+    if not annotation_df.empty:
+        sort_df = annotation_df.loc[:, ["_has_group_annotation", "_group_table_order", "_original_sample_order"]].copy()
+        sort_df["_missing_rank"] = np.where(sort_df["_has_group_annotation"], 0, 1)
+        sorted_samples = (
+            sort_df.sort_values(
+                ["_missing_rank", "_group_table_order", "_original_sample_order"],
+                ascending=[True, True, True],
+                kind="mergesort",
+            )
+            .index.astype(str)
+            .tolist()
+        )
+        eigengenes_df = eigengenes_df.reindex(sorted_samples)
+        annotation_df = annotation_df.reindex(sorted_samples)
+
+    heatmap_df = _row_zscore(eigengenes_df.T)
+    if heatmap_df.empty:
+        return
+
+    group_orders = annotation_df["_group_table_order"].astype(int).tolist() if not annotation_df.empty else None
+    group1_labels = annotation_df["group1"].astype(str).tolist() if not annotation_df.empty else ["Missing"] * heatmap_df.shape[1]
+    group2_labels = annotation_df["group2"].astype(str).tolist() if not annotation_df.empty else ["Missing"] * heatmap_df.shape[1]
+
+    used_group1_order = _ordered_unique_with_order(group1_labels, group_orders)
+    used_group2_order = _ordered_unique_with_order(group2_labels, group_orders)
+    full_group1_order, group1_color_map, full_group2_order, group2_color_map = _group_color_orders_from_table(group_df)
+
+    if not full_group1_order:
+        full_group1_order = used_group1_order
+        group1_color_map = _group_color_map(full_group1_order)
+    if not full_group2_order:
+        full_group2_order, group2_color_map = _global_secondary_group_color_map(group2_labels, group_orders)
+
+    group1_order = [group_name for group_name in full_group1_order if group_name in set(used_group1_order)]
+    group2_order = [group_name for group_name in full_group2_order if group_name in set(used_group2_order)]
+    for group_name in used_group1_order:
+        if group_name not in group1_order:
+            group1_order.append(group_name)
+    for group_name in used_group2_order:
+        if group_name not in group2_order:
+            group2_order.append(group_name)
+
+    if "Missing" in used_group1_order:
+        group1_color_map["Missing"] = "#d1d5db"
+    if "Missing" in used_group2_order:
+        group2_color_map["Missing"] = "#d1d5db"
+
+    n_modules, n_samples = heatmap_df.shape
+    fig_width = max(8.5, min(28.0, 0.18 * max(1, n_samples) + 3.6))
+    fig_height = max(5.8, min(18.0, 0.28 * max(1, n_modules) + 3.4))
+
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    fig._skip_default_tight_layout = True
+    heatmap_height = max(3.0, 0.28 * max(1, n_modules))
+    legend_height = 0.72 if len(group1_order) + len(group2_order) <= 20 else 0.96
+    gs = fig.add_gridspec(
+        nrows=5,
+        ncols=1,
+        height_ratios=[heatmap_height, 0.16, 0.16, 0.36, legend_height],
+        hspace=0.08,
+    )
+
+    ax_heatmap = fig.add_subplot(gs[0, 0])
+    ax_group2 = fig.add_subplot(gs[1, 0], sharex=ax_heatmap)
+    ax_group1 = fig.add_subplot(gs[2, 0], sharex=ax_heatmap)
+    cbar_grid = gs[3, 0].subgridspec(1, 3, width_ratios=[1.0, 0.42, 1.0])
+    cbar_ax = fig.add_subplot(cbar_grid[0, 1])
+    legend_ax = fig.add_subplot(gs[4, 0])
+    legend_ax.axis("off")
+
+    cmap = plt.get_cmap("RdBu_r").copy()
+    cmap.set_bad("#f3f4f6")
+    heatmap_values = np.ma.masked_invalid(heatmap_df.to_numpy(dtype=float, copy=False))
+    image = ax_heatmap.imshow(
+        heatmap_values,
+        aspect="auto",
+        interpolation="nearest",
+        cmap=cmap,
+        vmin=-1.5,
+        vmax=1.5,
+    )
+
+    ax_heatmap.text(
+        -0.065,
+        1.025,
+        "a",
+        transform=ax_heatmap.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=22,
+        fontweight="bold",
+        color="black",
+    )
+    ax_heatmap.set_ylabel("Module")
+    if n_modules <= 60:
+        y_ticks = np.arange(n_modules)
+    else:
+        step = int(np.ceil(n_modules / 60.0))
+        y_ticks = np.arange(0, n_modules, step)
+    ax_heatmap.set_yticks(y_ticks)
+    ax_heatmap.set_yticklabels([heatmap_df.index[idx] for idx in y_ticks], rotation=0)
+    ax_heatmap.set_xticks(np.arange(n_samples) if n_samples <= 90 else [])
+    ax_heatmap.set_xticklabels([])
+    ax_heatmap.tick_params(axis="x", length=2.5, width=0.7, bottom=True, labelbottom=False)
+    ax_heatmap.tick_params(axis="y", length=3.0, width=0.8)
+    for spine in ax_heatmap.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(0.7)
+        spine.set_edgecolor("#6b7280")
+
+    _add_group_annotation_bar(ax_group2, group2_labels, group2_color_map)
+    _add_group_annotation_bar(ax_group1, group1_labels, group1_color_map)
+    _add_heatmap_group_separators([ax_heatmap, ax_group2, ax_group1], group1_labels)
+
+    cbar = fig.colorbar(image, cax=cbar_ax, orientation="horizontal")
+    cbar.set_ticks([-1.5, 0.0, 1.5])
+    cbar.set_ticklabels(["< -1.5", "0", "> 1.5"])
+    cbar.outline.set_linewidth(0.5)
+    cbar.ax.tick_params(length=0, labelsize=9)
+    cbar_ax.text(
+        -0.08,
+        0.5,
+        "z score",
+        transform=cbar_ax.transAxes,
+        ha="right",
+        va="center",
+        fontsize=10,
+    )
+
+    group2_handles = [
+        Patch(facecolor=group2_color_map[group_name], edgecolor="none", label=group_name)
+        for group_name in group2_order
+    ]
+    group1_handles = [
+        Patch(facecolor=group1_color_map[group_name], edgecolor="none", label=group_name)
+        for group_name in group1_order
+    ]
+
+    if group2_handles:
+        group2_legend = legend_ax.legend(
+            handles=group2_handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.80),
+            ncol=_legend_column_count(len(group2_handles), fig_width),
+            frameon=False,
+            handlelength=1.4,
+            handleheight=0.8,
+            handletextpad=0.45,
+            columnspacing=0.9,
+            labelspacing=0.45,
+            borderaxespad=0.0,
+            fontsize=9,
+        )
+        legend_ax.add_artist(group2_legend)
+
+    if group1_handles:
+        legend_ax.legend(
+            handles=group1_handles,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.18),
+            ncol=_legend_column_count(len(group1_handles), fig_width),
+            frameon=False,
+            handlelength=1.4,
+            handleheight=0.8,
+            handletextpad=0.45,
+            columnspacing=0.9,
+            labelspacing=0.45,
+            borderaxespad=0.0,
+            fontsize=9,
+        )
+
+    left_margin = 0.14 if n_modules < 40 else 0.17
+    fig.subplots_adjust(left=left_margin, right=0.985, top=0.985, bottom=0.045)
+    _save_figure(fig, save_stem, cfg)
+
+
 def plot_module_metabolite_association_heatmap(engine, save_stem: str | Path, cfg) -> None:
     assoc_df = engine.ml_results.get("module_metabolite_assoc_df", pd.DataFrame())
     if not isinstance(assoc_df, pd.DataFrame) or assoc_df.empty:
@@ -2724,6 +3190,7 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         f"- `plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png`",
@@ -2752,6 +3219,7 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_pca_pairs'])}.pdf|svg|png</code></td><td>Transcriptome PCA pairs plot using the first principal components.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_pca_pairs'])}.pdf|svg|png</code></td><td>Metabolome PCA pairs plot using the first principal components.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs'])}.pdf|svg|png</code></td><td>Top association pair scatter panels ranked by EdgeWeight.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_heatmap'])}.pdf|svg|png</code></td><td>Module eigengene heatmap with group2 and group1 annotation tracks using PCA group colors.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap'])}.pdf|svg|png</code></td><td>Module-metabolite association heatmap colored by Spearman rho with significance stars.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['compressed_circos_network'])}.pdf|svg|png</code></td><td>Compact Circos overview using all unique genes and metabolites from T03 only.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['floating_cnet_circos_network'])}.pdf|svg|png</code></td><td>Floating circular cnetplot-style network using T03 only, with circular non-overlapping nodes and metabolite-colored edges.</td></tr>",
@@ -2924,6 +3392,12 @@ def generate_report_plots(engine, cfg) -> None:
         )
 
     plot_top_edge_scatter_panels(engine, plots_dir / FIGURE_FILE_PREFIXES["top_gene_metabolite_pairs"], cfg)
+    plot_module_eigengene_heatmap(
+        engine,
+        plots_dir / FIGURE_FILE_PREFIXES["module_eigengene_heatmap"],
+        cfg,
+        group_df=pca_group_df,
+    )
     plot_module_metabolite_association_heatmap(
         engine,
         plots_dir / FIGURE_FILE_PREFIXES["module_metabolite_association_heatmap"],
@@ -2943,10 +3417,11 @@ def generate_report_plots(engine, cfg) -> None:
         f"7. Use plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs_subgroups']}.pdf|svg|png for the transcriptome PCA pairs overview (group2).\n"
         f"8. Use plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs_subgroups']}.pdf|svg|png for the metabolome PCA pairs overview (group2).\n"
         f"9. Use plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png for the top regression-panel overview.\n"
-        f"10. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png for the module-metabolite association heatmap.\n"
-        f"11. Use plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png for the compact T03-only Circos overview.\n"
-        f"12. Use plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png for the floating circular T03-only cnetplot-style overview.\n"
-        "13. Use DeepOmics_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
+        f"10. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap']}.pdf|svg|png for the module eigengene heatmap with group2/group1 annotation tracks.\n"
+        f"11. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png for the module-metabolite association heatmap.\n"
+        f"12. Use plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png for the compact T03-only Circos overview.\n"
+        f"13. Use plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png for the floating circular T03-only cnetplot-style overview.\n"
+        "14. Use DeepOmics_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
     )
     (plots_dir / "visualization_notes.txt").write_text(notes, encoding="utf-8")
 
