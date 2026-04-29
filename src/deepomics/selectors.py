@@ -323,7 +323,7 @@ def screen_genes_three_way(
     ).replace([np.inf, -np.inf], np.nan)
 
     corr_abs_threshold = 0.3
-    fdr_alpha = 0.05
+    fdr_alpha = float(config.fdr_alpha)
     mi_top_fraction = 0.10
 
     pcc_mask = (

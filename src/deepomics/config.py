@@ -24,7 +24,6 @@ class AnalysisConfig:
     knn_neighbors: int = 5
 
     screen_top_k_per_method: int = 1000
-    use_fdr: bool = False
     fdr_alpha: float = 0.05
 
     xgb_n_estimators: int = 200
@@ -82,6 +81,11 @@ class AnalysisConfig:
 
         if not self.project_name:
             raise ValueError("project_name must not be empty.")
+        if self.group_table_path is None:
+            raise ValueError(
+                "group_table_path is required and must point to a group table with "
+                "sample_id, group1, and group2 columns."
+            )
         if self.log_level not in _VALID_LOG_LEVELS:
             raise ValueError(f"log_level must be one of: {sorted(_VALID_LOG_LEVELS)}.")
         if self.screen_top_k_per_method < 1:

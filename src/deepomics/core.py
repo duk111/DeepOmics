@@ -147,7 +147,10 @@ class MultiOmicsEngine:
     def _average_replicates_for_association(cls, adata: ad.AnnData, cfg: config.AnalysisConfig) -> ad.AnnData:
         group_table_path = getattr(cfg, "group_table_path", None)
         if not group_table_path:
-            return adata.copy()
+            raise ValueError(
+                "group_table_path is required for replicate-aware association analysis. "
+                "The group table must contain sample_id, group1, and group2 columns."
+            )
 
         group_path = Path(group_table_path)
         if not group_path.exists():

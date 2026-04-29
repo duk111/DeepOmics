@@ -155,8 +155,13 @@ def _read_group_sample_order(group_table_path: str | Path) -> list[str]:
         str(column).replace("\ufeff", "").strip().lower(): column
         for column in group_df.columns
     }
-    if "sample_id" not in normalized_columns:
-        raise ValueError("Group table must contain a sample_id column for sample ordering.")
+    required_columns = {"sample_id", "group1", "group2"}
+    missing_columns = sorted(required_columns.difference(normalized_columns))
+    if missing_columns:
+        raise ValueError(
+            "Group table must contain columns: sample_id, group1, group2. "
+            f"Missing: {missing_columns}"
+        )
 
     sample_ids = group_df[normalized_columns["sample_id"]].astype(str).str.strip()
     sample_ids = sample_ids.loc[sample_ids.ne("")]
@@ -172,18 +177,10 @@ def _read_group_sample_order(group_table_path: str | Path) -> list[str]:
 
 def _order_common_samples(
     common_samples: pd.Index,
-    group_table_path: str | Path | None,
+    group_table_path: str | Path,
 ) -> tuple[pd.Index, dict[str, object]]:
     """Order shared samples by group table sample_id order when available."""
     common_sample_ids = [str(sample_id) for sample_id in common_samples.astype(str).tolist()]
-
-    if group_table_path is None:
-        return pd.Index(common_sample_ids, name="SampleID"), {
-            "method": "shared_sample_input_order",
-            "group_table_path": None,
-            "n_group_ordered_samples": 0,
-            "n_appended_samples": 0,
-        }
 
     group_order = _read_group_sample_order(group_table_path)
     common_set = set(common_sample_ids)
@@ -228,7 +225,7 @@ def _order_common_samples(
 def load_as_anndata(
     gene_path: str | Path,
     metab_path: str | Path,
-    group_table_path: str | Path | None = None,
+    group_table_path: str | Path,
 ) -> ad.AnnData:
     """Load transcriptome and metabolome matrices into a single AnnData object."""
     logger.info("Loading transcriptome data from %s", gene_path)
@@ -274,7 +271,6 @@ def load_as_anndata(
 def preprocess_adata(
     adata: ad.AnnData,
     scale: bool = True,
-    log_transform: bool = True,
     missing_feature_threshold: float = 0.5,
     knn_neighbors: int = 5,
 ) -> ad.AnnData:
@@ -292,8 +288,7 @@ def preprocess_adata(
         label="Transcriptome",
         missing_feature_threshold=missing_feature_threshold,
     )
-    if log_transform:
-        gene_df = _apply_log2p1(gene_df, label="Transcriptome")
+    gene_df = _apply_log2p1(gene_df, label="Transcriptome")
     gene_df, gene_impute_info = _impute_missing_with_knn(
         gene_df,
         label="Transcriptome",
@@ -301,9 +296,9 @@ def preprocess_adata(
     )
     gene_log_info = {
         "label": "Transcriptome",
-        "applied": bool(log_transform),
-        "method": "log2(x+1)" if log_transform else "none",
-        "stage": "after_high_missing_filter_before_knn_imputation" if log_transform else "not_applied",
+        "applied": True,
+        "method": "log2(x+1)",
+        "stage": "after_high_missing_filter_before_knn_imputation",
     }
 
     gene_var = np.nanvar(gene_df.to_numpy(dtype=np.float32, copy=False), axis=0)
@@ -333,8 +328,7 @@ def preprocess_adata(
         label="Metabolomics",
         missing_feature_threshold=missing_feature_threshold,
     )
-    if log_transform:
-        metab_df = _apply_log2p1(metab_df, label="Metabolomics")
+    metab_df = _apply_log2p1(metab_df, label="Metabolomics")
     metab_df, metab_impute_info = _impute_missing_with_knn(
         metab_df,
         label="Metabolomics",
@@ -342,9 +336,9 @@ def preprocess_adata(
     )
     metab_log_info = {
         "label": "Metabolomics",
-        "applied": bool(log_transform),
-        "method": "log2(x+1)" if log_transform else "none",
-        "stage": "after_high_missing_filter_before_knn_imputation" if log_transform else "not_applied",
+        "applied": True,
+        "method": "log2(x+1)",
+        "stage": "after_high_missing_filter_before_knn_imputation",
     }
 
     metab_var = np.nanvar(metab_df.to_numpy(dtype=np.float32, copy=False), axis=0)
@@ -384,7 +378,7 @@ def preprocess_adata(
         "n_genes": int(adata.n_vars),
         "n_metabolites": int(len(adata.uns["metabolite_names"])),
         "scaled": bool(scale),
-        "log_transform": bool(log_transform),
+        "log_transform": True,
         "missing_feature_threshold": float(missing_feature_threshold),
         "knn_neighbors": int(knn_neighbors),
         "transcriptome_missing_filter": gene_missing_filter_info,

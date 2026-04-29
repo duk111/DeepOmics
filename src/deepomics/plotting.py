@@ -186,47 +186,36 @@ def _load_pca_group_table(cfg) -> pd.DataFrame | None:
         for column in group_df.columns
     }
 
-    if "sample_id" not in normalized_columns:
-        raise ValueError("PCA group table must contain a sample_id column.")
-
-    primary_source_column = None
-    if "group1" in normalized_columns:
-        primary_source_column = normalized_columns["group1"]
-    elif "group" in normalized_columns:
-        primary_source_column = normalized_columns["group"]
-    elif "group2" in normalized_columns:
-        primary_source_column = normalized_columns["group2"]
-
-    if primary_source_column is None:
-        logger.info(
-            "Loaded PCA group table from %s with %d samples but no grouping columns were found; PCA plots will be generated without grouping.",
-            group_table_path,
-            len(group_df),
+    required_columns = {"sample_id", "group1", "group2"}
+    missing_columns = sorted(required_columns.difference(normalized_columns))
+    if missing_columns:
+        raise ValueError(
+            "PCA group table must contain columns: sample_id, group1, group2. "
+            f"Missing: {missing_columns}"
         )
-        return None
 
     rename_map = {
         normalized_columns["sample_id"]: "sample_id",
-        primary_source_column: "group1",
+        normalized_columns["group1"]: "group1",
+        normalized_columns["group2"]: "group2",
     }
-    source_columns = [normalized_columns["sample_id"], primary_source_column]
-    if "group2" in normalized_columns and normalized_columns["group2"] != primary_source_column:
-        rename_map[normalized_columns["group2"]] = "group2"
-        source_columns.append(normalized_columns["group2"])
+    source_columns = [
+        normalized_columns["sample_id"],
+        normalized_columns["group1"],
+        normalized_columns["group2"],
+    ]
 
     group_df = group_df.loc[:, source_columns].rename(columns=rename_map).copy()
 
     group_df["sample_id"] = group_df["sample_id"].astype(str).str.strip()
     group_df["group1"] = group_df["group1"].astype("string").str.strip().replace("", pd.NA)
+    group_df["group2"] = group_df["group2"].astype("string").str.strip().replace("", pd.NA)
 
-    if "group2" in group_df.columns:
-        group_df["group2"] = group_df["group2"].astype("string").str.strip().replace("", pd.NA)
-
-    valid_mask = group_df["sample_id"].ne("") & group_df["group1"].notna()
+    valid_mask = group_df["sample_id"].ne("") & group_df["group1"].notna() & group_df["group2"].notna()
     dropped_rows = int((~valid_mask).sum())
     if dropped_rows > 0:
         logger.warning(
-            "Dropped %d invalid rows from PCA group table because sample_id or group1 was empty.",
+            "Dropped %d invalid rows from PCA group table because sample_id, group1, or group2 was empty.",
             dropped_rows,
         )
         group_df = group_df.loc[valid_mask].copy()
@@ -245,9 +234,7 @@ def _load_pca_group_table(cfg) -> pd.DataFrame | None:
             f"{duplicated_ids[:5]}"
         )
 
-    column_order = ["sample_id", "group1"]
-    if "group2" in group_df.columns and group_df["group2"].notna().any():
-        column_order.append("group2")
+    column_order = ["sample_id", "group1", "group2"]
     group_df = group_df.loc[:, column_order].copy()
     group_df["_group_table_order"] = np.arange(len(group_df), dtype=int)
 
