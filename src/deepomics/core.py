@@ -10,24 +10,10 @@ import pandas as pd
 from tqdm import tqdm
 
 from . import config, modules, plotting, selectors
+from .outputs import TABLE_FILE_PREFIXES
 from .utils import get_logger, log_step, safe_mkdir, write_json
 
 logger = get_logger()
-
-
-TABLE_FILE_PREFIXES = {
-    "gene_scores": "T01_Metabolite_Gene_Scoring_Table.csv",
-    "screening_summary": "T01b_Metabolite_Screening_Summary.csv",
-    "total_network": "T02_Total_Association_Network.csv",
-    "high_confidence_network": "T03_High_Confidence_Network.csv",
-    "key_gene_summary": "T04_Key_Gene_Summary.csv",
-    "metabolite_summary": "T05_Metabolite_Association_Summary.csv",
-    "cytoscape_network": "T06_Association_Network_Cytoscape.csv",
-    "gene_module_assignment": "T07_Gene_Module_Assignment.csv",
-    "module_eigengenes": "T08_Module_Eigengenes.csv",
-    "module_metabolite_association": "T09_Module_Metabolite_Association.csv",
-    "module_summary": "T10_Module_Summary.csv",
-}
 
 
 class MultiOmicsEngine:
