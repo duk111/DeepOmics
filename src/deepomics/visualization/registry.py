@@ -27,6 +27,7 @@ from .static.pca import (
     plot_transcriptome_pca_subgroups,
 )
 from .static.regression import plot_module_top_metabolite_regression_panels, plot_top_edge_scatter_panels
+from .static.upset import plot_association_evidence_upset
 
 
 FigurePlotter = Callable[[VisualizationContext, Path], None]
@@ -197,6 +198,10 @@ def _render_floating_cnet_circos_network(context: VisualizationContext, save_ste
     plot_floating_cnet_circos_network(context.engine, save_stem, context.cfg)
 
 
+def _render_association_evidence_upset(context: VisualizationContext, save_stem: Path) -> None:
+    plot_association_evidence_upset(context.engine, save_stem, context.cfg)
+
+
 STATIC_FIGURE_SPECS: tuple[FigureSpec, ...] = (
     FigureSpec("sample_clustering_dendrogram", "sample_clustering_dendrogram", _render_sample_dendrogram),
     FigureSpec("transcriptome_pca", "transcriptome_pca", _render_transcriptome_pca),
@@ -255,6 +260,11 @@ STATIC_FIGURE_SPECS: tuple[FigureSpec, ...] = (
         "floating_cnet_circos_network",
         "floating_cnet_circos_network",
         _render_floating_cnet_circos_network,
+    ),
+    FigureSpec(
+        "association_evidence_upset",
+        "association_evidence_upset",
+        _render_association_evidence_upset,
     ),
 )
 

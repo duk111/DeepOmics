@@ -1,23 +1,36 @@
-
 from __future__ import annotations
 
 import html
 import json
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.decomposition import PCA
+from scipy.stats import pearsonr, spearmanr
 
 from ..utils import safe_mkdir
+from .context import VisualizationContext
+from .static.base import PALETTE as STATIC_PALETTE
+from .static.base import (
+    _gene_expression_df,
+    _global_secondary_group_color_map,
+    _group_color_map,
+    _group_marker_map,
+    _hue_wheel_color_series,
+    _metabolomics_df,
+    _ordered_unique_with_order,
+)
+from .static.network import _build_circos_module_color_map
+from .static.pca import _compute_pca_result, _load_pca_group_table
 
 
 PALETTE = {
-    "gene": "#2563eb",
-    "metabolite": "#111827",
-    "edge_positive": "#dc2626",
-    "edge_negative": "#2563eb",
+    "gene": STATIC_PALETTE["gene"],
+    "metabolite": STATIC_PALETTE["metabolite"],
+    "edge_positive": STATIC_PALETTE["edge_positive"],
+    "edge_negative": STATIC_PALETTE["edge_negative"],
 }
 
 
@@ -37,6 +50,50 @@ def _json_dumps(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, default=_json_default)
 
 
+def _json_script_payload(data: Any) -> str:
+    return _json_dumps(data).replace("</", "<\\/")
+
+
+def _ordered_unique(values: list[str]) -> list[str]:
+    return _ordered_unique_with_order(values, None)
+
+
+@dataclass(frozen=True)
+class ControlSpec:
+    id: str
+    type: str
+    label: str
+    default: Any
+    options: list[dict[str, Any]] = field(default_factory=list)
+    min: float | None = None
+    max: float | None = None
+    step: float | None = None
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class InteractiveViewSpec:
+    id: str
+    title: str
+    kind: str
+    schema_id: str
+    enabled: bool = True
+    description: str = ""
+    data_key: str = ""
+
+
+@dataclass(frozen=True)
+class InteractiveReportModel:
+    meta: dict[str, Any]
+    views: tuple[InteractiveViewSpec, ...]
+    schemas: dict[str, Any]
+    datasets: dict[str, Any]
+    initial_state: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def _build_summary_payload(engine, cfg) -> dict[str, Any]:
     total_df = engine.ml_results.get("total_association_network_df", pd.DataFrame())
     high_df = engine.ml_results.get("high_confidence_network_df", pd.DataFrame())
@@ -50,9 +107,185 @@ def _build_summary_payload(engine, cfg) -> dict[str, Any]:
     }
 
 
-def _build_pca_payload(matrix, sample_names, title: str, cfg) -> dict[str, Any] | None:
-    values = matrix.to_numpy(dtype=float, copy=False) if isinstance(matrix, pd.DataFrame) else np.asarray(matrix, dtype=float)
+def _coerce_association_source_df(engine, adata, getter_name: str, fallback_loader) -> pd.DataFrame:
+    if hasattr(engine, getter_name):
+        try:
+            df = getattr(engine, getter_name)()
+        except Exception:
+            df = pd.DataFrame()
+    else:
+        df = pd.DataFrame()
 
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        df = fallback_loader(adata)
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+
+    work = df.copy(deep=False)
+    work.index = pd.Index(work.index.astype(str).str.strip(), name=work.index.name or "SampleID")
+    work.columns = pd.Index(work.columns.astype(str).str.strip(), name=work.columns.name)
+    work = work.loc[work.index.astype(str).str.len() > 0, work.columns.astype(str).str.len() > 0].copy()
+    work = work.loc[~work.index.duplicated(keep="first"), ~work.columns.duplicated(keep="first")].copy()
+    return work.apply(pd.to_numeric, errors="coerce")
+
+
+def _build_group_annotation_payload(
+    sample_names: list[str],
+    group_df: pd.DataFrame | None,
+) -> dict[str, Any]:
+    sample_names = [str(name).strip() for name in sample_names]
+    if not sample_names:
+        return {
+            "sampleAnnotations": [],
+            "groupOptions": {"group1": {"order": [], "colors": {}}, "group2": {"order": [], "colors": {}}},
+            "hasSecondaryGrouping": False,
+        }
+
+    if group_df is None or not isinstance(group_df, pd.DataFrame) or group_df.empty:
+        annotations = [
+            {
+                "id": sample_name,
+                "group1": "Missing",
+                "group2": "Missing",
+                "group1Color": "#6b7280",
+                "group2Color": "#6b7280",
+            }
+            for sample_name in sample_names
+        ]
+        return {
+            "sampleAnnotations": annotations,
+            "groupOptions": {"group1": {"order": [], "colors": {}}, "group2": {"order": [], "colors": {}}},
+            "hasSecondaryGrouping": False,
+        }
+
+    required_columns = {"sample_id", "group1", "group2"}
+    if not required_columns.issubset(group_df.columns):
+        annotations = [
+            {
+                "id": sample_name,
+                "group1": "Missing",
+                "group2": "Missing",
+                "group1Color": "#6b7280",
+                "group2Color": "#6b7280",
+            }
+            for sample_name in sample_names
+        ]
+        return {
+            "sampleAnnotations": annotations,
+            "groupOptions": {"group1": {"order": [], "colors": {}}, "group2": {"order": [], "colors": {}}},
+            "hasSecondaryGrouping": False,
+        }
+
+    keep_columns = [col for col in ["sample_id", "group1", "group2", "_group_table_order"] if col in group_df.columns]
+    work = group_df.loc[:, keep_columns].copy()
+    work["sample_id"] = work["sample_id"].astype(str).str.strip()
+    work["group1"] = work["group1"].astype("string").str.strip().replace("", pd.NA)
+    work["group2"] = work["group2"].astype("string").str.strip().replace("", pd.NA)
+    if "_group_table_order" not in work.columns:
+        work["_group_table_order"] = np.arange(len(work), dtype=int)
+    work["_group_table_order"] = pd.to_numeric(work["_group_table_order"], errors="coerce")
+    valid_mask = work["sample_id"].ne("") & work["group1"].notna() & work["group2"].notna()
+    work = work.loc[valid_mask].copy()
+    if work.empty:
+        annotations = [
+            {
+                "id": sample_name,
+                "group1": "Missing",
+                "group2": "Missing",
+                "group1Color": "#6b7280",
+                "group2Color": "#6b7280",
+            }
+            for sample_name in sample_names
+        ]
+        return {
+            "sampleAnnotations": annotations,
+            "groupOptions": {"group1": {"order": [], "colors": {}}, "group2": {"order": [], "colors": {}}},
+            "hasSecondaryGrouping": False,
+        }
+
+    work = work.sort_values("_group_table_order", kind="mergesort").drop_duplicates(subset=["sample_id"], keep="first")
+    work = work.set_index("sample_id", drop=False)
+    group_orders = work["_group_table_order"].astype(int).tolist()
+    group1_order = _ordered_unique_with_order(work["group1"].astype(str).tolist(), group_orders)
+    group1_color_map = _group_color_map(group1_order)
+    group2_order, group2_color_map = _global_secondary_group_color_map(
+        work["group2"].astype(str).tolist(),
+        group_orders,
+    )
+
+    annotations: list[dict[str, Any]] = []
+    for sample_name in sample_names:
+        if sample_name in work.index:
+            row = work.loc[sample_name]
+            group1 = str(row["group1"])
+            group2 = str(row["group2"])
+        else:
+            group1 = "Missing"
+            group2 = "Missing"
+        annotations.append(
+            {
+                "id": sample_name,
+                "group1": group1,
+                "group2": group2,
+                "group1Color": group1_color_map.get(group1, "#6b7280"),
+                "group2Color": group2_color_map.get(group2, "#6b7280"),
+            }
+        )
+
+    return {
+        "sampleAnnotations": annotations,
+        "groupOptions": {
+            "group1": {"order": group1_order, "colors": group1_color_map},
+            "group2": {"order": group2_order, "colors": group2_color_map},
+        },
+        "hasSecondaryGrouping": bool(work["group2"].notna().any()),
+    }
+
+
+def _safe_stats_from_vectors(x_values: np.ndarray, y_values: np.ndarray) -> dict[str, float | None]:
+    x = np.asarray(x_values, dtype=float)
+    y = np.asarray(y_values, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    x = x[mask]
+    y = y[mask]
+    result: dict[str, float | None] = {
+        "pearsonR": None,
+        "pearsonP": None,
+        "spearmanRho": None,
+        "spearmanP": None,
+        "sampleCount": int(x.size),
+    }
+    if x.size < 2 or y.size < 2:
+        return result
+
+    if np.nanstd(x) <= 0 or np.nanstd(y) <= 0:
+        return result
+
+    try:
+        pearson_stat = pearsonr(x, y)
+        result["pearsonR"] = float(pearson_stat.statistic)
+        result["pearsonP"] = float(pearson_stat.pvalue)
+    except Exception:
+        pass
+
+    try:
+        spearman_stat = spearmanr(x, y)
+        if hasattr(spearman_stat, "correlation"):
+            result["spearmanRho"] = float(spearman_stat.correlation)
+            result["spearmanP"] = float(spearman_stat.pvalue)
+        else:
+            rho, pvalue = spearman_stat
+            result["spearmanRho"] = float(rho)
+            result["spearmanP"] = float(pvalue)
+    except Exception:
+        pass
+
+    return result
+
+
+def _build_pca_payload(matrix, sample_names, title: str, cfg, group_df: pd.DataFrame | None = None) -> dict[str, Any] | None:
+    values = matrix.to_numpy(dtype=float, copy=False) if isinstance(matrix, pd.DataFrame) else np.asarray(matrix, dtype=float)
     if values.ndim != 2 or values.shape[0] < 2 or values.shape[1] < 2:
         return None
 
@@ -61,101 +294,1207 @@ def _build_pca_payload(matrix, sample_names, title: str, cfg) -> dict[str, Any] 
         return None
 
     X = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
-    pca = PCA(n_components=2, random_state=cfg.random_state)
-    coords = pca.fit_transform(X)
-    var_exp = pca.explained_variance_ratio_ * 100.0
+    pca_result = _compute_pca_result(
+        X,
+        sample_names,
+        title,
+        cfg,
+        group_df=group_df,
+        max_components=2,
+    )
+    if pca_result is None:
+        return None
+
+    coords = np.asarray(pca_result["coords"], dtype=float)
+    var_exp = np.asarray(pca_result["var_exp"], dtype=float)
+    if coords.shape[1] < 2 or var_exp.size < 2:
+        return None
+
+    plot_group_df = pca_result.get("plot_group_df")
+    plot_sample_names = [str(name) for name in pca_result["plot_sample_names"]]
+    points: list[dict[str, Any]] = []
+
+    if isinstance(plot_group_df, pd.DataFrame) and not plot_group_df.empty and "sample_id" in plot_group_df.columns:
+        group_table = plot_group_df.copy()
+        group_table["sample_id"] = group_table["sample_id"].astype(str).str.strip()
+        group_table = group_table.set_index("sample_id", drop=False)
+        group_orders = group_table["_group_table_order"].astype(int).tolist() if "_group_table_order" in group_table.columns else None
+        group1_order = _ordered_unique_with_order(group_table["group1"].astype(str).tolist(), group_orders)
+        group1_color_map = _group_color_map(group1_order)
+        group1_marker_map = _group_marker_map(group1_order)
+        group2_order, group2_color_map = _global_secondary_group_color_map(
+            group_table["group2"].astype(str).tolist(),
+            group_orders,
+        )
+
+        for idx, sample_name in enumerate(plot_sample_names):
+            row = group_table.loc[sample_name] if sample_name in group_table.index else None
+            group1 = str(row["group1"]) if row is not None else "Missing"
+            group2 = str(row["group2"]) if row is not None else "Missing"
+            points.append(
+                {
+                    "id": sample_name,
+                    "label": sample_name,
+                    "x": float(coords[idx, 0]),
+                    "y": float(coords[idx, 1]),
+                    "group1": group1,
+                    "group2": group2,
+                    "group1Color": group1_color_map.get(group1, "#6b7280"),
+                    "group1Marker": group1_marker_map.get(group1, "circle"),
+                    "group2Color": group2_color_map.get(group2, "#6b7280"),
+                }
+            )
+    else:
+        group1_order = []
+        group2_order = []
+        group1_color_map = {}
+        group1_marker_map = {}
+        group2_color_map = {}
+        for idx, sample_name in enumerate(plot_sample_names):
+            points.append(
+                {
+                    "id": sample_name,
+                    "label": sample_name,
+                    "x": float(coords[idx, 0]),
+                    "y": float(coords[idx, 1]),
+                    "group1": "Missing",
+                    "group2": "Missing",
+                    "group1Color": "#6b7280",
+                    "group1Marker": "circle",
+                    "group2Color": "#6b7280",
+                }
+            )
 
     return {
+        "id": title.lower().replace(" ", "_"),
         "title": title,
-        "width": 900,
-        "height": 620,
-        "xLabel": f"PC1 ({var_exp[0]:.1f}%)",
-        "yLabel": f"PC2 ({var_exp[1]:.1f}%)",
-        "points": [{"name": name, "x": float(x), "y": float(y)} for name, (x, y) in zip(sample_names, coords)],
+        "kind": "pca",
+        "sampleCount": len(points),
+        "varianceExplained": {"pc1": float(var_exp[0]), "pc2": float(var_exp[1])},
+        "points": points,
+        "groupOptions": {
+            "group1": {
+                "order": group1_order if "group1_order" in locals() else [],
+                "colors": group1_color_map if "group1_color_map" in locals() else {},
+                "markers": group1_marker_map if "group1_marker_map" in locals() else {},
+            },
+            "group2": {
+                "order": group2_order if "group2_order" in locals() else [],
+                "colors": group2_color_map if "group2_color_map" in locals() else {},
+            },
+        },
     }
 
 
-def _build_network_payload(engine, tier: str, max_edges: int) -> dict[str, Any] | None:
-    if tier == "total":
-        edge_df = engine.ml_results.get("total_association_network_df", pd.DataFrame())
-        title = "Total Association Network"
-    else:
+def _build_association_payload(engine, cfg, tier: str, group_df: pd.DataFrame | None = None) -> dict[str, Any] | None:
+    if tier == "high_confidence":
         edge_df = engine.ml_results.get("high_confidence_network_df", pd.DataFrame())
-        title = "High-Confidence Association Network"
+        title = "High-Confidence Association Scatter"
+    else:
+        edge_df = engine.ml_results.get("total_association_network_df", pd.DataFrame())
+        title = "Total Association Scatter"
 
     if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
         return None
 
-    ranked = edge_df.sort_values(
-        ["EdgeWeight", "RRARank", "ModelSupportCount", "ScreenSupportCount"],
-        ascending=[False, True, False, False],
-        kind="mergesort",
-    ).head(max(1, int(max_edges)))
+    required_columns = {"Gene", "Metabolite", "EdgeWeight", "ModelSupportCount", "ScreenSupportCount"}
+    if not required_columns.issubset(edge_df.columns):
+        return None
+
+    context = VisualizationContext.from_engine(engine, cfg, group_df=group_df)
+    source_adata = getattr(engine, "adata", context.pca_adata)
+    gene_df = _coerce_association_source_df(engine, source_adata, "gene_expression_df", _gene_expression_df)
+    metab_df = _coerce_association_source_df(engine, source_adata, "metabolomics_df", _metabolomics_df)
+    if gene_df.empty or metab_df.empty:
+        return None
+
+    sample_names = [sample for sample in gene_df.index.astype(str).tolist() if sample in set(metab_df.index.astype(str))]
+    if len(sample_names) < 2:
+        return None
+    gene_df = gene_df.reindex(sample_names)
+    metab_df = metab_df.reindex(sample_names)
+    sample_annotations_payload = _build_group_annotation_payload(sample_names, context.pca_group_df)
+
+    ranked = edge_df.copy()
+    ranked["Gene"] = ranked["Gene"].astype(str).str.strip()
+    ranked["Metabolite"] = ranked["Metabolite"].astype(str).str.strip()
+    ranked["EdgeWeight"] = pd.to_numeric(ranked["EdgeWeight"], errors="coerce").fillna(0.0)
+    ranked["ModelSupportCount"] = pd.to_numeric(ranked["ModelSupportCount"], errors="coerce").fillna(0).astype(int)
+    ranked["ScreenSupportCount"] = pd.to_numeric(ranked["ScreenSupportCount"], errors="coerce").fillna(0).astype(int)
+    if "RRARank" in ranked.columns:
+        ranked["RRARank"] = pd.to_numeric(ranked["RRARank"], errors="coerce")
+    if "PearsonR" in ranked.columns:
+        ranked["PearsonR"] = pd.to_numeric(ranked["PearsonR"], errors="coerce")
+    if "PearsonP" in ranked.columns:
+        ranked["PearsonP"] = pd.to_numeric(ranked["PearsonP"], errors="coerce")
+    if "SpearmanRho" in ranked.columns:
+        ranked["SpearmanRho"] = pd.to_numeric(ranked["SpearmanRho"], errors="coerce")
+    if "SpearmanP" in ranked.columns:
+        ranked["SpearmanP"] = pd.to_numeric(ranked["SpearmanP"], errors="coerce")
+    if "RRAWeight" in ranked.columns:
+        ranked["RRAWeight"] = pd.to_numeric(ranked["RRAWeight"], errors="coerce")
+
+    sort_columns = ["EdgeWeight"]
+    ascending = [False]
+    if "RRARank" in ranked.columns:
+        sort_columns.append("RRARank")
+        ascending.append(True)
+    sort_columns.extend(["ModelSupportCount", "ScreenSupportCount", "Gene", "Metabolite"])
+    ascending.extend([False, False, True, True])
+    ranked = ranked.sort_values(sort_columns, ascending=ascending, kind="mergesort")
+
+    max_edges = max(1, int(getattr(cfg, "network_plot_top_edges", 120)))
+    ranked = ranked.head(max_edges).copy()
     if ranked.empty:
         return None
 
-    genes = ranked.groupby("Gene")["EdgeWeight"].max().sort_values(ascending=False).index.astype(str).tolist()
-    metabolites = (
-        ranked.groupby("Metabolite")["EdgeWeight"].max().sort_values(ascending=False).index.astype(str).tolist()
+    gene_order = (
+        ranked.assign(_Weight=ranked["EdgeWeight"].abs())
+        .sort_values(["_Weight", "Gene"], ascending=[False, True], kind="mergesort")["Gene"]
+        .drop_duplicates()
+        .astype(str)
+        .tolist()
     )
-    if not genes or not metabolites:
-        return None
-
-    width = 1100
-    height = max(700, 26 * max(len(genes), len(metabolites)) + 140)
-    gene_x = 250
-    metab_x = 850
-    gene_y = np.linspace(70, height - 70, num=len(genes))
-    metab_y = np.linspace(70, height - 70, num=len(metabolites))
-
-    nodes = [
-        {"id": f"gene::{gene}", "label": gene, "type": "Gene", "color": PALETTE["gene"], "x": float(gene_x), "y": float(y)}
-        for gene, y in zip(genes, gene_y)
-    ]
-    nodes.extend(
-        {
-            "id": f"metab::{metab}",
-            "label": metab,
-            "type": "Metabolite",
-            "color": PALETTE["metabolite"],
-            "x": float(metab_x),
-            "y": float(y),
-        }
-        for metab, y in zip(metabolites, metab_y)
+    metabolite_order = (
+        ranked.assign(_Weight=ranked["EdgeWeight"].abs())
+        .sort_values(["_Weight", "Metabolite"], ascending=[False, True], kind="mergesort")["Metabolite"]
+        .drop_duplicates()
+        .astype(str)
+        .tolist()
     )
 
-    node_ids = {node["id"] for node in nodes}
-    edges = []
-    for edge_idx, row in enumerate(ranked.reset_index(drop=True).itertuples(index=False), start=1):
-        source = f"gene::{str(row.Gene)}"
-        target = f"metab::{str(row.Metabolite)}"
-        if source not in node_ids or target not in node_ids:
+    top_edges: list[dict[str, Any]] = []
+    for row in ranked.itertuples(index=False):
+        gene = str(row.Gene)
+        metabolite = str(row.Metabolite)
+        if gene not in gene_df.columns or metabolite not in metab_df.columns:
             continue
 
-        edges.append(
+        gene_values = pd.to_numeric(gene_df[gene], errors="coerce").to_numpy(dtype=float, copy=False)
+        metab_values = pd.to_numeric(metab_df[metabolite], errors="coerce").to_numpy(dtype=float, copy=False)
+        stats = _safe_stats_from_vectors(gene_values, metab_values)
+        finite_mask = np.isfinite(gene_values) & np.isfinite(metab_values)
+        if int(np.sum(finite_mask)) < 2:
+            continue
+
+        x_values = [float(value) if np.isfinite(value) else None for value in gene_values.tolist()]
+        y_values = [float(value) if np.isfinite(value) else None for value in metab_values.tolist()]
+
+        top_edges.append(
             {
-                "id": f"edge_{edge_idx:03d}",
-                "source": source,
-                "target": target,
-                "weight": float(row.EdgeWeight),
-                "modelSupport": int(row.ModelSupportCount),
-                "screenSupport": int(row.ScreenSupportCount),
-                "color": PALETTE["edge_positive"] if str(row.Sign) == "positive" else PALETTE["edge_negative"],
-                "width": float(0.8 + 4.2 * float(row.EdgeWeight)),
-                "opacity": float(
-                    min(
-                        0.95,
-                        0.20
-                        + 0.35 * (float(row.ModelSupportCount) / 2.0)
-                        + 0.20 * (float(row.ScreenSupportCount) / 3.0),
-                    )
-                ),
+                "id": f"{gene}||{metabolite}",
+                "gene": gene,
+                "metabolite": metabolite,
+                "label": f"{gene} vs {metabolite}",
+                "edgeWeight": float(row.EdgeWeight),
+                "modelSupportCount": int(row.ModelSupportCount),
+                "screenSupportCount": int(row.ScreenSupportCount),
+                "pearsonR": float(row.PearsonR) if hasattr(row, "PearsonR") and pd.notna(getattr(row, "PearsonR")) else stats["pearsonR"],
+                "pearsonP": float(row.PearsonP) if hasattr(row, "PearsonP") and pd.notna(getattr(row, "PearsonP")) else stats["pearsonP"],
+                "spearmanRho": float(row.SpearmanRho) if hasattr(row, "SpearmanRho") and pd.notna(getattr(row, "SpearmanRho")) else stats["spearmanRho"],
+                "spearmanP": float(row.SpearmanP) if hasattr(row, "SpearmanP") and pd.notna(getattr(row, "SpearmanP")) else stats["spearmanP"],
+                "rraRank": int(getattr(row, "RRARank", 0)) if hasattr(row, "RRARank") and pd.notna(getattr(row, "RRARank")) else None,
+                "rraWeight": float(getattr(row, "RRAWeight", np.nan)) if hasattr(row, "RRAWeight") and pd.notna(getattr(row, "RRAWeight")) else None,
+                "sign": str(getattr(row, "Sign", "")).strip(),
+                "edgeTier": str(getattr(row, "EdgeTier", tier)),
+                "sampleCount": int(stats["sampleCount"]),
+                "x": x_values,
+                "y": y_values,
             }
         )
 
+    if not top_edges:
+        return None
+
+    default_edge = top_edges[0]
+    return {
+        "id": f"associations.{tier}",
+        "title": title,
+        "tier": tier,
+        "sampleIds": sample_names,
+        "sampleAnnotations": sample_annotations_payload["sampleAnnotations"],
+        "groupOptions": sample_annotations_payload["groupOptions"],
+        "hasSecondaryGrouping": sample_annotations_payload["hasSecondaryGrouping"],
+        "geneOptions": [{"value": gene, "label": gene} for gene in gene_order],
+        "metaboliteOptions": [{"value": metab, "label": metab} for metab in metabolite_order],
+        "topEdges": top_edges,
+        "defaultSelection": {
+            "edgeId": default_edge["id"],
+            "gene": default_edge["gene"],
+            "metabolite": default_edge["metabolite"],
+        },
+    }
+
+
+def _significance_star(value: float | None) -> str:
+    if value is None or not np.isfinite(float(value)):
+        return ""
+    value = float(value)
+    if value <= 0.001:
+        return "***"
+    if value <= 0.01:
+        return "**"
+    if value <= 0.05:
+        return "*"
+    return ""
+
+
+def _get_module_metabolite_association_df(engine) -> pd.DataFrame:
+    for key in (
+        "module_metabolite_association_df",
+        "module_metabolite_assoc_df",
+        "module_metabolite_association",
+    ):
+        df = getattr(engine, key, None)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return df
+        df = engine.ml_results.get(key, pd.DataFrame())
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return df
+    return pd.DataFrame()
+
+
+def _build_module_heatmap_payload(engine, cfg) -> dict[str, Any] | None:
+    assoc_df = _get_module_metabolite_association_df(engine)
+    if not isinstance(assoc_df, pd.DataFrame) or assoc_df.empty:
+        return None
+
+    required_columns = {"Module", "Metabolite", "SpearmanRho"}
+    if not required_columns.issubset(assoc_df.columns):
+        return None
+
+    work = assoc_df.copy()
+    work["Module"] = work["Module"].astype(str).str.strip()
+    work["Metabolite"] = work["Metabolite"].astype(str).str.strip()
+    work["SpearmanRho"] = pd.to_numeric(work["SpearmanRho"], errors="coerce")
+    if "FDR" in work.columns:
+        work["FDR"] = pd.to_numeric(work["FDR"], errors="coerce")
+    else:
+        work["FDR"] = np.nan
+    if "PValue" in work.columns:
+        work["PValue"] = pd.to_numeric(work["PValue"], errors="coerce")
+    else:
+        work["PValue"] = np.nan
+
+    work = work.loc[work["Module"].ne("") & work["Metabolite"].ne("") & work["SpearmanRho"].notna()].copy()
+    if work.empty:
+        return None
+
+    non_grey_df = work.loc[work["Module"].str.lower() != "grey"].copy()
+    if not non_grey_df.empty:
+        work = non_grey_df
+
+    significance_column = "FDR" if work["FDR"].notna().any() else "PValue"
+    work["_Significance"] = pd.to_numeric(work[significance_column], errors="coerce")
+    work["_SigRank"] = work["_Significance"].fillna(1.0)
+    work["_AbsRho"] = work["SpearmanRho"].abs()
+
+    module_summary_df = engine.ml_results.get("module_summary_df", pd.DataFrame())
+    module_order: list[str] = []
+    if isinstance(module_summary_df, pd.DataFrame) and not module_summary_df.empty and "Module" in module_summary_df.columns:
+        available_modules = set(work["Module"].astype(str).tolist())
+        module_order = [
+            str(module_name)
+            for module_name in module_summary_df["Module"].astype(str).tolist()
+            if str(module_name) in available_modules
+        ]
+
+    if not module_order:
+        module_order = (
+            work.sort_values(
+                ["_SigRank", "_AbsRho", "Module"],
+                ascending=[True, False, True],
+                kind="mergesort",
+            )["Module"]
+            .drop_duplicates()
+            .astype(str)
+            .tolist()
+        )
+    else:
+        for module_name in work["Module"].astype(str).drop_duplicates().tolist():
+            if module_name not in module_order:
+                module_order.append(module_name)
+
+    metabolite_order = (
+        work.sort_values(
+            ["_SigRank", "_AbsRho", "Metabolite"],
+            ascending=[True, False, True],
+            kind="mergesort",
+        )["Metabolite"]
+        .drop_duplicates()
+        .astype(str)
+        .tolist()
+    )
+
+    module_rank = {module_name: idx for idx, module_name in enumerate(module_order)}
+    metabolite_rank = {metabolite_name: idx for idx, metabolite_name in enumerate(metabolite_order)}
+
+    module_metrics: list[dict[str, Any]] = []
+    for module_name in module_order:
+        sub_df = work.loc[work["Module"].astype(str).eq(module_name)]
+        if sub_df.empty:
+            continue
+        min_sig = float(sub_df["_SigRank"].min()) if sub_df["_SigRank"].notna().any() else None
+        max_abs_rho = float(sub_df["_AbsRho"].max()) if sub_df["_AbsRho"].notna().any() else 0.0
+        module_metrics.append(
+            {
+                "id": module_name,
+                "label": module_name,
+                "defaultRank": int(module_rank.get(module_name, len(module_rank))),
+                "maxAbsRho": max_abs_rho,
+                "minSignificance": min_sig,
+            }
+        )
+
+    metabolite_metrics: list[dict[str, Any]] = []
+    for metabolite_name in metabolite_order:
+        sub_df = work.loc[work["Metabolite"].astype(str).eq(metabolite_name)]
+        if sub_df.empty:
+            continue
+        min_sig = float(sub_df["_SigRank"].min()) if sub_df["_SigRank"].notna().any() else None
+        max_abs_rho = float(sub_df["_AbsRho"].max()) if sub_df["_AbsRho"].notna().any() else 0.0
+        metabolite_metrics.append(
+            {
+                "id": metabolite_name,
+                "label": metabolite_name,
+                "defaultRank": int(metabolite_rank.get(metabolite_name, len(metabolite_rank))),
+                "maxAbsRho": max_abs_rho,
+                "minSignificance": min_sig,
+            }
+        )
+
+    cells: list[dict[str, Any]] = []
+    for row in work.itertuples(index=False):
+        fdr_value = float(getattr(row, "FDR")) if pd.notna(getattr(row, "FDR")) else None
+        p_value = float(getattr(row, "PValue")) if pd.notna(getattr(row, "PValue")) else None
+        sig_value = fdr_value if significance_column == "FDR" else p_value
+        cells.append(
+            {
+                "module": str(row.Module),
+                "metabolite": str(row.Metabolite),
+                "rho": float(row.SpearmanRho),
+                "fdr": fdr_value,
+                "pValue": p_value,
+                "significance": sig_value,
+                "star": _significance_star(sig_value),
+            }
+        )
+
+    finite_rho = work["SpearmanRho"].to_numpy(dtype=float, copy=False)
+    finite_rho = finite_rho[np.isfinite(finite_rho)]
+    vmax = float(np.nanmax(np.abs(finite_rho))) if finite_rho.size else 1.0
+    vmax = max(vmax, 0.25)
+
+    default_top_modules = min(max(1, len(module_metrics)), 20)
+    default_top_metabolites = min(max(1, len(metabolite_metrics)), 30)
+    return {
+        "id": "module_heatmap",
+        "title": "Module-Metabolite Association Heatmap",
+        "kind": "module_heatmap",
+        "significanceMetric": significance_column,
+        "rhoExtent": {"min": -vmax, "max": vmax},
+        "modules": module_metrics,
+        "metabolites": metabolite_metrics,
+        "cells": cells,
+        "defaults": {
+            "topModules": default_top_modules,
+            "topMetabolites": default_top_metabolites,
+        },
+    }
+
+
+def _build_network_payload(
+    engine,
+    tier: str,
+    max_edges: int,
+    default_top_edges: int | None = None,
+) -> dict[str, Any] | None:
+    if tier == "high_confidence":
+        edge_df = engine.ml_results.get("high_confidence_network_df", pd.DataFrame())
+        title = "High-Confidence Network Explorer"
+    else:
+        edge_df = engine.ml_results.get("total_association_network_df", pd.DataFrame())
+        title = "Total Network Explorer"
+
+    if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
+        return None
+
+    required_columns = {"Gene", "Metabolite", "EdgeWeight"}
+    if not required_columns.issubset(edge_df.columns):
+        return None
+
+    work = edge_df.copy()
+    work["Gene"] = work["Gene"].astype(str).str.strip()
+    work["Metabolite"] = work["Metabolite"].astype(str).str.strip()
+    work["EdgeWeight"] = pd.to_numeric(work["EdgeWeight"], errors="coerce")
+    work = work.loc[work["Gene"].ne("") & work["Metabolite"].ne("") & work["EdgeWeight"].notna()].copy()
+    if work.empty:
+        return None
+
+    if "ModelSupportCount" in work.columns:
+        work["ModelSupportCount"] = pd.to_numeric(work["ModelSupportCount"], errors="coerce").fillna(0).astype(int)
+    else:
+        work["ModelSupportCount"] = 0
+    if "ScreenSupportCount" in work.columns:
+        work["ScreenSupportCount"] = pd.to_numeric(work["ScreenSupportCount"], errors="coerce").fillna(0).astype(int)
+    else:
+        work["ScreenSupportCount"] = 0
+    if "RRARank" in work.columns:
+        work["RRARank"] = pd.to_numeric(work["RRARank"], errors="coerce")
+    else:
+        work["RRARank"] = np.nan
+    if "RRAWeight" in work.columns:
+        work["RRAWeight"] = pd.to_numeric(work["RRAWeight"], errors="coerce")
+    else:
+        work["RRAWeight"] = np.nan
+    if "PearsonR" in work.columns:
+        work["PearsonR"] = pd.to_numeric(work["PearsonR"], errors="coerce")
+    else:
+        work["PearsonR"] = np.nan
+    if "SpearmanRho" in work.columns:
+        work["SpearmanRho"] = pd.to_numeric(work["SpearmanRho"], errors="coerce")
+    else:
+        work["SpearmanRho"] = np.nan
+    if "Sign" in work.columns:
+        work["Sign"] = work["Sign"].astype(str).str.strip()
+    else:
+        work["Sign"] = np.where(work["EdgeWeight"] >= 0, "positive", "negative")
+    if "EdgeTier" in work.columns:
+        work["EdgeTier"] = work["EdgeTier"].astype(str).str.strip()
+    else:
+        work["EdgeTier"] = tier
+
+    work["_AbsWeight"] = work["EdgeWeight"].abs()
+    sort_columns = ["_AbsWeight"]
+    ascending = [False]
+    if work["RRARank"].notna().any():
+        sort_columns.append("RRARank")
+        ascending.append(True)
+    sort_columns.extend(["ModelSupportCount", "ScreenSupportCount", "Gene", "Metabolite"])
+    ascending.extend([False, False, True, True])
+    work = work.sort_values(sort_columns, ascending=ascending, kind="mergesort").head(max(1, int(max_edges))).copy()
+    if work.empty:
+        return None
+
+    gene_metrics: dict[str, dict[str, Any]] = {}
+    metabolite_metrics: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, Any]] = []
+    for idx, row in enumerate(work.itertuples(index=False)):
+        gene = str(row.Gene)
+        metabolite = str(row.Metabolite)
+        edge_weight = float(row.EdgeWeight)
+        sign = str(row.Sign).strip().lower()
+        if sign not in {"positive", "negative"}:
+            sign = "positive" if edge_weight >= 0 else "negative"
+        edge_id = f"{gene}||{metabolite}||{idx}"
+        edges.append(
+            {
+                "id": edge_id,
+                "source": f"gene:{gene}",
+                "target": f"metabolite:{metabolite}",
+                "gene": gene,
+                "metabolite": metabolite,
+                "edgeWeight": edge_weight,
+                "absWeight": abs(edge_weight),
+                "sign": sign,
+                "edgeTier": str(row.EdgeTier),
+                "modelSupportCount": int(row.ModelSupportCount),
+                "screenSupportCount": int(row.ScreenSupportCount),
+                "rraRank": int(row.RRARank) if pd.notna(row.RRARank) else None,
+                "rraWeight": float(row.RRAWeight) if pd.notna(row.RRAWeight) else None,
+                "pearsonR": float(row.PearsonR) if pd.notna(row.PearsonR) else None,
+                "spearmanRho": float(row.SpearmanRho) if pd.notna(row.SpearmanRho) else None,
+            }
+        )
+
+        gene_node = gene_metrics.setdefault(
+            gene,
+            {"id": f"gene:{gene}", "label": gene, "type": "gene", "degree": 0, "maxAbsWeight": 0.0, "positiveEdges": 0, "negativeEdges": 0},
+        )
+        metabolite_node = metabolite_metrics.setdefault(
+            metabolite,
+            {
+                "id": f"metabolite:{metabolite}",
+                "label": metabolite,
+                "type": "metabolite",
+                "degree": 0,
+                "maxAbsWeight": 0.0,
+                "positiveEdges": 0,
+                "negativeEdges": 0,
+            },
+        )
+        for node in (gene_node, metabolite_node):
+            node["degree"] += 1
+            node["maxAbsWeight"] = max(float(node["maxAbsWeight"]), abs(edge_weight))
+            if sign == "positive":
+                node["positiveEdges"] += 1
+            else:
+                node["negativeEdges"] += 1
+
     if not edges:
         return None
-    return {"title": title, "nodes": nodes, "edges": edges, "width": width, "height": height}
+
+    genes = sorted(gene_metrics.values(), key=lambda item: (-int(item["degree"]), -float(item["maxAbsWeight"]), str(item["label"])))
+    metabolites = sorted(
+        metabolite_metrics.values(),
+        key=lambda item: (-int(item["degree"]), -float(item["maxAbsWeight"]), str(item["label"])),
+    )
+
+    module_df = engine.ml_results.get("gene_module_assignment_df", pd.DataFrame())
+    gene_module_colors: dict[str, dict[str, Any]] = {}
+    if isinstance(module_df, pd.DataFrame) and not module_df.empty and {"Gene", "Module"}.issubset(module_df.columns):
+        module_work = module_df.loc[:, [col for col in ["Gene", "Module", "ModuleColorHex", "ModuleSize", "kME", "IntramodularDegree"] if col in module_df.columns]].copy()
+        module_work["Gene"] = module_work["Gene"].astype(str).str.strip()
+        module_work["Module"] = module_work["Module"].astype(str).str.strip().replace("", "grey")
+        module_work = module_work.loc[module_work["Gene"].ne("")].drop_duplicates(subset=["Gene"], keep="first")
+        if "ModuleSize" in module_work.columns:
+            module_work["_ModuleSizeSort"] = pd.to_numeric(module_work["ModuleSize"], errors="coerce").fillna(0).astype(int)
+        else:
+            module_work["_ModuleSizeSort"] = 0
+        module_order = (
+            module_work.loc[module_work["Module"].str.lower().ne("grey"), ["Module", "_ModuleSizeSort"]]
+            .drop_duplicates(subset=["Module"], keep="first")
+            .sort_values(["_ModuleSizeSort", "Module"], ascending=[False, True], kind="mergesort")["Module"]
+            .astype(str)
+            .tolist()
+        )
+        if module_work["Module"].str.lower().eq("grey").any():
+            module_order.append("grey")
+        module_color_map = _build_circos_module_color_map(module_order)
+        for row in module_work.itertuples(index=False):
+            gene_name = str(row.Gene)
+            module_name = str(row.Module) if str(row.Module).strip() else "grey"
+            color_value = getattr(row, "ModuleColorHex", None)
+            color = str(color_value) if color_value is not None and pd.notna(color_value) and str(color_value).strip() else module_color_map.get(module_name, "#E5E7EB")
+            gene_module_colors[gene_name] = {
+                "module": module_name,
+                "moduleColor": module_color_map.get(module_name, color),
+                "moduleSize": int(getattr(row, "ModuleSize", 0)) if pd.notna(getattr(row, "ModuleSize", np.nan)) else 0,
+                "kME": float(getattr(row, "kME")) if pd.notna(getattr(row, "kME", np.nan)) else None,
+                "intramodularDegree": float(getattr(row, "IntramodularDegree")) if pd.notna(getattr(row, "IntramodularDegree", np.nan)) else None,
+            }
+
+    metabolite_edge_colors = _hue_wheel_color_series(len(metabolites), hue_start=18.0, lightness=63.0, safety=0.92)
+    metabolite_color_map = {
+        str(item["label"]): metabolite_edge_colors[idx]
+        for idx, item in enumerate(metabolites)
+    }
+    for gene in genes:
+        module_info = gene_module_colors.get(str(gene["label"]), {})
+        gene["module"] = module_info.get("module", "grey")
+        gene["moduleColor"] = module_info.get("moduleColor", "#E5E7EB")
+        gene["moduleSize"] = int(module_info.get("moduleSize", 0) or 0)
+        gene["kME"] = module_info.get("kME")
+        gene["intramodularDegree"] = module_info.get("intramodularDegree")
+        gene["color"] = gene["moduleColor"]
+    for metabolite in metabolites:
+        metabolite["module"] = ""
+        metabolite["moduleColor"] = "#c9ad85"
+        metabolite["color"] = "#c9ad85"
+        metabolite["edgeColor"] = metabolite_color_map.get(str(metabolite["label"]), "#9ca3af")
+    for edge in edges:
+        edge["metaboliteColor"] = metabolite_color_map.get(str(edge["metabolite"]), "#9ca3af")
+
+    nodes = genes + metabolites
+
+    return {
+        "id": f"network.{tier}",
+        "title": title,
+        "tier": tier,
+        "layout": "circos",
+        "nodes": nodes,
+        "edges": edges,
+        "nodeGroups": {
+            "geneModules": [
+                {"module": module_name, "color": module_color}
+                for module_name, module_color in {
+                    str(value["module"]): str(value["moduleColor"])
+                    for value in gene_module_colors.values()
+                    if str(value.get("module", "")).strip()
+                }.items()
+            ],
+            "metaboliteColors": metabolite_color_map,
+        },
+        "geneOptions": [{"value": item["label"], "label": item["label"]} for item in genes],
+        "metaboliteOptions": [{"value": item["label"], "label": item["label"]} for item in metabolites],
+        "defaults": {
+            "topEdges": min(len(edges), max(1, int(default_top_edges if default_top_edges is not None else max_edges))),
+            "minEdgeWeight": 0.0,
+        },
+        "summary": {
+            "nodes": len(nodes),
+            "genes": len(genes),
+            "metabolites": len(metabolites),
+            "edges": len(edges),
+            "maxAbsWeight": float(max(edge["absWeight"] for edge in edges)),
+        },
+    }
+
+
+def _build_pca_schema(default_dataset: str) -> dict[str, Any]:
+    return {
+        "id": "pca.scatter",
+        "title": "PCA controls",
+        "controls": [
+            {
+                "id": "dataset",
+                "type": "select",
+                "label": "Dataset",
+                "default": default_dataset,
+                "options": [
+                    {"value": "transcriptome", "label": "Transcriptome"},
+                    {"value": "metabolome", "label": "Metabolome"},
+                ],
+            },
+            {
+                "id": "colorBy",
+                "type": "select",
+                "label": "Color",
+                "default": "group1",
+                "options": [
+                    {"value": "group1", "label": "Group 1"},
+                    {"value": "group2", "label": "Group 2"},
+                ],
+            },
+            {
+                "id": "pointSize",
+                "type": "range",
+                "label": "Point size",
+                "default": 5,
+                "min": 2,
+                "max": 14,
+                "step": 0.5,
+            },
+            {
+                "id": "showLabels",
+                "type": "toggle",
+                "label": "Labels",
+                "default": False,
+            },
+            {
+                "id": "width",
+                "type": "number",
+                "label": "Width",
+                "default": 900,
+                "min": 640,
+                "max": 1800,
+                "step": 20,
+            },
+            {
+                "id": "height",
+                "type": "number",
+                "label": "Height",
+                "default": 620,
+                "min": 480,
+                "max": 1400,
+                "step": 20,
+            },
+        ],
+    }
+
+
+def _build_association_schema(default_tier: str, default_gene: str, default_metabolite: str) -> dict[str, Any]:
+    return {
+        "id": "association.scatter",
+        "title": "Association Scatter Studio",
+        "controls": [
+            {
+                "id": "tier",
+                "type": "select",
+                "label": "Network tier",
+                "default": default_tier,
+                "options": [
+                    {"value": "high_confidence", "label": "High-confidence"},
+                    {"value": "total", "label": "Total"},
+                ],
+            },
+            {
+                "id": "topEdgeId",
+                "type": "select",
+                "label": "Top edge",
+                "default": "",
+                "optionsSource": "topEdges",
+                "allowEmpty": True,
+                "emptyLabel": "Custom pair",
+            },
+            {
+                "id": "gene",
+                "type": "select",
+                "label": "Gene",
+                "default": default_gene,
+                "optionsSource": "geneOptions",
+            },
+            {
+                "id": "metabolite",
+                "type": "select",
+                "label": "Metabolite",
+                "default": default_metabolite,
+                "optionsSource": "metaboliteOptions",
+            },
+            {
+                "id": "colorBy",
+                "type": "select",
+                "label": "Color",
+                "default": "group1",
+                "options": [
+                    {"value": "group1", "label": "Group 1"},
+                    {"value": "group2", "label": "Group 2"},
+                    {"value": "none", "label": "None"},
+                ],
+            },
+            {
+                "id": "pointSize",
+                "type": "range",
+                "label": "Point size",
+                "default": 5,
+                "min": 2,
+                "max": 14,
+                "step": 0.5,
+            },
+            {
+                "id": "alpha",
+                "type": "range",
+                "label": "Opacity",
+                "default": 0.85,
+                "min": 0.15,
+                "max": 1.0,
+                "step": 0.05,
+            },
+            {
+                "id": "showLabels",
+                "type": "toggle",
+                "label": "Labels",
+                "default": False,
+            },
+            {
+                "id": "showRegression",
+                "type": "toggle",
+                "label": "Regression line",
+                "default": True,
+            },
+            {
+                "id": "width",
+                "type": "number",
+                "label": "Width",
+                "default": 900,
+                "min": 640,
+                "max": 2000,
+                "step": 20,
+            },
+            {
+                "id": "height",
+                "type": "number",
+                "label": "Height",
+                "default": 640,
+                "min": 480,
+                "max": 1800,
+                "step": 20,
+            },
+        ],
+    }
+
+
+def _build_module_heatmap_schema(default_top_modules: int, default_top_metabolites: int) -> dict[str, Any]:
+    return {
+        "id": "module.heatmap",
+        "title": "Module Heatmap Studio",
+        "controls": [
+            {
+                "id": "topModules",
+                "type": "number",
+                "label": "Top modules",
+                "default": int(default_top_modules),
+                "min": 1,
+                "max": 200,
+                "step": 1,
+            },
+            {
+                "id": "topMetabolites",
+                "type": "number",
+                "label": "Top metabolites",
+                "default": int(default_top_metabolites),
+                "min": 1,
+                "max": 300,
+                "step": 1,
+            },
+            {
+                "id": "palette",
+                "type": "select",
+                "label": "Palette",
+                "default": "rdbu",
+                "options": [
+                    {"value": "rdbu", "label": "Red-Blue"},
+                    {"value": "blueorange", "label": "Blue-Orange"},
+                    {"value": "purplegreen", "label": "Purple-Green"},
+                ],
+            },
+            {
+                "id": "showValues",
+                "type": "toggle",
+                "label": "Values",
+                "default": False,
+            },
+            {
+                "id": "showStars",
+                "type": "toggle",
+                "label": "Stars",
+                "default": True,
+            },
+            {
+                "id": "rowSort",
+                "type": "select",
+                "label": "Rows",
+                "default": "default",
+                "options": [
+                    {"value": "default", "label": "Module summary order"},
+                    {"value": "max_abs_rho", "label": "Max |rho|"},
+                    {"value": "significance", "label": "Significance"},
+                    {"value": "name", "label": "Name"},
+                ],
+            },
+            {
+                "id": "columnSort",
+                "type": "select",
+                "label": "Columns",
+                "default": "significance",
+                "options": [
+                    {"value": "significance", "label": "Significance"},
+                    {"value": "max_abs_rho", "label": "Max |rho|"},
+                    {"value": "name", "label": "Name"},
+                    {"value": "default", "label": "Default"},
+                ],
+            },
+            {
+                "id": "width",
+                "type": "number",
+                "label": "Width",
+                "default": 980,
+                "min": 720,
+                "max": 2400,
+                "step": 20,
+            },
+            {
+                "id": "height",
+                "type": "number",
+                "label": "Height",
+                "default": 720,
+                "min": 520,
+                "max": 2000,
+                "step": 20,
+            },
+        ],
+    }
+
+
+def _build_network_schema(default_tier: str, default_top_edges: int) -> dict[str, Any]:
+    return {
+        "id": "network.explorer",
+        "title": "Network Explorer",
+        "controls": [
+            {
+                "id": "tier",
+                "type": "select",
+                "label": "Network tier",
+                "default": default_tier,
+                "options": [
+                    {"value": "high_confidence", "label": "High-confidence"},
+                    {"value": "total", "label": "Total"},
+                ],
+            },
+            {
+                "id": "layout",
+                "type": "select",
+                "label": "Layout",
+                "default": "circos",
+                "options": [
+                    {"value": "circos", "label": "Circos"},
+                    {"value": "cnet", "label": "CNet"},
+                ],
+            },
+            {
+                "id": "topEdges",
+                "type": "number",
+                "label": "Top edges",
+                "default": int(default_top_edges),
+                "min": 1,
+                "max": 1000,
+                "step": 1,
+            },
+            {
+                "id": "minEdgeWeight",
+                "type": "number",
+                "label": "Min EdgeWeight",
+                "default": 0.0,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 0.01,
+            },
+            {
+                "id": "sign",
+                "type": "select",
+                "label": "Sign",
+                "default": "all",
+                "options": [
+                    {"value": "all", "label": "All"},
+                    {"value": "positive", "label": "Positive"},
+                    {"value": "negative", "label": "Negative"},
+                ],
+            },
+            {
+                "id": "geneSearch",
+                "type": "text",
+                "label": "Gene search",
+                "default": "",
+            },
+            {
+                "id": "metaboliteSearch",
+                "type": "text",
+                "label": "Metabolite search",
+                "default": "",
+            },
+            {
+                "id": "nodeSize",
+                "type": "range",
+                "label": "Node size",
+                "default": 7,
+                "min": 4,
+                "max": 18,
+                "step": 0.5,
+            },
+            {
+                "id": "showLabels",
+                "type": "toggle",
+                "label": "Labels",
+                "default": False,
+            },
+            {
+                "id": "width",
+                "type": "number",
+                "label": "Width",
+                "default": 1100,
+                "min": 760,
+                "max": 2400,
+                "step": 20,
+            },
+            {
+                "id": "height",
+                "type": "number",
+                "label": "Height",
+                "default": 760,
+                "min": 520,
+                "max": 2000,
+                "step": 20,
+            },
+        ],
+    }
+
+
+def _build_placeholder_schema(schema_id: str, title: str) -> dict[str, Any]:
+    return {
+        "id": schema_id,
+        "title": title,
+        "controls": [],
+    }
+
+
+def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
+    context = VisualizationContext.from_engine(engine, cfg)
+    summary = _build_summary_payload(engine, cfg)
+    group_df = context.pca_group_df
+
+    transcriptome_payload = _build_pca_payload(
+        context.pca_adata.X,
+        context.pca_adata.obs_names.astype(str).tolist(),
+        "Transcriptome PCA",
+        cfg,
+        group_df=group_df,
+    )
+    metab_source = context.pca_adata.obsm.get("metabolomics_scaled", context.pca_adata.obsm.get("metabolomics"))
+    metabolome_payload = _build_pca_payload(
+        metab_source,
+        context.pca_adata.obs_names.astype(str).tolist(),
+        "Metabolome PCA",
+        cfg,
+        group_df=group_df,
+    )
+    association_high_payload = _build_association_payload(engine, cfg, "high_confidence", group_df=group_df)
+    association_total_payload = _build_association_payload(engine, cfg, "total", group_df=group_df)
+    module_heatmap_payload = _build_module_heatmap_payload(engine, cfg)
+    network_default_top_edges = max(1, int(getattr(cfg, "network_plot_top_edges", 120)))
+    network_payload_max_edges = max(1000, network_default_top_edges)
+    network_high_payload = _build_network_payload(
+        engine,
+        "high_confidence",
+        max_edges=network_payload_max_edges,
+        default_top_edges=network_default_top_edges,
+    )
+    network_total_payload = _build_network_payload(
+        engine,
+        "total",
+        max_edges=network_payload_max_edges,
+        default_top_edges=network_default_top_edges,
+    )
+
+    datasets = {
+        "pca.transcriptome": transcriptome_payload,
+        "pca.metabolome": metabolome_payload,
+        "association.high_confidence": association_high_payload,
+        "association.total": association_total_payload,
+        "module_heatmap": module_heatmap_payload,
+        "network.high_confidence": network_high_payload,
+        "network.total": network_total_payload,
+    }
+
+    association_default = association_high_payload or association_total_payload
+    association_default_gene = ""
+    association_default_metabolite = ""
+    if association_default is not None and association_default.get("defaultSelection"):
+        association_default_gene = str(association_default["defaultSelection"].get("gene", ""))
+        association_default_metabolite = str(association_default["defaultSelection"].get("metabolite", ""))
+
+    views = (
+        InteractiveViewSpec(
+            id="pca",
+            title="PCA Explorer",
+            kind="pca",
+            schema_id="pca.scatter",
+            enabled=transcriptome_payload is not None or metabolome_payload is not None,
+            description="Transcriptome and metabolome PCA scatter view.",
+            data_key="pca.transcriptome",
+        ),
+        InteractiveViewSpec(
+            id="association",
+            title="Association Scatter Studio",
+            kind="association",
+            schema_id="association.scatter",
+            enabled=association_default is not None,
+            description="Sample-level scatter for gene-metabolite association pairs.",
+            data_key="association.high_confidence",
+        ),
+        InteractiveViewSpec(
+            id="module_heatmap",
+            title="Module Heatmap Studio",
+            kind="module_heatmap",
+            schema_id="module.heatmap",
+            enabled=module_heatmap_payload is not None,
+            description="Interactive module-metabolite Spearman association heatmap.",
+            data_key="module_heatmap",
+        ),
+        InteractiveViewSpec(
+            id="network_explorer",
+            title="Network Explorer",
+            kind="network",
+            schema_id="network.explorer",
+            enabled=network_high_payload is not None or network_total_payload is not None,
+            description="Bipartite gene-metabolite association network explorer.",
+            data_key="network.high_confidence",
+        ),
+    )
+
+    if transcriptome_payload is not None:
+        default_dataset = "transcriptome"
+    elif metabolome_payload is not None:
+        default_dataset = "metabolome"
+    else:
+        default_dataset = "transcriptome"
+    schemas = {
+        "pca.scatter": _build_pca_schema(default_dataset),
+        "association.scatter": _build_association_schema(
+            "high_confidence" if association_high_payload is not None else "total",
+            association_default_gene,
+            association_default_metabolite,
+        ),
+        "module.heatmap": _build_module_heatmap_schema(
+            int(module_heatmap_payload["defaults"]["topModules"]) if module_heatmap_payload is not None else 10,
+            int(module_heatmap_payload["defaults"]["topMetabolites"]) if module_heatmap_payload is not None else 20,
+        ),
+        "network.explorer": _build_network_schema(
+            "high_confidence" if network_high_payload is not None else "total",
+            int((network_high_payload or network_total_payload or {"defaults": {"topEdges": 120}})["defaults"]["topEdges"]),
+        ),
+        "placeholder.network_explorer": _build_placeholder_schema("placeholder.network_explorer", "Network Explorer"),
+    }
+
+    pca_defaults = {
+        "dataset": default_dataset,
+        "colorBy": "group1",
+        "pointSize": 5,
+        "showLabels": False,
+        "width": 900,
+        "height": 620,
+    }
+
+    initial_state = {
+        "activeViewId": "association" if association_default is not None else "pca",
+        "controls": {
+            "pca": pca_defaults,
+            "association": {
+                "tier": "high_confidence" if association_high_payload is not None else "total",
+                "topEdgeId": "",
+                "gene": association_default_gene,
+                "metabolite": association_default_metabolite,
+                "colorBy": "group1",
+                "pointSize": 5,
+                "alpha": 0.85,
+                "showLabels": False,
+                "showRegression": True,
+                "width": 900,
+                "height": 640,
+            },
+            "module_heatmap": {
+                "topModules": int(module_heatmap_payload["defaults"]["topModules"]) if module_heatmap_payload is not None else 10,
+                "topMetabolites": int(module_heatmap_payload["defaults"]["topMetabolites"]) if module_heatmap_payload is not None else 20,
+                "palette": "rdbu",
+                "showValues": False,
+                "showStars": True,
+                "rowSort": "default",
+                "columnSort": "significance",
+                "width": 980,
+                "height": 720,
+            },
+            "network_explorer": {
+                "tier": "high_confidence" if network_high_payload is not None else "total",
+                "layout": "circos",
+                "topEdges": int((network_high_payload or network_total_payload or {"defaults": {"topEdges": 120}})["defaults"]["topEdges"]),
+                "minEdgeWeight": 0.0,
+                "sign": "all",
+                "geneSearch": "",
+                "metaboliteSearch": "",
+                "nodeSize": 7,
+                "showLabels": False,
+                "width": 1100,
+                "height": 760,
+                "selectedNodeId": "",
+            },
+        },
+    }
+
+    implemented_views = ["pca", "association"]
+    placeholder_views = []
+    if module_heatmap_payload is not None:
+        implemented_views.append("module_heatmap")
+    else:
+        placeholder_views.append("module_heatmap")
+    if network_high_payload is not None or network_total_payload is not None:
+        implemented_views.append("network_explorer")
+    else:
+        placeholder_views.append("network_explorer")
+
+    meta = {
+        **summary,
+        "implementedViews": implemented_views,
+        "placeholderViews": placeholder_views,
+        "groupTableLoaded": bool(group_df is not None and not group_df.empty),
+        "secondaryGrouping": bool(group_df is not None and "group2" in group_df.columns and group_df["group2"].notna().any()),
+    }
+
+    return InteractiveReportModel(
+        meta=meta,
+        views=views,
+        schemas=schemas,
+        datasets=datasets,
+        initial_state=initial_state,
+    )
 
 
 def _interactive_html_template() -> str:
@@ -163,94 +1502,439 @@ def _interactive_html_template() -> str:
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>DeepOmics Interactive Report - __PROJECT_NAME__</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DeepOmics Interactive Report - __PROJECT_NAME__</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 24px; color: #111827; background: #f8fafc; }
-    .hero, .card { background: #ffffff; border: 1px solid #d1d5db; border-radius: 16px; padding: 20px; margin-bottom: 20px; }
-    .hero h1 { margin-top: 0; }
-    .chips { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
-    .chip { background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 999px; padding: 6px 12px; color: #3730a3; font-size: 13px; font-weight: 600; }
-    .toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
-    button { border: 1px solid #cbd5e1; border-radius: 10px; background: #fff; padding: 8px 12px; cursor: pointer; }
-    button:hover { border-color: #93c5fd; }
-    svg { width: 100%; background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; }
-    .grid { display: grid; gap: 20px; }
-    .legend { color: #475569; font-size: 14px; margin-top: 10px; }
+    :root {
+      --bg: #f6f7fb;
+      --panel: #ffffff;
+      --border: #d7dde5;
+      --border-strong: #b8c1cc;
+      --text: #111827;
+      --muted: #5b6472;
+      --accent: #2563eb;
+      --accent-soft: #e8eefc;
+      --disabled: #cbd5e1;
+      --shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .app {
+      display: grid;
+      grid-template-columns: 270px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+    .sidebar {
+      border-right: 1px solid var(--border);
+      background: #fbfcfe;
+      padding: 20px 16px;
+    }
+    .brand {
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1.2;
+      margin: 0 0 8px 0;
+    }
+    .subtle {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 16px 0 18px;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: #1e3a8a;
+      font-size: 12px;
+      font-weight: 700;
+      border: 1px solid #c7d2fe;
+    }
+    .nav {
+      display: grid;
+      gap: 8px;
+      margin-top: 16px;
+    }
+    .nav button {
+      width: 100%;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 10px 12px;
+      text-align: left;
+      cursor: pointer;
+      box-shadow: var(--shadow);
+      font-size: 13px;
+      line-height: 1.3;
+    }
+    .nav button.active {
+      border-color: #93c5fd;
+      background: #eff6ff;
+    }
+    .nav button.pending {
+      color: var(--disabled);
+      background: #f8fafc;
+      box-shadow: none;
+    }
+    .main {
+      padding: 20px 20px 24px;
+      min-width: 0;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+    }
+    .panel + .panel {
+      margin-top: 16px;
+    }
+    .panel-head {
+      padding: 16px 16px 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .panel-title {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+    }
+    .panel-note {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .controls {
+      padding: 14px 16px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .control {
+      min-width: 0;
+      display: grid;
+      gap: 6px;
+    }
+    .control label {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+    }
+    .control input[type="number"],
+    .control input[type="text"],
+    .control input[type="range"],
+    .control select {
+      width: 100%;
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+    .control input[type="range"] {
+      padding: 8px 0;
+    }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 36px;
+    }
+    .toggle-row input {
+      width: 16px;
+      height: 16px;
+    }
+    .action-bar {
+      padding: 0 16px 14px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .action-bar button {
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .action-bar button:hover {
+      border-color: #93c5fd;
+    }
+    .chart-wrap {
+      padding: 16px;
+      overflow: auto;
+    }
+    .chart-shell {
+      position: relative;
+      display: inline-block;
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+    }
+    svg {
+      display: block;
+      max-width: none;
+      background: #fff;
+    }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 14px;
+      padding: 14px 16px 16px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .swatch {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      border: 1px solid rgba(15, 23, 42, 0.14);
+    }
+    .placeholder {
+      padding: 24px 16px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .runtime-error {
+      margin: 20px;
+      padding: 16px;
+      border: 1px solid #fecaca;
+      border-radius: 12px;
+      background: #fff1f2;
+      color: #991b1b;
+      font-family: Consolas, monospace;
+      white-space: pre-wrap;
+    }
+    @media (max-width: 1000px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { border-right: 0; border-bottom: 1px solid var(--border); }
+      .controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 720px) {
+      .controls { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
-  <div class="hero">
-    <h1>DeepOmics Interactive Report</h1>
-    <p>This standalone browser report provides lightweight offline visualization preview and SVG export.</p>
-    <div class="chips" id="chips"></div>
-  </div>
-
-  <div class="grid">
-    <div class="card">
-      <h2>Transcriptome PCA</h2>
-      <div class="toolbar">
-        <button onclick="saveSvg('txSvg','transcriptome_pca.svg')">Save SVG</button>
-      </div>
-      <svg id="txSvg" viewBox="0 0 900 620"></svg>
-    </div>
-
-    <div class="card">
-      <h2>Metabolome PCA</h2>
-      <div class="toolbar">
-        <button onclick="saveSvg('metSvg','metabolome_pca.svg')">Save SVG</button>
-      </div>
-      <svg id="metSvg" viewBox="0 0 900 620"></svg>
-    </div>
-
-    <div class="card">
-      <h2>Total Association Network</h2>
-      <div class="toolbar">
-        <button onclick="saveSvg('totalNetSvg','total_association_network.svg')">Save SVG</button>
-      </div>
-      <svg id="totalNetSvg" viewBox="0 0 1100 900"></svg>
-      <div class="legend">Blue nodes are genes, dark nodes are metabolites. Red edges indicate positive associations and blue edges indicate negative associations.</div>
-    </div>
-
-    <div class="card">
-      <h2>High-Confidence Association Network</h2>
-      <div class="toolbar">
-        <button onclick="saveSvg('highNetSvg','high_confidence_network.svg')">Save SVG</button>
-      </div>
-      <svg id="highNetSvg" viewBox="0 0 1100 900"></svg>
-      <div class="legend">Edges are ranked by RRA and weighted by correlation strength, model support, and screening support.</div>
-    </div>
-  </div>
-
+  <div id="app" class="app"></div>
+  <script id="deepomics-payload" type="application/json">__PAYLOAD__</script>
   <script>
-    const summaryPayload = __SUMMARY_PAYLOAD__;
-    const txPcaPayload = __TRANSCRIPTOME_PCA_PAYLOAD__;
-    const metabPcaPayload = __METABOLOME_PCA_PAYLOAD__;
-    const totalNetworkPayload = __TOTAL_NETWORK_PAYLOAD__;
-    const highNetworkPayload = __HIGH_NETWORK_PAYLOAD__;
+    const report = JSON.parse(document.getElementById("deepomics-payload").textContent);
 
-    function el(tag, attrs = {}) {
-      const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
-      for (const [k, v] of Object.entries(attrs)) {
-        if (v !== undefined && v !== null) node.setAttribute(k, String(v));
+    const state = {
+      activeViewId: report.initial_state.activeViewId,
+      controls: JSON.parse(JSON.stringify(report.initial_state.controls || {}))
+    };
+
+    const app = document.getElementById("app");
+
+    function renderRuntimeError(error) {
+      const message = error && error.stack ? error.stack : String(error);
+      const main = el("main", { className: "main" });
+      main.appendChild(el("div", { className: "runtime-error", text: message }));
+      return main;
+    }
+
+    window.addEventListener("error", event => {
+      clear(app);
+      app.appendChild(renderSidebar());
+      app.appendChild(renderRuntimeError(event.error || event.message));
+    });
+
+    function el(tag, attrs = {}, children = []) {
+      const node = document.createElement(tag);
+      for (const [key, value] of Object.entries(attrs)) {
+        if (value === undefined || value === null) continue;
+        if (key === "className") {
+          node.className = value;
+        } else if (key === "checked") {
+          node.checked = Boolean(value);
+        } else if (key === "selected") {
+          node.selected = Boolean(value);
+        } else if (key === "text") {
+          node.textContent = value;
+        } else if (key === "html") {
+          node.innerHTML = value;
+        } else if (key.startsWith("on") && typeof value === "function") {
+          node.addEventListener(key.slice(2).toLowerCase(), value);
+        } else {
+          node.setAttribute(key, String(value));
+        }
+      }
+      for (const child of children) {
+        if (child !== null && child !== undefined) node.appendChild(child);
       }
       return node;
     }
 
-    function clearSvg(svg) {
-      while (svg.firstChild) svg.removeChild(svg.firstChild);
+    function svgEl(tag, attrs = {}) {
+      const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+      for (const [key, value] of Object.entries(attrs)) {
+        if (value !== undefined && value !== null) node.setAttribute(key, String(value));
+      }
+      return node;
     }
 
-    function addChip(text) {
-      const chip = document.createElement("span");
-      chip.className = "chip";
-      chip.textContent = text;
-      document.getElementById("chips").appendChild(chip);
+    function clear(node) {
+      while (node.firstChild) node.removeChild(node.firstChild);
     }
 
-    function saveSvg(id, filename) {
-      const svg = document.getElementById(id);
-      const clone = svg.cloneNode(true);
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function fmtPct(value) {
+      return `${Number(value || 0).toFixed(1)}%`;
+    }
+
+    function getView(id) {
+      return report.views.find(v => v.id === id);
+    }
+
+    function getDatasetKeyFromControls() {
+      const controls = state.controls.pca || {};
+      return controls.dataset === "metabolome" ? "pca.metabolome" : "pca.transcriptome";
+    }
+
+    function getActiveDataset() {
+      return report.datasets[getDatasetKeyFromControls()] || report.datasets["pca.transcriptome"] || report.datasets["pca.metabolome"] || null;
+    }
+
+    function getViewControls(viewId) {
+      if (!state.controls[viewId]) state.controls[viewId] = {};
+      return state.controls[viewId];
+    }
+
+    function getAssociationDataset() {
+      const controls = getViewControls("association");
+      const tier = controls.tier === "total" ? "total" : "high_confidence";
+      return report.datasets[`association.${tier}`] || report.datasets["association.high_confidence"] || report.datasets["association.total"];
+    }
+
+    function getNetworkDataset() {
+      const controls = getViewControls("network_explorer");
+      const tier = controls.tier === "total" ? "total" : "high_confidence";
+      return report.datasets[`network.${tier}`] || report.datasets["network.high_confidence"] || report.datasets["network.total"];
+    }
+
+    function getDatasetForView(viewId) {
+      if (viewId === "pca") return getActiveDataset();
+      if (viewId === "association") return getAssociationDataset();
+      if (viewId === "module_heatmap") return report.datasets.module_heatmap || null;
+      if (viewId === "network_explorer") return getNetworkDataset();
+      return null;
+    }
+
+    function findAssociationEdge(dataset, controls) {
+      if (!dataset || !Array.isArray(dataset.topEdges) || dataset.topEdges.length === 0) return null;
+      const topEdgeId = String(controls.topEdgeId || "").trim();
+      const gene = String(controls.gene || "").trim();
+      const metabolite = String(controls.metabolite || "").trim();
+
+      if (topEdgeId) {
+        const byId = dataset.topEdges.find(edge => edge.id === topEdgeId);
+        if (byId) return byId;
+      }
+      const exact = dataset.topEdges.find(edge => edge.gene === gene && edge.metabolite === metabolite);
+      if (exact) return exact;
+      const geneMatch = dataset.topEdges.find(edge => edge.gene === gene);
+      if (geneMatch) return geneMatch;
+      const metabMatch = dataset.topEdges.find(edge => edge.metabolite === metabolite);
+      if (metabMatch) return metabMatch;
+      return dataset.topEdges[0] || null;
+    }
+
+    function syncAssociationControlsFromDataset(controls, dataset) {
+      if (!dataset || !Array.isArray(dataset.topEdges) || dataset.topEdges.length === 0) {
+        controls.topEdgeId = "";
+        controls.gene = "";
+        controls.metabolite = "";
+        return;
+      }
+
+      const current = findAssociationEdge(dataset, controls) || dataset.topEdges[0];
+      if (!current) return;
+      controls.topEdgeId = current.id;
+      controls.gene = current.gene;
+      controls.metabolite = current.metabolite;
+    }
+
+    function setControl(viewId, key, value) {
+      const controls = getViewControls(viewId);
+      controls[key] = value;
+
+      if (viewId === "association") {
+        const dataset = getAssociationDataset();
+        if (key === "tier") {
+          syncAssociationControlsFromDataset(controls, dataset);
+        } else if (key === "topEdgeId") {
+          const edge = findAssociationEdge(dataset, controls);
+          if (edge) {
+            controls.topEdgeId = edge.id;
+            controls.gene = edge.gene;
+            controls.metabolite = edge.metabolite;
+          }
+        } else if (key === "gene") {
+          const geneEdge = dataset && Array.isArray(dataset.topEdges) ? dataset.topEdges.find(edge => edge.gene === String(value).trim()) : null;
+          if (geneEdge) {
+            controls.topEdgeId = geneEdge.id;
+            controls.metabolite = geneEdge.metabolite;
+          } else {
+            controls.topEdgeId = "";
+          }
+        } else if (key === "metabolite") {
+          const metabEdge = dataset && Array.isArray(dataset.topEdges) ? dataset.topEdges.find(edge => edge.metabolite === String(value).trim()) : null;
+          if (metabEdge) {
+            controls.topEdgeId = metabEdge.id;
+            controls.gene = metabEdge.gene;
+          } else {
+            controls.topEdgeId = "";
+          }
+        }
+      } else if (viewId === "network_explorer") {
+        if (key !== "selectedNodeId") {
+          controls.selectedNodeId = "";
+        }
+      }
+
+      render();
+    }
+
+    function resetControls(viewId) {
+      state.controls[viewId] = JSON.parse(JSON.stringify(report.initial_state.controls[viewId] || {}));
+      if (viewId === "association") {
+        const dataset = getAssociationDataset();
+        syncAssociationControlsFromDataset(state.controls[viewId], dataset);
+      }
+      render();
+    }
+
+    function downloadSvg(svgNode, filename) {
+      const clone = svgNode.cloneNode(true);
       clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
       const text = new XMLSerializer().serializeToString(clone);
       const blob = new Blob([text], { type: "image/svg+xml;charset=utf-8" });
@@ -261,149 +1945,1729 @@ def _interactive_html_template() -> str:
       document.body.appendChild(a);
       a.click();
       a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setTimeout(() => URL.revokeObjectURL(url), 1200);
     }
 
-    function renderPca(svgId, payload) {
-      const svg = document.getElementById(svgId);
-      clearSvg(svg);
-      if (!payload || !Array.isArray(payload.points) || payload.points.length === 0) return;
+    function renderSidebar() {
+      const sidebar = el("aside", { className: "sidebar" });
+      sidebar.appendChild(el("h1", { className: "brand", text: report.meta.projectName || "DeepOmics" }));
+      sidebar.appendChild(el("p", { className: "subtle", text: "Offline interactive report" }));
 
-      const width = payload.width || 900;
-      const height = payload.height || 620;
-      const margin = { top: 40, right: 30, bottom: 70, left: 80 };
-      const plotWidth = width - margin.left - margin.right;
-      const plotHeight = height - margin.top - margin.bottom;
+      const chips = el("div", { className: "chips" }, [
+        el("span", { className: "chip", text: `Samples: ${report.meta.samples}` }),
+        el("span", { className: "chip", text: `Genes: ${report.meta.genes}` }),
+        el("span", { className: "chip", text: `Metabolites: ${report.meta.metabolites}` })
+      ]);
+      sidebar.appendChild(chips);
 
-      const xs = payload.points.map(p => p.x);
-      const ys = payload.points.map(p => p.y);
-      const xmin = Math.min(0, ...xs), xmax = Math.max(0, ...xs);
-      const ymin = Math.min(0, ...ys), ymax = Math.max(0, ...ys);
-      const xspan = Math.max(1e-6, xmax - xmin), yspan = Math.max(1e-6, ymax - ymin);
+      const nav = el("div", { className: "nav" });
+      for (const view of report.views) {
+        const button = el("button", {
+          className: [view.id === state.activeViewId ? "active" : "", !view.enabled ? "pending" : ""].filter(Boolean).join(" "),
+          text: view.title,
+          onclick: () => {
+            state.activeViewId = view.id;
+            render();
+          }
+        });
+        nav.appendChild(button);
+      }
+      sidebar.appendChild(nav);
+      return sidebar;
+    }
 
-      const sx = v => margin.left + ((v - (xmin - 0.12 * xspan)) / (xspan * 1.24)) * plotWidth;
-      const sy = v => margin.top + (((ymax + 0.12 * yspan) - v) / (yspan * 1.24)) * plotHeight;
+    function getControlOptions(view, control) {
+      if (!control.optionsSource) return control.options || [];
+      const dataset = getDatasetForView(view.id);
+      if (!dataset) return [];
 
-      svg.appendChild(el("rect", { x: 0, y: 0, width, height, fill: "#ffffff" }));
-      svg.appendChild(el("line", { x1: margin.left, y1: sy(0), x2: width - margin.right, y2: sy(0), stroke: "#cbd5e1", "stroke-dasharray": "6 4" }));
-      svg.appendChild(el("line", { x1: sx(0), y1: margin.top, x2: sx(0), y2: height - margin.bottom, stroke: "#cbd5e1", "stroke-dasharray": "6 4" }));
-
-      for (const point of payload.points) {
-        svg.appendChild(el("circle", { cx: sx(point.x), cy: sy(point.y), r: 5, fill: "#4c78a8", stroke: "#ffffff", "stroke-width": 1.2 }));
-        const label = el("text", { x: sx(point.x) + 7, y: sy(point.y) - 6, "font-size": 10, fill: "#334155" });
-        label.textContent = point.name;
-        svg.appendChild(label);
+      let options = [];
+      if (control.optionsSource === "topEdges") {
+        options = (dataset.topEdges || []).map(edge => ({
+          value: edge.id,
+          label: edge.label || `${edge.gene} vs ${edge.metabolite}`,
+        }));
+      } else if (control.optionsSource === "geneOptions") {
+        options = dataset.geneOptions || [];
+      } else if (control.optionsSource === "metaboliteOptions") {
+        options = dataset.metaboliteOptions || [];
       }
 
-      const title = el("text", { x: width / 2, y: 24, "text-anchor": "middle", "font-size": 18, "font-weight": 700, fill: "#111827" });
-      title.textContent = payload.title || "";
-      svg.appendChild(title);
-
-      const xlabel = el("text", { x: width / 2, y: height - 18, "text-anchor": "middle", "font-size": 13, fill: "#334155" });
-      xlabel.textContent = payload.xLabel || "PC1";
-      svg.appendChild(xlabel);
-
-      const ylabel = el("text", { x: 22, y: height / 2, transform: `rotate(-90 22 ${height / 2})`, "text-anchor": "middle", "font-size": 13, fill: "#334155" });
-      ylabel.textContent = payload.yLabel || "PC2";
-      svg.appendChild(ylabel);
+      if (control.allowEmpty) {
+        options = [{ value: "", label: control.emptyLabel || "None" }, ...options];
+      }
+      return options;
     }
 
-    function renderNetwork(svgId, payload) {
-      const svg = document.getElementById(svgId);
-      clearSvg(svg);
-      if (!payload) return;
+    function renderControlField(view, control) {
+      const current = getViewControls(view.id)[control.id];
+      const wrapper = el("div", { className: "control" });
+      wrapper.appendChild(el("label", { text: control.label }));
 
-      svg.setAttribute("viewBox", `0 0 ${payload.width} ${payload.height}`);
-      const nodeMap = new Map(payload.nodes.map(n => [n.id, n]));
-      svg.appendChild(el("rect", { x: 0, y: 0, width: payload.width, height: payload.height, fill: "#ffffff" }));
+      if (control.type === "toggle") {
+        const input = el("input", {
+          type: "checkbox",
+          onchange: event => setControl(view.id, control.id, event.target.checked)
+        });
+        input.checked = Boolean(current);
+        wrapper.appendChild(el("div", { className: "toggle-row" }, [input, el("span", { text: control.description || "" })]));
+        return wrapper;
+      }
 
-      for (const edge of payload.edges) {
-        const source = nodeMap.get(edge.source);
-        const target = nodeMap.get(edge.target);
-        if (!source || !target) continue;
-        svg.appendChild(el("line", {
-          x1: source.x, y1: source.y, x2: target.x, y2: target.y,
-          stroke: edge.color, "stroke-width": edge.width, opacity: edge.opacity
+      if (control.type === "range") {
+        const input = el("input", {
+          type: "range",
+          min: control.min,
+          max: control.max,
+          step: control.step,
+          value: current ?? control.default,
+          oninput: event => setControl(view.id, control.id, Number(event.target.value))
+        });
+        const value = el("span", { text: String(current ?? control.default) });
+        const shell = el("div", { className: "toggle-row" }, [input, value]);
+        input.addEventListener("input", () => { value.textContent = String(input.value); });
+        wrapper.appendChild(shell);
+        return wrapper;
+      }
+
+      if (control.type === "number") {
+        const input = el("input", {
+          type: "number",
+          min: control.min,
+          max: control.max,
+          step: control.step,
+          value: current ?? control.default,
+          oninput: event => {
+            const next = Number(event.target.value);
+            if (Number.isFinite(next)) setControl(view.id, control.id, next);
+          }
+        });
+        wrapper.appendChild(input);
+        return wrapper;
+      }
+
+      if (control.type === "text") {
+        const input = el("input", {
+          type: "text",
+          value: current ?? control.default ?? "",
+          oninput: event => setControl(view.id, control.id, event.target.value)
+        });
+        wrapper.appendChild(input);
+        return wrapper;
+      }
+
+      const select = el("select", {
+        onchange: event => setControl(view.id, control.id, event.target.value)
+      });
+      for (const option of getControlOptions(view, control)) {
+        const opt = el("option", {
+          value: option.value,
+          text: option.label || option.value
+        });
+        opt.selected = String(current ?? control.default) === String(option.value);
+        select.appendChild(opt);
+      }
+      wrapper.appendChild(select);
+      return wrapper;
+    }
+
+    function resolveAssociationControlDefaults(dataset, controls) {
+      if (!dataset || !Array.isArray(dataset.topEdges) || dataset.topEdges.length === 0) {
+        return;
+      }
+
+      const byTopEdge = dataset.topEdges.find(edge => edge.id === String(controls.topEdgeId || "").trim());
+      if (byTopEdge) {
+        controls.gene = byTopEdge.gene;
+        controls.metabolite = byTopEdge.metabolite;
+        controls.topEdgeId = byTopEdge.id;
+        return;
+      }
+
+      const exact = dataset.topEdges.find(edge => edge.gene === String(controls.gene || "").trim() && edge.metabolite === String(controls.metabolite || "").trim());
+      if (exact) {
+        controls.topEdgeId = exact.id;
+        controls.gene = exact.gene;
+        controls.metabolite = exact.metabolite;
+        return;
+      }
+
+      const geneMatch = dataset.topEdges.find(edge => edge.gene === String(controls.gene || "").trim());
+      if (geneMatch) {
+        controls.topEdgeId = geneMatch.id;
+        controls.gene = geneMatch.gene;
+        controls.metabolite = geneMatch.metabolite;
+        return;
+      }
+
+      const metabMatch = dataset.topEdges.find(edge => edge.metabolite === String(controls.metabolite || "").trim());
+      if (metabMatch) {
+        controls.topEdgeId = metabMatch.id;
+        controls.gene = metabMatch.gene;
+        controls.metabolite = metabMatch.metabolite;
+        return;
+      }
+
+      const fallback = dataset.topEdges[0];
+      controls.topEdgeId = fallback.id;
+      controls.gene = fallback.gene;
+      controls.metabolite = fallback.metabolite;
+    }
+
+    function renderPcaLegend(dataset, colorBy) {
+      const legend = el("div", { className: "legend" });
+      const group1Info = dataset.groupOptions?.group1;
+      const group2Info = dataset.groupOptions?.group2;
+      if (!group1Info || !Array.isArray(group1Info.order) || group1Info.order.length === 0) {
+        legend.appendChild(el("span", { text: "No group legend available." }));
+        return legend;
+      }
+      if (colorBy === "group2" && group2Info && Array.isArray(group2Info.order) && group2Info.order.length > 0) {
+        const group2Colors = group2Info.colors || {};
+        legend.appendChild(el("span", { className: "legend-item", text: "Color: Group 2" }));
+        for (const groupName of group2Info.order) {
+          const swatch = el("span", { className: "swatch", style: `background:${group2Colors[groupName] || "#6b7280"}` });
+          legend.appendChild(el("span", { className: "legend-item" }, [swatch, el("span", { text: groupName })]));
+        }
+        legend.appendChild(el("span", { className: "legend-item", text: "Shape: Group 1" }));
+        for (const groupName of group1Info.order) {
+          const marker = group1Info.markers?.[groupName] || "circle";
+          const icon = svgEl("svg", { width: 16, height: 16, viewBox: "0 0 16 16" });
+          icon.appendChild(pcaMarkerNode(marker, 8, 8, 5, "#111827", "#ffffff"));
+          legend.appendChild(el("span", { className: "legend-item" }, [icon, el("span", { text: groupName })]));
+        }
+      } else {
+        const group1Colors = group1Info.colors || {};
+        legend.appendChild(el("span", { className: "legend-item", text: "Color: Group 1" }));
+        for (const groupName of group1Info.order) {
+          const swatch = el("span", { className: "swatch", style: `background:${group1Colors[groupName] || "#6b7280"}` });
+          legend.appendChild(el("span", { className: "legend-item" }, [swatch, el("span", { text: groupName })]));
+        }
+      }
+      return legend;
+    }
+
+    function renderAssociationLegend(dataset, colorBy) {
+      const legend = el("div", { className: "legend" });
+      const groupInfo = colorBy === "group2" ? dataset.groupOptions.group2 : dataset.groupOptions.group1;
+      if (!groupInfo || !Array.isArray(groupInfo.order) || groupInfo.order.length === 0 || colorBy === "none") {
+        legend.appendChild(el("span", { text: "No group legend available." }));
+        return legend;
+      }
+      const colors = groupInfo.colors || {};
+      for (const groupName of groupInfo.order) {
+        const swatch = el("span", { className: "swatch", style: `background:${colors[groupName] || "#6b7280"}` });
+        legend.appendChild(el("span", { className: "legend-item" }, [swatch, el("span", { text: groupName })]));
+      }
+      return legend;
+    }
+
+    function pcaMarkerNode(marker, cx, cy, size, fill, stroke) {
+      const name = String(marker || "circle").toLowerCase();
+      if (name === "s" || name === "square") {
+        return svgEl("rect", {
+          x: cx - size,
+          y: cy - size,
+          width: size * 2,
+          height: size * 2,
+          fill,
+          stroke,
+          "stroke-width": 1.1
+        });
+      }
+      if (name === "^" || name === "triangle_up") {
+        return svgEl("polygon", {
+          points: `${cx},${cy - size * 1.25} ${cx - size * 1.1},${cy + size * 0.85} ${cx + size * 1.1},${cy + size * 0.85}`,
+          fill,
+          stroke,
+          "stroke-width": 1.1
+        });
+      }
+      if (name === "v" || name === "triangle_down") {
+        return svgEl("polygon", {
+          points: `${cx},${cy + size * 1.25} ${cx - size * 1.1},${cy - size * 0.85} ${cx + size * 1.1},${cy - size * 0.85}`,
+          fill,
+          stroke,
+          "stroke-width": 1.1
+        });
+      }
+      if (name === "<" || name === "triangle_left") {
+        return svgEl("polygon", {
+          points: `${cx - size * 1.25},${cy} ${cx + size * 0.85},${cy - size * 1.1} ${cx + size * 0.85},${cy + size * 1.1}`,
+          fill,
+          stroke,
+          "stroke-width": 1.1
+        });
+      }
+      if (name === ">" || name === "triangle_right") {
+        return svgEl("polygon", {
+          points: `${cx + size * 1.25},${cy} ${cx - size * 0.85},${cy - size * 1.1} ${cx - size * 0.85},${cy + size * 1.1}`,
+          fill,
+          stroke,
+          "stroke-width": 1.1
+        });
+      }
+      if (name === "d" || name === "diamond") {
+        return svgEl("polygon", {
+          points: `${cx},${cy - size * 1.25} ${cx - size * 1.25},${cy} ${cx},${cy + size * 1.25} ${cx + size * 1.25},${cy}`,
+          fill,
+          stroke,
+          "stroke-width": 1.1
+        });
+      }
+      if (name === "x") {
+        const group = svgEl("g", { stroke: fill, "stroke-width": 2.0, "stroke-linecap": "round" });
+        group.appendChild(svgEl("line", { x1: cx - size, y1: cy - size, x2: cx + size, y2: cy + size }));
+        group.appendChild(svgEl("line", { x1: cx + size, y1: cy - size, x2: cx - size, y2: cy + size }));
+        return group;
+      }
+      if (name === "p" || name === "pentagon") {
+        const points = [];
+        for (let idx = 0; idx < 5; idx++) {
+          const angle = -Math.PI / 2 + idx * 2 * Math.PI / 5;
+          points.push(`${cx + Math.cos(angle) * size * 1.18},${cy + Math.sin(angle) * size * 1.18}`);
+        }
+        return svgEl("polygon", {
+          points: points.join(" "),
+          fill,
+          stroke,
+          "stroke-width": 1.1
+        });
+      }
+      if (name === "h" || name === "hexagon" || name === "8") {
+        const count = name === "8" ? 8 : 6;
+        const points = [];
+        for (let idx = 0; idx < count; idx++) {
+          const angle = -Math.PI / 2 + idx * 2 * Math.PI / count;
+          points.push(`${cx + Math.cos(angle) * size * 1.12},${cy + Math.sin(angle) * size * 1.12}`);
+        }
+        return svgEl("polygon", {
+          points: points.join(" "),
+          fill,
+          stroke,
+          "stroke-width": 1.1
+        });
+      }
+      if (name === "*" || name === "star") {
+        const points = [];
+        for (let idx = 0; idx < 10; idx++) {
+          const angle = -Math.PI / 2 + idx * Math.PI / 5;
+          const radius = idx % 2 === 0 ? size * 1.35 : size * 0.55;
+          points.push(`${cx + Math.cos(angle) * radius},${cy + Math.sin(angle) * radius}`);
+        }
+        return svgEl("polygon", {
+          points: points.join(" "),
+          fill,
+          stroke,
+          "stroke-width": 1.1
+        });
+      }
+      if (name === "plus") {
+        const group = svgEl("g", { stroke: fill, "stroke-width": 2.0, "stroke-linecap": "round" });
+        group.appendChild(svgEl("line", { x1: cx - size, y1: cy, x2: cx + size, y2: cy }));
+        group.appendChild(svgEl("line", { x1: cx, y1: cy - size, x2: cx, y2: cy + size }));
+        return group;
+      }
+      return svgEl("circle", {
+        cx,
+        cy,
+        r: size,
+        fill,
+        stroke,
+        "stroke-width": 1.1
+      });
+    }
+
+    function renderPcaChart(dataset, controls) {
+      const width = clamp(Number(controls.width || 900), 640, 2000);
+      const height = clamp(Number(controls.height || 620), 480, 1800);
+      const pointSize = clamp(Number(controls.pointSize || 5), 2, 14);
+      const showLabels = Boolean(controls.showLabels);
+      const colorBy = controls.colorBy === "group2" ? "group2" : "group1";
+      const points = Array.isArray(dataset.points) ? dataset.points : [];
+      const title = dataset.title || "PCA";
+      const margin = { top: 48, right: 38, bottom: 60, left: 72 };
+      const innerWidth = Math.max(1, width - margin.left - margin.right);
+      const innerHeight = Math.max(1, height - margin.top - margin.bottom);
+
+      const xs = points.map(p => Number(p.x || 0));
+      const ys = points.map(p => Number(p.y || 0));
+      const xmin = Math.min(0, ...xs);
+      const xmax = Math.max(0, ...xs);
+      const ymin = Math.min(0, ...ys);
+      const ymax = Math.max(0, ...ys);
+      const xpad = Math.max(0.12 * Math.max(1e-6, xmax - xmin), 0.25);
+      const ypad = Math.max(0.12 * Math.max(1e-6, ymax - ymin), 0.25);
+      const x0 = xmin - xpad;
+      const x1 = xmax + xpad;
+      const y0 = ymin - ypad;
+      const y1 = ymax + ypad;
+      const sx = value => margin.left + ((value - x0) / Math.max(1e-6, x1 - x0)) * innerWidth;
+      const sy = value => margin.top + ((y1 - value) / Math.max(1e-6, y1 - y0)) * innerHeight;
+
+      const svg = svgEl("svg", {
+        width,
+        height,
+        viewBox: `0 0 ${width} ${height}`,
+        role: "img",
+        "aria-label": title
+      });
+      svg.appendChild(svgEl("rect", { x: 0, y: 0, width, height, fill: "#ffffff" }));
+      svg.appendChild(svgEl("line", {
+        x1: margin.left,
+        y1: sy(0),
+        x2: width - margin.right,
+        y2: sy(0),
+        stroke: "#cbd5e1",
+        "stroke-dasharray": "6 4"
+      }));
+      svg.appendChild(svgEl("line", {
+        x1: sx(0),
+        y1: margin.top,
+        x2: sx(0),
+        y2: height - margin.bottom,
+        stroke: "#cbd5e1",
+        "stroke-dasharray": "6 4"
+      }));
+
+      const axisColor = "#334155";
+      svg.appendChild(svgEl("text", {
+        x: width / 2,
+        y: 24,
+        "text-anchor": "middle",
+        "font-size": 18,
+        "font-weight": 700,
+        fill: "#111827"
+      }));
+      svg.lastChild.textContent = `${title}`;
+
+      svg.appendChild(svgEl("text", {
+        x: width / 2,
+        y: height - 16,
+        "text-anchor": "middle",
+        "font-size": 13,
+        fill: axisColor
+      }));
+      svg.lastChild.textContent = `PC1 (${fmtPct(dataset.varianceExplained?.pc1)})`;
+
+      svg.appendChild(svgEl("text", {
+        x: 20,
+        y: height / 2,
+        transform: `rotate(-90 20 ${height / 2})`,
+        "text-anchor": "middle",
+        "font-size": 13,
+        fill: axisColor
+      }));
+      svg.lastChild.textContent = `PC2 (${fmtPct(dataset.varianceExplained?.pc2)})`;
+
+      for (const point of points) {
+        const color = colorBy === "group2" ? (point.group2Color || "#6b7280") : (point.group1Color || "#6b7280");
+        const marker = colorBy === "group2" ? (point.group1Marker || "circle") : "circle";
+        const cx = sx(Number(point.x || 0));
+        const cy = sy(Number(point.y || 0));
+        const markerNode = pcaMarkerNode(marker, cx, cy, pointSize, color, "#ffffff");
+        const markerTitle = svgEl("title");
+        markerTitle.textContent = point.id || point.label || "";
+        markerNode.appendChild(markerTitle);
+        svg.appendChild(markerNode);
+
+        if (showLabels) {
+          const dx = cx >= width / 2 ? -8 : 8;
+          const anchor = cx >= width / 2 ? "end" : "start";
+          const label = svgEl("text", {
+            x: cx + dx,
+            y: cy - 6,
+            "text-anchor": anchor,
+            "font-size": 10,
+            fill: "#334155"
+          });
+          label.textContent = point.label || point.id;
+          svg.appendChild(label);
+        }
+      }
+      return svg;
+    }
+
+    function computeLinearFit(points) {
+      const clean = points.filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+      if (clean.length < 2) return null;
+      const xs = clean.map(p => p.x);
+      const ys = clean.map(p => p.y);
+      const n = clean.length;
+      const xMean = xs.reduce((a, b) => a + b, 0) / n;
+      const yMean = ys.reduce((a, b) => a + b, 0) / n;
+      let sxx = 0;
+      let sxy = 0;
+      let syy = 0;
+      for (let i = 0; i < n; i++) {
+        const dx = xs[i] - xMean;
+        const dy = ys[i] - yMean;
+        sxx += dx * dx;
+        sxy += dx * dy;
+        syy += dy * dy;
+      }
+      if (sxx <= 0 || syy <= 0) return null;
+      const slope = sxy / sxx;
+      const intercept = yMean - slope * xMean;
+      const pearson = sxy / Math.sqrt(sxx * syy);
+
+      const rankedX = xs.map((v, i) => ({ v, i })).sort((a, b) => a.v - b.v);
+      const rx = new Array(n);
+      for (let i = 0; i < rankedX.length; i++) rx[rankedX[i].i] = i + 1;
+      const rankedY = ys.map((v, i) => ({ v, i })).sort((a, b) => a.v - b.v);
+      const ry = new Array(n);
+      for (let i = 0; i < rankedY.length; i++) ry[rankedY[i].i] = i + 1;
+      const rxMean = rx.reduce((a, b) => a + b, 0) / n;
+      const ryMean = ry.reduce((a, b) => a + b, 0) / n;
+      let rsxx = 0;
+      let rsyy = 0;
+      let rsxy = 0;
+      for (let i = 0; i < n; i++) {
+        const dx = rx[i] - rxMean;
+        const dy = ry[i] - ryMean;
+        rsxx += dx * dx;
+        rsyy += dy * dy;
+        rsxy += dx * dy;
+      }
+      const spearman = rsxx > 0 && rsyy > 0 ? rsxy / Math.sqrt(rsxx * rsyy) : null;
+      return { slope, intercept, pearson, spearman };
+    }
+
+    function renderAssociationChart(dataset, controls) {
+      const width = clamp(Number(controls.width || 900), 640, 2000);
+      const height = clamp(Number(controls.height || 640), 480, 1800);
+      const pointSize = clamp(Number(controls.pointSize || 5), 2, 14);
+      const alpha = clamp(Number(controls.alpha || 0.85), 0.15, 1.0);
+      const showLabels = Boolean(controls.showLabels);
+      const showRegression = Boolean(controls.showRegression);
+      const colorBy = controls.colorBy || "group1";
+      const selected = findAssociationEdge(dataset, controls) || (Array.isArray(dataset.topEdges) ? dataset.topEdges[0] : null);
+      const title = dataset.title || "Association Scatter";
+      const margin = { top: 48, right: 38, bottom: 60, left: 72 };
+      const innerWidth = Math.max(1, width - margin.left - margin.right);
+      const innerHeight = Math.max(1, height - margin.top - margin.bottom);
+      const samples = dataset.sampleIds || [];
+
+      if (!selected) {
+        return el("div", { className: "placeholder", text: "No association payload available for the selected tier." });
+      }
+
+      const xs = selected.x || [];
+      const ys = selected.y || [];
+      const finiteX = xs.filter(v => Number.isFinite(v));
+      const finiteY = ys.filter(v => Number.isFinite(v));
+      const xmin = Math.min(0, ...finiteX);
+      const xmax = Math.max(0, ...finiteX);
+      const ymin = Math.min(0, ...finiteY);
+      const ymax = Math.max(0, ...finiteY);
+      const xpad = Math.max(0.12 * Math.max(1e-6, xmax - xmin), 0.25);
+      const ypad = Math.max(0.12 * Math.max(1e-6, ymax - ymin), 0.25);
+      const x0 = xmin - xpad;
+      const x1 = xmax + xpad;
+      const y0 = ymin - ypad;
+      const y1 = ymax + ypad;
+      const sx = value => margin.left + ((value - x0) / Math.max(1e-6, x1 - x0)) * innerWidth;
+      const sy = value => margin.top + ((y1 - value) / Math.max(1e-6, y1 - y0)) * innerHeight;
+
+      const points = samples.map((sampleId, idx) => {
+        const x = Number(xs[idx]);
+        const y = Number(ys[idx]);
+        const ann = (dataset.sampleAnnotations || []).find(item => item.id === sampleId) || {};
+        return {
+          id: sampleId,
+          x,
+          y,
+          group1: ann.group1 || "Missing",
+          group2: ann.group2 || "Missing",
+          group1Color: ann.group1Color || "#6b7280",
+          group2Color: ann.group2Color || "#6b7280"
+        };
+      }).filter(point => Number.isFinite(point.x) && Number.isFinite(point.y));
+
+      const stats = computeLinearFit(points);
+      const colorField = colorBy === "group2" ? "group2Color" : colorBy === "group1" ? "group1Color" : null;
+      const svg = svgEl("svg", {
+        width,
+        height,
+        viewBox: `0 0 ${width} ${height}`,
+        role: "img",
+        "aria-label": title
+      });
+
+      svg.appendChild(svgEl("rect", { x: 0, y: 0, width, height, fill: "#ffffff" }));
+      svg.appendChild(svgEl("line", {
+        x1: margin.left,
+        y1: sy(0),
+        x2: width - margin.right,
+        y2: sy(0),
+        stroke: "#cbd5e1",
+        "stroke-dasharray": "6 4"
+      }));
+      svg.appendChild(svgEl("line", {
+        x1: sx(0),
+        y1: margin.top,
+        x2: sx(0),
+        y2: height - margin.bottom,
+        stroke: "#cbd5e1",
+        "stroke-dasharray": "6 4"
+      }));
+
+      svg.appendChild(svgEl("text", {
+        x: width / 2,
+        y: 24,
+        "text-anchor": "middle",
+        "font-size": 18,
+        "font-weight": 700,
+        fill: "#111827"
+      }));
+      svg.lastChild.textContent = `${title}: ${selected.gene} vs ${selected.metabolite}`;
+
+      svg.appendChild(svgEl("text", {
+        x: width / 2,
+        y: height - 16,
+        "text-anchor": "middle",
+        "font-size": 13,
+        fill: "#334155"
+      }));
+      svg.lastChild.textContent = selected.gene;
+
+      svg.appendChild(svgEl("text", {
+        x: 20,
+        y: height / 2,
+        transform: `rotate(-90 20 ${height / 2})`,
+        "text-anchor": "middle",
+        "font-size": 13,
+        fill: "#334155"
+      }));
+      svg.lastChild.textContent = selected.metabolite;
+
+      if (showRegression && stats) {
+        const xStart = x0;
+        const xEnd = x1;
+        const yStart = stats.intercept + stats.slope * xStart;
+        const yEnd = stats.intercept + stats.slope * xEnd;
+        svg.appendChild(svgEl("line", {
+          x1: sx(xStart),
+          y1: sy(yStart),
+          x2: sx(xEnd),
+          y2: sy(yEnd),
+          stroke: "#111827",
+          "stroke-width": 1.6
         }));
       }
 
-      for (const node of payload.nodes) {
-        svg.appendChild(el("circle", { cx: node.x, cy: node.y, r: node.type === "Gene" ? 8 : 9, fill: node.color, stroke: "#ffffff", "stroke-width": 1.2 }));
-        const text = el("text", {
-          x: node.type === "Gene" ? node.x - 12 : node.x + 12,
-          y: node.y + 4,
-          "text-anchor": node.type === "Gene" ? "end" : "start",
+      for (const point of points) {
+        const color = colorField ? (point[colorField] || "#4c78a8") : "#4c78a8";
+        const cx = sx(point.x);
+        const cy = sy(point.y);
+        const circle = svgEl("circle", {
+          cx,
+          cy,
+          r: pointSize,
+          fill: color,
+          opacity: alpha,
+          stroke: "#ffffff",
+          "stroke-width": 1.0
+        });
+        circle.dataset.sampleId = point.id;
+        svg.appendChild(circle);
+
+        if (showLabels) {
+          const dx = cx >= width / 2 ? -8 : 8;
+          const anchor = cx >= width / 2 ? "end" : "start";
+          const label = svgEl("text", {
+            x: cx + dx,
+            y: cy - 6,
+            "text-anchor": anchor,
+            "font-size": 10,
+            fill: "#334155"
+          });
+          label.textContent = point.id;
+          svg.appendChild(label);
+        }
+      }
+
+      const summary = el("div", { className: "legend" });
+      const chips = [
+        `EdgeWeight: ${Number(selected.edgeWeight).toFixed(3)}`,
+        `ModelSupportCount: ${selected.modelSupportCount}`,
+        `ScreenSupportCount: ${selected.screenSupportCount}`,
+        `Pearson: ${stats && stats.pearson !== null ? stats.pearson.toFixed(3) : (selected.pearsonR !== null && selected.pearsonR !== undefined ? Number(selected.pearsonR).toFixed(3) : "NA")}`,
+        `Spearman: ${stats && stats.spearman !== null ? stats.spearman.toFixed(3) : (selected.spearmanRho !== null && selected.spearmanRho !== undefined ? Number(selected.spearmanRho).toFixed(3) : "NA")}`,
+        `Samples: ${selected.sampleCount}`
+      ];
+      for (const text of chips) summary.appendChild(el("span", { className: "legend-item", text }));
+
+      return { svg, summary, selected };
+    }
+
+    function formatSignificanceMetric(metric) {
+      return metric === "FDR" ? "FDR" : "PValue";
+    }
+
+    function sortHeatmapItems(items, mode) {
+      const sorted = [...items];
+      if (mode === "max_abs_rho") {
+        sorted.sort((a, b) => {
+          const delta = Number(b.maxAbsRho || 0) - Number(a.maxAbsRho || 0);
+          return delta || String(a.label || a.id).localeCompare(String(b.label || b.id));
+        });
+      } else if (mode === "significance") {
+        sorted.sort((a, b) => {
+          const av = a.minSignificance !== null && a.minSignificance !== undefined && Number.isFinite(Number(a.minSignificance)) ? Number(a.minSignificance) : Number.POSITIVE_INFINITY;
+          const bv = b.minSignificance !== null && b.minSignificance !== undefined && Number.isFinite(Number(b.minSignificance)) ? Number(b.minSignificance) : Number.POSITIVE_INFINITY;
+          return (av - bv) || String(a.label || a.id).localeCompare(String(b.label || b.id));
+        });
+      } else if (mode === "name") {
+        sorted.sort((a, b) => String(a.label || a.id).localeCompare(String(b.label || b.id)));
+      } else {
+        sorted.sort((a, b) => Number(a.defaultRank || 0) - Number(b.defaultRank || 0));
+      }
+      return sorted;
+    }
+
+    function hexToRgb(hex) {
+      const clean = String(hex || "").replace("#", "");
+      const value = clean.length === 3
+        ? clean.split("").map(ch => ch + ch).join("")
+        : clean.padEnd(6, "0").slice(0, 6);
+      return {
+        r: parseInt(value.slice(0, 2), 16),
+        g: parseInt(value.slice(2, 4), 16),
+        b: parseInt(value.slice(4, 6), 16)
+      };
+    }
+
+    function rgbToHex(rgb) {
+      const toHex = value => clamp(Math.round(value), 0, 255).toString(16).padStart(2, "0");
+      return `#${toHex(rgb.r)}${toHex(rgb.g)}${toHex(rgb.b)}`;
+    }
+
+    function mixHex(a, b, t) {
+      const ac = hexToRgb(a);
+      const bc = hexToRgb(b);
+      return rgbToHex({
+        r: ac.r + (bc.r - ac.r) * t,
+        g: ac.g + (bc.g - ac.g) * t,
+        b: ac.b + (bc.b - ac.b) * t
+      });
+    }
+
+    function heatmapColor(value, extent, paletteName) {
+      if (!Number.isFinite(value)) return "#f8fafc";
+      const palettes = {
+        rdbu: ["#2166ac", "#f7f7f7", "#b2182b"],
+        blueorange: ["#2563eb", "#f8fafc", "#ea580c"],
+        purplegreen: ["#7e22ce", "#f7f7f7", "#15803d"]
+      };
+      const palette = palettes[paletteName] || palettes.rdbu;
+      const maxAbs = Math.max(
+        Math.abs(Number(extent?.min ?? -1)),
+        Math.abs(Number(extent?.max ?? 1)),
+        0.25
+      );
+      const normalized = clamp(value / maxAbs, -1, 1);
+      if (normalized < 0) return mixHex(palette[0], palette[1], normalized + 1);
+      return mixHex(palette[1], palette[2], normalized);
+    }
+
+    function contrastTextColor(fill) {
+      const rgb = hexToRgb(fill);
+      const luminance = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
+      return luminance < 0.54 ? "#ffffff" : "#111827";
+    }
+
+    function prepareHeatmapGrid(dataset, controls) {
+      const modules = sortHeatmapItems(dataset.modules || [], controls.rowSort || "default")
+        .slice(0, clamp(Math.round(Number(controls.topModules || 10)), 1, Math.max(1, (dataset.modules || []).length)));
+      const metabolites = sortHeatmapItems(dataset.metabolites || [], controls.columnSort || "significance")
+        .slice(0, clamp(Math.round(Number(controls.topMetabolites || 20)), 1, Math.max(1, (dataset.metabolites || []).length)));
+      const moduleIds = new Set(modules.map(item => item.id));
+      const metaboliteIds = new Set(metabolites.map(item => item.id));
+      const cellMap = new Map();
+      for (const cell of dataset.cells || []) {
+        if (moduleIds.has(cell.module) && metaboliteIds.has(cell.metabolite)) {
+          cellMap.set(`${cell.module}||${cell.metabolite}`, cell);
+        }
+      }
+      return { modules, metabolites, cellMap };
+    }
+
+    function renderModuleHeatmapChart(dataset, controls) {
+      const width = clamp(Number(controls.width || 980), 720, 2400);
+      const height = clamp(Number(controls.height || 720), 520, 2000);
+      const showValues = Boolean(controls.showValues);
+      const showStars = Boolean(controls.showStars);
+      const palette = controls.palette || "rdbu";
+      const grid = prepareHeatmapGrid(dataset, controls);
+      const modules = grid.modules;
+      const metabolites = grid.metabolites;
+      if (!modules.length || !metabolites.length) return null;
+
+      const rowLabelWidth = Math.min(220, Math.max(92, 8 * Math.max(...modules.map(item => String(item.label || item.id).length)) + 18));
+      const colLabelHeight = Math.min(190, Math.max(92, 7 * Math.max(...metabolites.map(item => String(item.label || item.id).length)) + 20));
+      const margin = { top: 58, right: 130, bottom: colLabelHeight + 48, left: rowLabelWidth + 22 };
+      const innerWidth = Math.max(1, width - margin.left - margin.right);
+      const innerHeight = Math.max(1, height - margin.top - margin.bottom);
+      const cellSize = Math.max(8, Math.min(innerWidth / metabolites.length, innerHeight / modules.length));
+      const gridWidth = cellSize * metabolites.length;
+      const gridHeight = cellSize * modules.length;
+      const x0 = margin.left;
+      const y0 = margin.top;
+      const title = dataset.title || "Module-Metabolite Association Heatmap";
+      const metricLabel = formatSignificanceMetric(dataset.significanceMetric);
+
+      const svg = svgEl("svg", {
+        width,
+        height,
+        viewBox: `0 0 ${width} ${height}`,
+        role: "img",
+        "aria-label": title
+      });
+      svg.appendChild(svgEl("rect", { x: 0, y: 0, width, height, fill: "#ffffff" }));
+
+      const titleText = svgEl("text", {
+        x: width / 2,
+        y: 24,
+        "text-anchor": "middle",
+        "font-size": 18,
+        "font-weight": 700,
+        fill: "#111827"
+      });
+      titleText.textContent = title;
+      svg.appendChild(titleText);
+
+      for (let rowIndex = 0; rowIndex < modules.length; rowIndex++) {
+        const module = modules[rowIndex];
+        const y = y0 + rowIndex * cellSize;
+        const label = svgEl("text", {
+          x: x0 - 8,
+          y: y + cellSize / 2 + 4,
+          "text-anchor": "end",
           "font-size": 11,
           fill: "#334155"
         });
-        text.textContent = node.label;
-        svg.appendChild(text);
+        label.textContent = module.label || module.id;
+        svg.appendChild(label);
       }
 
-      const title = el("text", { x: payload.width / 2, y: 28, "text-anchor": "middle", "font-size": 18, "font-weight": 700, fill: "#111827" });
-      title.textContent = payload.title || "";
-      svg.appendChild(title);
+      for (let colIndex = 0; colIndex < metabolites.length; colIndex++) {
+        const metabolite = metabolites[colIndex];
+        const x = x0 + colIndex * cellSize;
+        const label = svgEl("text", {
+          x: x + cellSize / 2,
+          y: y0 + gridHeight + 10,
+          transform: `rotate(55 ${x + cellSize / 2} ${y0 + gridHeight + 10})`,
+          "text-anchor": "start",
+          "font-size": 10,
+          fill: "#334155"
+        });
+        label.textContent = metabolite.label || metabolite.id;
+        svg.appendChild(label);
+      }
+
+      for (let rowIndex = 0; rowIndex < modules.length; rowIndex++) {
+        for (let colIndex = 0; colIndex < metabolites.length; colIndex++) {
+          const module = modules[rowIndex];
+          const metabolite = metabolites[colIndex];
+          const cell = grid.cellMap.get(`${module.id}||${metabolite.id}`);
+          const rho = cell ? Number(cell.rho) : NaN;
+          const fill = heatmapColor(rho, dataset.rhoExtent, palette);
+          const x = x0 + colIndex * cellSize;
+          const y = y0 + rowIndex * cellSize;
+          const rect = svgEl("rect", {
+            x,
+            y,
+            width: cellSize,
+            height: cellSize,
+            fill,
+            stroke: "#f1f5f9",
+            "stroke-width": 0.8
+          });
+          if (cell) {
+            rect.dataset.module = module.id;
+            rect.dataset.metabolite = metabolite.id;
+            rect.dataset.rho = String(cell.rho);
+          }
+          svg.appendChild(rect);
+
+          if (cell && (showValues || showStars) && cellSize >= 16) {
+            const textParts = [];
+            if (showValues) textParts.push(Number(rho).toFixed(2));
+            if (showStars && cell.star) textParts.push(cell.star);
+            if (textParts.length) {
+              const valueText = svgEl("text", {
+                x: x + cellSize / 2,
+                y: y + cellSize / 2 + 4,
+                "text-anchor": "middle",
+                "font-size": cellSize < 24 ? 9 : 10,
+                "font-weight": cell.star ? 700 : 500,
+                fill: contrastTextColor(fill)
+              });
+              valueText.textContent = textParts.join(" ");
+              svg.appendChild(valueText);
+            }
+          }
+        }
+      }
+
+      svg.appendChild(svgEl("rect", {
+        x: x0,
+        y: y0,
+        width: gridWidth,
+        height: gridHeight,
+        fill: "none",
+        stroke: "#94a3b8",
+        "stroke-width": 1
+      }));
+
+      const legendX = x0 + gridWidth + 34;
+      const legendY = y0 + 10;
+      const legendHeight = Math.min(220, Math.max(140, gridHeight - 20));
+      const legendWidth = 14;
+      const stops = 80;
+      for (let i = 0; i < stops; i++) {
+        const t0 = i / stops;
+        const rho = Number(dataset.rhoExtent?.max || 1) - t0 * (Number(dataset.rhoExtent?.max || 1) - Number(dataset.rhoExtent?.min || -1));
+        svg.appendChild(svgEl("rect", {
+          x: legendX,
+          y: legendY + t0 * legendHeight,
+          width: legendWidth,
+          height: legendHeight / stops + 0.8,
+          fill: heatmapColor(rho, dataset.rhoExtent, palette)
+        }));
+      }
+      svg.appendChild(svgEl("rect", {
+        x: legendX,
+        y: legendY,
+        width: legendWidth,
+        height: legendHeight,
+        fill: "none",
+        stroke: "#94a3b8",
+        "stroke-width": 1
+      }));
+
+      const maxLabel = svgEl("text", { x: legendX + 22, y: legendY + 4, "font-size": 11, fill: "#334155" });
+      maxLabel.textContent = Number(dataset.rhoExtent?.max || 1).toFixed(2);
+      svg.appendChild(maxLabel);
+      const zeroLabel = svgEl("text", { x: legendX + 22, y: legendY + legendHeight / 2 + 4, "font-size": 11, fill: "#334155" });
+      zeroLabel.textContent = "0";
+      svg.appendChild(zeroLabel);
+      const minLabel = svgEl("text", { x: legendX + 22, y: legendY + legendHeight + 4, "font-size": 11, fill: "#334155" });
+      minLabel.textContent = Number(dataset.rhoExtent?.min || -1).toFixed(2);
+      svg.appendChild(minLabel);
+      const legendLabel = svgEl("text", {
+        x: legendX - 8,
+        y: legendY + legendHeight / 2,
+        transform: `rotate(-90 ${legendX - 8} ${legendY + legendHeight / 2})`,
+        "text-anchor": "middle",
+        "font-size": 12,
+        fill: "#334155"
+      });
+      legendLabel.textContent = "Spearman rho";
+      svg.appendChild(legendLabel);
+
+      const axisLabel = svgEl("text", {
+        x: x0 + gridWidth / 2,
+        y: height - 16,
+        "text-anchor": "middle",
+        "font-size": 12,
+        fill: "#334155"
+      });
+      axisLabel.textContent = "Metabolite";
+      svg.appendChild(axisLabel);
+
+      const rowAxisLabel = svgEl("text", {
+        x: 18,
+        y: y0 + gridHeight / 2,
+        transform: `rotate(-90 18 ${y0 + gridHeight / 2})`,
+        "text-anchor": "middle",
+        "font-size": 12,
+        fill: "#334155"
+      });
+      rowAxisLabel.textContent = "Module";
+      svg.appendChild(rowAxisLabel);
+
+      const subtitle = svgEl("text", {
+        x: width / 2,
+        y: 42,
+        "text-anchor": "middle",
+        "font-size": 11,
+        fill: "#64748b"
+      });
+      subtitle.textContent = `Stars: ${metricLabel} <= 0.05/0.01/0.001`;
+      svg.appendChild(subtitle);
+
+      return { svg, modules, metabolites };
     }
 
-    addChip(`Samples: ${summaryPayload.samples}`);
-    addChip(`Genes: ${summaryPayload.genes}`);
-    addChip(`Metabolites: ${summaryPayload.metabolites}`);
-    addChip(`Total edges: ${summaryPayload.totalEdges}`);
-    addChip(`High-confidence edges: ${summaryPayload.highConfidenceEdges}`);
+    function renderModuleHeatmapSummary(dataset, rendered) {
+      const legend = el("div", { className: "legend" });
+      legend.appendChild(el("span", { className: "legend-item", text: `Modules shown: ${rendered.modules.length}/${(dataset.modules || []).length}` }));
+      legend.appendChild(el("span", { className: "legend-item", text: `Metabolites shown: ${rendered.metabolites.length}/${(dataset.metabolites || []).length}` }));
+      legend.appendChild(el("span", { className: "legend-item", text: `Cells: ${(dataset.cells || []).length}` }));
+      legend.appendChild(el("span", { className: "legend-item", text: `Significance: ${formatSignificanceMetric(dataset.significanceMetric)}` }));
+      return legend;
+    }
 
-    renderPca("txSvg", txPcaPayload);
-    renderPca("metSvg", metabPcaPayload);
-    renderNetwork("totalNetSvg", totalNetworkPayload);
-    renderNetwork("highNetSvg", highNetworkPayload);
+    function normalizeSearch(value) {
+      return String(value || "").trim().toLowerCase();
+    }
+
+    function filterNetworkEdges(dataset, controls) {
+      const topEdges = clamp(Math.round(Number(controls.topEdges || 120)), 1, Math.max(1, (dataset.edges || []).length));
+      const minEdgeWeight = Math.max(0, Number(controls.minEdgeWeight || 0));
+      const sign = controls.sign || "all";
+      const geneSearch = normalizeSearch(controls.geneSearch);
+      const metaboliteSearch = normalizeSearch(controls.metaboliteSearch);
+      return (dataset.edges || [])
+        .filter(edge => Number(edge.absWeight || Math.abs(edge.edgeWeight || 0)) >= minEdgeWeight)
+        .filter(edge => sign === "all" || edge.sign === sign)
+        .filter(edge => !geneSearch || String(edge.gene || "").toLowerCase().includes(geneSearch))
+        .filter(edge => !metaboliteSearch || String(edge.metabolite || "").toLowerCase().includes(metaboliteSearch))
+        .slice(0, topEdges);
+    }
+
+    function prepareNetworkGraph(dataset, controls) {
+      const edges = filterNetworkEdges(dataset, controls);
+      const nodeLookup = new Map((dataset.nodes || []).map(node => [node.id, node]));
+      const activeNodeIds = new Set();
+      for (const edge of edges) {
+        activeNodeIds.add(edge.source);
+        activeNodeIds.add(edge.target);
+      }
+      const genes = (dataset.nodes || [])
+        .filter(node => node.type === "gene" && activeNodeIds.has(node.id))
+        .sort((a, b) => {
+          const aGrey = String(a.module || "grey").toLowerCase() === "grey" ? 1 : 0;
+          const bGrey = String(b.module || "grey").toLowerCase() === "grey" ? 1 : 0;
+          return aGrey - bGrey
+            || Number(b.moduleSize || 0) - Number(a.moduleSize || 0)
+            || String(a.module || "").localeCompare(String(b.module || ""))
+            || Number(b.degree || 0) - Number(a.degree || 0)
+            || Number(b.maxAbsWeight || 0) - Number(a.maxAbsWeight || 0)
+            || String(a.label).localeCompare(String(b.label));
+        });
+      const metabolites = (dataset.nodes || [])
+        .filter(node => node.type === "metabolite" && activeNodeIds.has(node.id))
+        .sort((a, b) => Number(b.degree || 0) - Number(a.degree || 0) || String(a.label).localeCompare(String(b.label)));
+      const adjacency = new Map();
+      for (const edge of edges) {
+        if (!adjacency.has(edge.source)) adjacency.set(edge.source, new Set());
+        if (!adjacency.has(edge.target)) adjacency.set(edge.target, new Set());
+        adjacency.get(edge.source).add(edge.target);
+        adjacency.get(edge.target).add(edge.source);
+      }
+      return { edges, nodes: [...genes, ...metabolites], genes, metabolites, nodeLookup, adjacency };
+    }
+
+    function nodeDetailText(node) {
+      if (!node) return "";
+      const typeLabel = node.type === "gene" ? "Gene" : "Metabolite";
+      const lines = [
+        `${typeLabel}: ${node.label}`,
+        `Degree: ${node.degree}`,
+        `Max |EdgeWeight|: ${Number(node.maxAbsWeight || 0).toFixed(3)}`,
+        `Positive edges: ${node.positiveEdges || 0}`,
+        `Negative edges: ${node.negativeEdges || 0}`
+      ];
+      if (node.type === "gene") {
+        lines.push(`Module: ${node.module || "grey"}`);
+        if (node.kME !== null && node.kME !== undefined) lines.push(`kME: ${Number(node.kME).toFixed(3)}`);
+      }
+      return lines.join("\\n");
+    }
+
+    function edgeColor(edge) {
+      return edge.sign === "negative" ? "#2563eb" : "#dc2626";
+    }
+
+    function nodeColor(node) {
+      if (!node) return "#9ca3af";
+      if (node.type === "gene") return node.color || node.moduleColor || "#9ca3af";
+      return node.color || node.moduleColor || "#c9ad85";
+    }
+
+    function edgeDetailText(edge) {
+      return [
+        `${edge.gene} - ${edge.metabolite}`,
+        `EdgeWeight: ${Number(edge.edgeWeight || 0).toFixed(3)}`,
+        `Sign: ${edge.sign}`,
+        `ModelSupportCount: ${edge.modelSupportCount}`,
+        `ScreenSupportCount: ${edge.screenSupportCount}`,
+        edge.rraRank !== null && edge.rraRank !== undefined ? `RRARank: ${edge.rraRank}` : "",
+        edge.spearmanRho !== null && edge.spearmanRho !== undefined ? `Spearman rho: ${Number(edge.spearmanRho).toFixed(3)}` : ""
+      ].filter(Boolean).join("\\n");
+    }
+
+    function polarPoint(cx, cy, radius, theta) {
+      return { x: cx + radius * Math.cos(theta), y: cy + radius * Math.sin(theta) };
+    }
+
+    function computeCircosLayout(genes, metabolites) {
+      const nGene = genes.length;
+      const nMetabolite = metabolites.length;
+      const nTotal = nGene + nMetabolite;
+      if (!nTotal) return new Map();
+
+      const fullCircle = Math.PI * 2;
+      const meanItemSpan = fullCircle / nTotal;
+      let itemGap = Math.min(Math.PI / 400, meanItemSpan * 0.10);
+      let groupGap = Math.max(7 * Math.PI / 180, itemGap * 8);
+      let totalGap = Math.max(0, nTotal - 2) * itemGap + 2 * groupGap;
+      if (totalGap >= fullCircle * 0.92) {
+        itemGap = meanItemSpan * 0.04;
+        groupGap = Math.max(4 * Math.PI / 180, itemGap * 6);
+        totalGap = Math.max(0, nTotal - 2) * itemGap + 2 * groupGap;
+      }
+
+      let itemWidth = (fullCircle - totalGap) / nTotal;
+      if (itemWidth <= 0) {
+        itemGap = 0;
+        groupGap = 0;
+        itemWidth = fullCircle / nTotal;
+      }
+
+      const layout = new Map();
+      let currentAngle = Math.PI * 0.76 + groupGap / 2;
+      const assign = (nodes, nodeType, afterGroupGap) => {
+        nodes.forEach((node, index) => {
+          const thetaStart = currentAngle;
+          const thetaEnd = thetaStart + itemWidth;
+          layout.set(node.id, {
+            thetaStart,
+            thetaEnd,
+            thetaMid: (thetaStart + thetaEnd) / 2,
+            nodeType
+          });
+          currentAngle = thetaEnd + (index < nodes.length - 1 ? itemGap : afterGroupGap);
+        });
+      };
+      assign(genes, "gene", groupGap);
+      assign(metabolites, "metabolite", groupGap);
+      return layout;
+    }
+
+    function annularPath(cx, cy, innerRadius, outerRadius, thetaStart, thetaEnd) {
+      const largeArc = Math.abs(thetaEnd - thetaStart) > Math.PI ? 1 : 0;
+      const p1 = polarPoint(cx, cy, outerRadius, thetaStart);
+      const p2 = polarPoint(cx, cy, outerRadius, thetaEnd);
+      const p3 = polarPoint(cx, cy, innerRadius, thetaEnd);
+      const p4 = polarPoint(cx, cy, innerRadius, thetaStart);
+      return [
+        `M ${p1.x.toFixed(3)} ${p1.y.toFixed(3)}`,
+        `A ${outerRadius.toFixed(3)} ${outerRadius.toFixed(3)} 0 ${largeArc} 1 ${p2.x.toFixed(3)} ${p2.y.toFixed(3)}`,
+        `L ${p3.x.toFixed(3)} ${p3.y.toFixed(3)}`,
+        `A ${innerRadius.toFixed(3)} ${innerRadius.toFixed(3)} 0 ${largeArc} 0 ${p4.x.toFixed(3)} ${p4.y.toFixed(3)}`,
+        "Z"
+      ].join(" ");
+    }
+
+    function chordPath(cx, cy, thetaStart, thetaEnd, radius, tension = 0.18) {
+      const p1 = polarPoint(cx, cy, radius, thetaStart);
+      const p4 = polarPoint(cx, cy, radius, thetaEnd);
+      const p2 = polarPoint(cx, cy, radius * tension, thetaStart);
+      const p3 = polarPoint(cx, cy, radius * tension, thetaEnd);
+      return `M ${p1.x.toFixed(3)} ${p1.y.toFixed(3)} C ${p2.x.toFixed(3)} ${p2.y.toFixed(3)}, ${p3.x.toFixed(3)} ${p3.y.toFixed(3)}, ${p4.x.toFixed(3)} ${p4.y.toFixed(3)}`;
+    }
+
+    function pointChordPath(source, target, cx, cy, tension = 0.20) {
+      const p2 = { x: cx + (source.x - cx) * tension, y: cy + (source.y - cy) * tension };
+      const p3 = { x: cx + (target.x - cx) * tension, y: cy + (target.y - cy) * tension };
+      return `M ${source.x.toFixed(3)} ${source.y.toFixed(3)} C ${p2.x.toFixed(3)} ${p2.y.toFixed(3)}, ${p3.x.toFixed(3)} ${p3.y.toFixed(3)}, ${target.x.toFixed(3)} ${target.y.toFixed(3)}`;
+    }
+
+    function networkSelectionState(graph, positions, controls) {
+      const selectedNodeId = String(controls.selectedNodeId || "");
+      const neighborIds = selectedNodeId && graph.adjacency.has(selectedNodeId) ? graph.adjacency.get(selectedNodeId) : new Set();
+      const hasSelection = Boolean(selectedNodeId && graph.nodeLookup.has(selectedNodeId));
+      const selectedVisible = selectedNodeId && positions.has(selectedNodeId);
+      return { selectedNodeId, neighborIds, hasSelection, selectedVisible };
+    }
+
+    function biasColor(node) {
+      const total = Number(node.positiveEdges || 0) + Number(node.negativeEdges || 0);
+      if (!total) return "#e5e7eb";
+      const bias = (Number(node.positiveEdges || 0) - Number(node.negativeEdges || 0)) / total;
+      return bias >= 0 ? mixHex("#f8fafc", "#dc2626", Math.min(1, Math.abs(bias))) : mixHex("#f8fafc", "#2563eb", Math.min(1, Math.abs(bias)));
+    }
+
+    function addNetworkTitle(svg, dataset, graph, layoutName, width) {
+      const title = svgEl("text", {
+        x: width / 2,
+        y: 28,
+        "text-anchor": "middle",
+        "font-size": 18,
+        "font-weight": 700,
+        fill: "#111827"
+      });
+      title.textContent = dataset.title || "Network Explorer";
+      svg.appendChild(title);
+
+      const subtitle = svgEl("text", {
+        x: width / 2,
+        y: 48,
+        "text-anchor": "middle",
+        "font-size": 11,
+        fill: "#64748b"
+      });
+      subtitle.textContent = `${layoutName}; ${graph.edges.length} edges, ${graph.genes.length} genes, ${graph.metabolites.length} metabolites`;
+      svg.appendChild(subtitle);
+    }
+
+    function addNetworkLegend(svg, x, y, mode) {
+      const legend = svgEl("g", {});
+      legend.appendChild(svgEl("rect", { x: x - 16, y: y - 22, width: 172, height: mode === "cnet" ? 96 : 118, fill: "#ffffff", stroke: "#d7dde5", rx: 8 }));
+      const legendTitle = svgEl("text", { x, y, "font-size": 12, "font-weight": 700, fill: "#334155" });
+      legendTitle.textContent = "Legend";
+      legend.appendChild(legendTitle);
+      legend.appendChild(svgEl("circle", { cx: x + 8, cy: y + 24, r: 7, fill: "#9ca3af", stroke: "#ffffff", "stroke-width": 1 }));
+      const geneLabel = svgEl("text", { x: x + 24, y: y + 28, "font-size": 11, fill: "#334155" });
+      geneLabel.textContent = "Gene module";
+      legend.appendChild(geneLabel);
+      legend.appendChild(svgEl("circle", { cx: x + 8, cy: y + 48, r: 7, fill: "#c9ad85", stroke: "#ffffff", "stroke-width": 1 }));
+      const metabLabel = svgEl("text", { x: x + 24, y: y + 52, "font-size": 11, fill: "#334155" });
+      metabLabel.textContent = "Metabolite";
+      legend.appendChild(metabLabel);
+      if (mode === "cnet") {
+        legend.appendChild(svgEl("line", { x1: x, y1: y + 72, x2: x + 34, y2: y + 72, stroke: "#8b5cf6", "stroke-width": 3, opacity: 0.75 }));
+        const edgeLabel = svgEl("text", { x: x + 44, y: y + 76, "font-size": 11, fill: "#334155" });
+        edgeLabel.textContent = "Metabolite edge";
+        legend.appendChild(edgeLabel);
+      } else {
+        legend.appendChild(svgEl("line", { x1: x, y1: y + 72, x2: x + 34, y2: y + 72, stroke: "#dc2626", "stroke-width": 3, opacity: 0.75 }));
+        const positiveLabel = svgEl("text", { x: x + 44, y: y + 76, "font-size": 11, fill: "#334155" });
+        positiveLabel.textContent = "Positive";
+        legend.appendChild(positiveLabel);
+        legend.appendChild(svgEl("line", { x1: x, y1: y + 96, x2: x + 34, y2: y + 96, stroke: "#2563eb", "stroke-width": 3, opacity: 0.75 }));
+        const negativeLabel = svgEl("text", { x: x + 44, y: y + 100, "font-size": 11, fill: "#334155" });
+        negativeLabel.textContent = "Negative";
+        legend.appendChild(negativeLabel);
+      }
+      svg.appendChild(legend);
+    }
+
+    function shouldShowNetworkLabel(node, graph, showLabels) {
+      if (!showLabels) return false;
+      if (graph.nodes.length <= 70) return true;
+      return Number(node.degree || 0) >= 3 || node.type === "metabolite";
+    }
+
+    function addCircularLabel(svg, node, pos, radius, graph, showLabels, dimmed, onClick) {
+      if (!shouldShowNetworkLabel(node, graph, showLabels)) return;
+      const rightSide = Math.cos(pos.theta) >= 0;
+      const label = svgEl("text", {
+        x: pos.x + (rightSide ? radius + 8 : -radius - 8),
+        y: pos.y + 4,
+        "text-anchor": rightSide ? "start" : "end",
+        "font-size": node.type === "metabolite" ? 10 : 9,
+        fill: dimmed ? "#94a3b8" : "#334155",
+        cursor: "pointer"
+      });
+      label.textContent = node.label;
+      label.addEventListener("click", onClick);
+      const labelTitle = svgEl("title");
+      labelTitle.textContent = nodeDetailText(node);
+      label.appendChild(labelTitle);
+      svg.appendChild(label);
+    }
+
+    function renderNetworkChart(dataset, controls) {
+      const width = clamp(Number(controls.width || 1100), 760, 2400);
+      const height = clamp(Number(controls.height || 760), 520, 2000);
+      const baseNodeSize = clamp(Number(controls.nodeSize || 7), 4, 18);
+      const showLabels = Boolean(controls.showLabels);
+      const graph = prepareNetworkGraph(dataset, controls);
+      if (!graph.edges.length) return null;
+
+      const layout = controls.layout === "cnet" ? "cnet" : "circos";
+      if (layout === "cnet") {
+        return renderNetworkCnetChart(dataset, controls, graph, width, height, baseNodeSize, showLabels);
+      }
+      return renderNetworkCircosChart(dataset, controls, graph, width, height, baseNodeSize, showLabels);
+    }
+
+    function renderNetworkCircosChart(dataset, controls, graph, width, height, baseNodeSize, showLabels) {
+      const cx = width / 2;
+      const cy = height / 2 + 18;
+      const radius = Math.max(190, Math.min(width - 260, height - 120) / 2);
+      const outerR = radius;
+      const stripInner = radius - Math.max(12, baseNodeSize * 2.1);
+      const degreeInner = stripInner - 24;
+      const degreeOuter = stripInner - 8;
+      const biasInner = degreeInner - 18;
+      const biasOuter = degreeInner - 4;
+      const linkR = biasInner - 24;
+      const layoutMap = computeCircosLayout(graph.genes, graph.metabolites);
+      const positions = new Map();
+      for (const [nodeId, geometry] of layoutMap.entries()) {
+        const xy = polarPoint(cx, cy, outerR + 4, geometry.thetaMid);
+        positions.set(nodeId, { ...geometry, x: xy.x, y: xy.y, theta: geometry.thetaMid });
+      }
+      const selection = networkSelectionState(graph, positions, controls);
+      const maxDegree = Math.max(1, ...graph.nodes.map(node => Number(node.degree || 0)));
+      const maxAbs = Number(dataset.summary?.maxAbsWeight || 1);
+
+      const svg = svgEl("svg", {
+        width,
+        height,
+        viewBox: `0 0 ${width} ${height}`,
+        role: "img",
+        "aria-label": dataset.title || "Network Explorer"
+      });
+      svg.appendChild(svgEl("rect", { x: 0, y: 0, width, height, fill: "#ffffff" }));
+      addNetworkTitle(svg, dataset, graph, "Circos layout", width);
+
+      for (const edge of [...graph.edges].sort((a, b) => Number(a.absWeight || 0) - Number(b.absWeight || 0))) {
+        const source = layoutMap.get(edge.source);
+        const target = layoutMap.get(edge.target);
+        if (!source || !target) continue;
+        const connectedToSelection = selection.hasSelection && selection.selectedVisible && (edge.source === selection.selectedNodeId || edge.target === selection.selectedNodeId);
+        const dimmed = selection.hasSelection && selection.selectedVisible && !connectedToSelection;
+        const absWeight = Number(edge.absWeight || Math.abs(edge.edgeWeight || 0));
+        const strokeWidth = 0.35 + 3.2 * Math.sqrt(Math.min(1, absWeight / Math.max(1e-6, maxAbs)));
+        const path = svgEl("path", {
+          d: chordPath(cx, cy, source.thetaMid, target.thetaMid, linkR),
+          fill: "none",
+          stroke: edgeColor(edge),
+          "stroke-width": connectedToSelection ? strokeWidth + 1.2 : strokeWidth,
+          opacity: dimmed ? 0.05 : connectedToSelection ? 0.82 : 0.40,
+          "stroke-linecap": "round"
+        });
+        const lineTitle = svgEl("title");
+        lineTitle.textContent = edgeDetailText(edge);
+        path.appendChild(lineTitle);
+        svg.appendChild(path);
+      }
+
+      for (const node of graph.nodes) {
+        const geometry = layoutMap.get(node.id);
+        if (!geometry) continue;
+        const isSelected = node.id === selection.selectedNodeId;
+        const isNeighbor = selection.hasSelection && selection.selectedVisible && selection.neighborIds.has(node.id);
+        const dimmed = selection.hasSelection && selection.selectedVisible && !isSelected && !isNeighbor;
+        const outerSegment = svgEl("path", {
+          d: annularPath(cx, cy, stripInner, outerR, geometry.thetaStart, geometry.thetaEnd),
+          fill: nodeColor(node),
+          opacity: dimmed ? 0.22 : 1,
+          stroke: isSelected ? "#f59e0b" : isNeighbor ? "#fbbf24" : "#ffffff",
+          "stroke-width": isSelected ? 2.4 : isNeighbor ? 1.9 : 0.6,
+          cursor: "pointer"
+        });
+        outerSegment.dataset.nodeId = node.id;
+        outerSegment.addEventListener("click", event => {
+          event.stopPropagation();
+          setControl("network_explorer", "selectedNodeId", node.id === selection.selectedNodeId ? "" : node.id);
+        });
+        const titleNode = svgEl("title");
+        titleNode.textContent = nodeDetailText(node);
+        outerSegment.appendChild(titleNode);
+        svg.appendChild(outerSegment);
+
+        const degreeOuterR = degreeInner + (degreeOuter - degreeInner) * Math.min(1, Number(node.degree || 0) / maxDegree);
+        svg.appendChild(svgEl("path", {
+          d: annularPath(cx, cy, degreeInner, degreeOuterR, geometry.thetaStart, geometry.thetaEnd),
+          fill: "#475569",
+          opacity: dimmed ? 0.15 : 0.80,
+          stroke: "none"
+        }));
+        svg.appendChild(svgEl("path", {
+          d: annularPath(cx, cy, biasInner, biasOuter, geometry.thetaStart, geometry.thetaEnd),
+          fill: biasColor(node),
+          opacity: dimmed ? 0.15 : 0.95,
+          stroke: "#ffffff",
+          "stroke-width": 0.25
+        }));
+
+        const pos = positions.get(node.id);
+        if (pos) {
+          addCircularLabel(svg, node, pos, baseNodeSize, graph, showLabels, dimmed, event => {
+            event.stopPropagation();
+            setControl("network_explorer", "selectedNodeId", node.id === selection.selectedNodeId ? "" : node.id);
+          });
+        }
+      }
+
+      const geneLabelPos = polarPoint(cx, cy, outerR + 36, Math.PI * 1.18);
+      const geneLabel = svgEl("text", { x: geneLabelPos.x, y: geneLabelPos.y, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: "#334155" });
+      geneLabel.textContent = "Genes";
+      svg.appendChild(geneLabel);
+      const metabLabelPos = polarPoint(cx, cy, outerR + 36, Math.PI * 0.06);
+      const metabLabel = svgEl("text", { x: metabLabelPos.x, y: metabLabelPos.y, "text-anchor": "middle", "font-size": 12, "font-weight": 700, fill: "#334155" });
+      metabLabel.textContent = "Metabolites";
+      svg.appendChild(metabLabel);
+      addNetworkLegend(svg, 24, 88, "circos");
+
+      svg.addEventListener("click", () => {
+        if (getViewControls("network_explorer").selectedNodeId) {
+          setControl("network_explorer", "selectedNodeId", "");
+        }
+      });
+
+      return { svg, graph, layout: "circos" };
+    }
+
+    function renderNetworkCnetChart(dataset, controls, graph, width, height, baseNodeSize, showLabels) {
+      const cx = width / 2;
+      const cy = height / 2 + 18;
+      const ringR = Math.max(190, Math.min(width - 250, height - 130) / 2);
+      const layoutMap = computeCircosLayout(graph.genes, graph.metabolites);
+      const positions = new Map();
+      const maxDegree = Math.max(1, ...graph.nodes.map(node => Number(node.degree || 0)));
+      for (const node of graph.nodes) {
+        const geometry = layoutMap.get(node.id);
+        if (!geometry) continue;
+        const jitter = 18 * Math.sin((positions.size + 1) * 1.71);
+        const xy = polarPoint(cx, cy, ringR + jitter, geometry.thetaMid);
+        positions.set(node.id, { ...geometry, x: xy.x, y: xy.y, theta: geometry.thetaMid });
+      }
+      const selection = networkSelectionState(graph, positions, controls);
+      const maxAbs = Number(dataset.summary?.maxAbsWeight || 1);
+
+      const svg = svgEl("svg", {
+        width,
+        height,
+        viewBox: `0 0 ${width} ${height}`,
+        role: "img",
+        "aria-label": dataset.title || "Network Explorer"
+      });
+      svg.appendChild(svgEl("rect", { x: 0, y: 0, width, height, fill: "#ffffff" }));
+      addNetworkTitle(svg, dataset, graph, "CNet circular layout", width);
+
+      for (const edge of [...graph.edges].sort((a, b) => Number(a.absWeight || 0) - Number(b.absWeight || 0))) {
+        const source = positions.get(edge.source);
+        const target = positions.get(edge.target);
+        if (!source || !target) continue;
+        const connectedToSelection = selection.hasSelection && selection.selectedVisible && (edge.source === selection.selectedNodeId || edge.target === selection.selectedNodeId);
+        const dimmed = selection.hasSelection && selection.selectedVisible && !connectedToSelection;
+        const absWeight = Number(edge.absWeight || Math.abs(edge.edgeWeight || 0));
+        const strokeWidth = 0.30 + 2.5 * Math.sqrt(Math.min(1, absWeight / Math.max(1e-6, maxAbs)));
+        const path = svgEl("path", {
+          d: pointChordPath(source, target, cx, cy, 0.18),
+          fill: "none",
+          stroke: edge.metaboliteColor || edgeColor(edge),
+          "stroke-width": connectedToSelection ? strokeWidth + 1.1 : strokeWidth,
+          opacity: dimmed ? 0.06 : connectedToSelection ? 0.86 : 0.56,
+          "stroke-linecap": "round"
+        });
+        const title = svgEl("title");
+        title.textContent = edgeDetailText(edge);
+        path.appendChild(title);
+        svg.appendChild(path);
+      }
+
+      for (const node of graph.nodes) {
+        const pos = positions.get(node.id);
+        if (!pos) continue;
+        const isSelected = node.id === selection.selectedNodeId;
+        const isNeighbor = selection.hasSelection && selection.selectedVisible && selection.neighborIds.has(node.id);
+        const dimmed = selection.hasSelection && selection.selectedVisible && !isSelected && !isNeighbor;
+        const radius = baseNodeSize + Math.min(13, Math.sqrt(Number(node.degree || 1) / maxDegree) * 13);
+        const circle = svgEl("circle", {
+          cx: pos.x,
+          cy: pos.y,
+          r: isSelected ? radius + 3 : radius,
+          fill: nodeColor(node),
+          opacity: dimmed ? 0.24 : 0.97,
+          stroke: isSelected ? "#f59e0b" : isNeighbor ? "#fbbf24" : "#ffffff",
+          "stroke-width": isSelected ? 3 : isNeighbor ? 2.2 : 1.1,
+          cursor: "pointer"
+        });
+        circle.dataset.nodeId = node.id;
+        circle.addEventListener("click", event => {
+          event.stopPropagation();
+          setControl("network_explorer", "selectedNodeId", node.id === selection.selectedNodeId ? "" : node.id);
+        });
+        const nodeTitle = svgEl("title");
+        nodeTitle.textContent = nodeDetailText(node);
+        circle.appendChild(nodeTitle);
+        svg.appendChild(circle);
+
+        addCircularLabel(svg, node, pos, radius, graph, showLabels, dimmed, event => {
+          event.stopPropagation();
+          setControl("network_explorer", "selectedNodeId", node.id === selection.selectedNodeId ? "" : node.id);
+        });
+      }
+
+      addNetworkLegend(svg, 24, 88, "cnet");
+      svg.addEventListener("click", () => {
+        if (getViewControls("network_explorer").selectedNodeId) {
+          setControl("network_explorer", "selectedNodeId", "");
+        }
+      });
+
+      return { svg, graph, layout: "cnet" };
+    }
+
+    function renderNetworkSummary(dataset, rendered) {
+      const legend = el("div", { className: "legend" });
+      legend.appendChild(el("span", { className: "legend-item", text: `Tier: ${dataset.tier === "high_confidence" ? "High-confidence" : "Total"}` }));
+      legend.appendChild(el("span", { className: "legend-item", text: `Edges shown: ${rendered.graph.edges.length}/${(dataset.edges || []).length}` }));
+      legend.appendChild(el("span", { className: "legend-item", text: `Genes shown: ${rendered.graph.genes.length}/${dataset.summary?.genes || 0}` }));
+      legend.appendChild(el("span", { className: "legend-item", text: `Metabolites shown: ${rendered.graph.metabolites.length}/${dataset.summary?.metabolites || 0}` }));
+      if (getViewControls("network_explorer").selectedNodeId) {
+        const node = rendered.graph.nodeLookup.get(getViewControls("network_explorer").selectedNodeId);
+        if (node) legend.appendChild(el("span", { className: "legend-item", text: `Selected: ${node.label}` }));
+      }
+      return legend;
+    }
+
+    function renderPcaView(view) {
+      const dataset = getActiveDataset();
+      const controls = getViewControls(view.id);
+      const panel = el("section", { className: "panel" });
+      const title = dataset ? dataset.title : view.title;
+      panel.appendChild(el("div", { className: "panel-head" }, [
+        el("h2", { className: "panel-title", text: title }),
+        el("p", {
+          className: "panel-note",
+          text: "Switch dataset, inspect samples by hover, and export the current SVG snapshot."
+        })
+      ]));
+
+      const schema = report.schemas[view.schema_id];
+      const controlsRow = el("div", { className: "controls" });
+      for (const control of schema.controls || []) {
+        controlsRow.appendChild(renderControlField(view, control));
+      }
+      panel.appendChild(controlsRow);
+
+      const actionBar = el("div", { className: "action-bar" }, [
+        el("button", { text: "Export SVG", onclick: () => downloadSvg(chartShell.querySelector("svg"), `${dataset ? dataset.id : "pca"}.svg`) }),
+        el("button", { text: "Reset", onclick: () => resetControls(view.id) })
+      ]);
+      panel.appendChild(actionBar);
+
+      const chartWrap = el("div", { className: "chart-wrap" });
+      const chartShell = el("div", { className: "chart-shell" });
+      if (dataset) {
+        chartShell.appendChild(renderPcaChart(dataset, controls));
+        chartWrap.appendChild(chartShell);
+        panel.appendChild(chartWrap);
+        panel.appendChild(renderPcaLegend(dataset, controls.colorBy));
+      } else {
+        chartWrap.appendChild(el("div", { className: "placeholder", text: "No PCA payload available for the selected dataset." }));
+        panel.appendChild(chartWrap);
+      }
+      return panel;
+    }
+
+    function renderAssociationView(view) {
+      const dataset = getAssociationDataset();
+      const controls = getViewControls(view.id);
+      if (dataset) {
+        resolveAssociationControlDefaults(dataset, controls);
+      }
+
+      const panel = el("section", { className: "panel" });
+      panel.appendChild(el("div", { className: "panel-head" }, [
+        el("h2", { className: "panel-title", text: dataset ? `${dataset.title}` : view.title }),
+        el("p", {
+          className: "panel-note",
+          text: "Select a gene-metabolite pair or pick from the top edges list. Sample-level scatter, regression, and network statistics update together."
+        })
+      ]));
+
+      const schema = report.schemas[view.schema_id];
+      const controlsRow = el("div", { className: "controls" });
+      for (const control of schema.controls || []) {
+        controlsRow.appendChild(renderControlField(view, control));
+      }
+      panel.appendChild(controlsRow);
+
+      const actionBar = el("div", { className: "action-bar" }, [
+        el("button", { text: "Export SVG", onclick: () => downloadSvg(chartShell.querySelector("svg"), `${dataset ? dataset.id : "association"}.svg`) }),
+        el("button", { text: "Reset", onclick: () => resetControls(view.id) })
+      ]);
+      panel.appendChild(actionBar);
+
+      const chartWrap = el("div", { className: "chart-wrap" });
+      const chartShell = el("div", { className: "chart-shell" });
+      if (dataset) {
+        const rendered = renderAssociationChart(dataset, controls);
+        if (rendered && rendered.svg) {
+          chartShell.appendChild(rendered.svg);
+          chartWrap.appendChild(chartShell);
+          panel.appendChild(chartWrap);
+          panel.appendChild(renderAssociationLegend(dataset, controls.colorBy));
+          panel.appendChild(rendered.summary);
+        } else {
+          chartWrap.appendChild(el("div", { className: "placeholder", text: "No valid association payload available." }));
+          panel.appendChild(chartWrap);
+        }
+      } else {
+        chartWrap.appendChild(el("div", { className: "placeholder", text: "No association payload available for the selected tier." }));
+        panel.appendChild(chartWrap);
+      }
+      return panel;
+    }
+
+    function renderModuleHeatmapView(view) {
+      const dataset = report.datasets.module_heatmap || null;
+      const controls = getViewControls(view.id);
+      const panel = el("section", { className: "panel" });
+      panel.appendChild(el("div", { className: "panel-head" }, [
+        el("h2", { className: "panel-title", text: dataset ? dataset.title : view.title }),
+        el("p", {
+          className: "panel-note",
+          text: "Filter modules and metabolites, sort rows and columns, and export the current Spearman association heatmap."
+        })
+      ]));
+
+      const schema = report.schemas[view.schema_id];
+      const controlsRow = el("div", { className: "controls" });
+      for (const control of schema.controls || []) {
+        controlsRow.appendChild(renderControlField(view, control));
+      }
+      panel.appendChild(controlsRow);
+
+      const actionBar = el("div", { className: "action-bar" }, [
+        el("button", { text: "Export SVG", onclick: () => {
+          const svg = chartShell.querySelector("svg");
+          if (svg) downloadSvg(svg, "module_heatmap.svg");
+        }}),
+        el("button", { text: "Reset", onclick: () => resetControls(view.id) })
+      ]);
+      panel.appendChild(actionBar);
+
+      const chartWrap = el("div", { className: "chart-wrap" });
+      const chartShell = el("div", { className: "chart-shell" });
+      if (dataset) {
+        const rendered = renderModuleHeatmapChart(dataset, controls);
+        if (rendered && rendered.svg) {
+          chartShell.appendChild(rendered.svg);
+          chartWrap.appendChild(chartShell);
+          panel.appendChild(chartWrap);
+          panel.appendChild(renderModuleHeatmapSummary(dataset, rendered));
+        } else {
+          chartWrap.appendChild(el("div", { className: "placeholder", text: "No module-metabolite cells are available for the selected filters." }));
+          panel.appendChild(chartWrap);
+        }
+      } else {
+        chartWrap.appendChild(el("div", { className: "placeholder", text: "No module-metabolite association payload available." }));
+        panel.appendChild(chartWrap);
+      }
+      return panel;
+    }
+
+    function renderNetworkView(view) {
+      const dataset = getNetworkDataset();
+      const controls = getViewControls(view.id);
+      const panel = el("section", { className: "panel" });
+      panel.appendChild(el("div", { className: "panel-head" }, [
+        el("h2", { className: "panel-title", text: dataset ? dataset.title : view.title }),
+        el("p", {
+          className: "panel-note",
+          text: "Filter network edges, inspect nodes by hover, and click a node to highlight first-order neighbors."
+        })
+      ]));
+
+      const schema = report.schemas[view.schema_id];
+      const controlsRow = el("div", { className: "controls" });
+      for (const control of schema.controls || []) {
+        controlsRow.appendChild(renderControlField(view, control));
+      }
+      panel.appendChild(controlsRow);
+
+      const actionBar = el("div", { className: "action-bar" }, [
+        el("button", { text: "Export SVG", onclick: () => {
+          const svg = chartShell.querySelector("svg");
+          if (svg) downloadSvg(svg, `${dataset ? dataset.id : "network"}.svg`);
+        }}),
+        el("button", { text: "Reset", onclick: () => resetControls(view.id) })
+      ]);
+      panel.appendChild(actionBar);
+
+      const chartWrap = el("div", { className: "chart-wrap" });
+      const chartShell = el("div", { className: "chart-shell" });
+      if (dataset) {
+        const rendered = renderNetworkChart(dataset, controls);
+        if (rendered && rendered.svg) {
+          chartShell.appendChild(rendered.svg);
+          chartWrap.appendChild(chartShell);
+          panel.appendChild(chartWrap);
+          panel.appendChild(renderNetworkSummary(dataset, rendered));
+        } else {
+          chartWrap.appendChild(el("div", { className: "placeholder", text: "No network edges match the selected filters." }));
+          panel.appendChild(chartWrap);
+        }
+      } else {
+        chartWrap.appendChild(el("div", { className: "placeholder", text: "No network payload available for the selected tier." }));
+        panel.appendChild(chartWrap);
+      }
+      return panel;
+    }
+
+    function renderPlaceholderView(view) {
+      const panel = el("section", { className: "panel" });
+      panel.appendChild(el("div", { className: "panel-head" }, [
+        el("h2", { className: "panel-title", text: view.title }),
+        el("p", { className: "panel-note", text: "This view is reserved for a later stage." })
+      ]));
+      panel.appendChild(el("div", { className: "placeholder", text: view.description || "Not implemented yet." }));
+      return panel;
+    }
+
+    function renderMain() {
+      const main = el("main", { className: "main" });
+      const view = getView(state.activeViewId) || report.views[0];
+      if (view.kind === "pca") {
+        main.appendChild(renderPcaView(view));
+      } else if (view.kind === "association") {
+        main.appendChild(renderAssociationView(view));
+      } else if (view.kind === "module_heatmap") {
+        main.appendChild(renderModuleHeatmapView(view));
+      } else if (view.kind === "network") {
+        main.appendChild(renderNetworkView(view));
+      } else {
+        main.appendChild(renderPlaceholderView(view));
+      }
+      return main;
+    }
+
+    function render() {
+      clear(app);
+      app.appendChild(renderSidebar());
+      try {
+        app.appendChild(renderMain());
+      } catch (error) {
+        app.appendChild(renderRuntimeError(error));
+      }
+    }
+
+    render();
   </script>
 </body>
 </html>
 """
 
 
+def render_interactive_report_html(engine, cfg) -> str:
+    model = _build_interactive_report_model(engine, cfg)
+    html_text = _interactive_html_template()
+    html_text = html_text.replace("__PROJECT_NAME__", html.escape(str(cfg.project_name)))
+    html_text = html_text.replace("__PAYLOAD__", _json_script_payload(model.to_dict()))
+    return html_text
+
+
 def generate_interactive_visual_report(engine, cfg, report_path: str | Path) -> None:
     output_path = Path(report_path)
     safe_mkdir(output_path.parent)
-
-    tx_matrix = np.asarray(engine.adata.X, dtype=np.float32)
-    metab_matrix_raw = engine.adata.obsm.get("metabolomics_scaled", engine.adata.obsm.get("metabolomics"))
-    if isinstance(metab_matrix_raw, pd.DataFrame):
-        metab_matrix = metab_matrix_raw.to_numpy(dtype=np.float32, copy=False)
-    elif metab_matrix_raw is None:
-        metab_matrix = np.empty((0, 0), dtype=np.float32)
-    else:
-        metab_matrix = np.asarray(metab_matrix_raw, dtype=np.float32)
-
-    html_text = _interactive_html_template()
-    html_text = html_text.replace("__PROJECT_NAME__", html.escape(str(cfg.project_name)))
-    html_text = html_text.replace("__SUMMARY_PAYLOAD__", _json_dumps(_build_summary_payload(engine, cfg)))
-    html_text = html_text.replace(
-        "__TRANSCRIPTOME_PCA_PAYLOAD__",
-        _json_dumps(_build_pca_payload(tx_matrix, engine.adata.obs_names.astype(str).tolist(), "Transcriptome PCA", cfg)),
-    )
-    html_text = html_text.replace(
-        "__METABOLOME_PCA_PAYLOAD__",
-        _json_dumps(_build_pca_payload(metab_matrix, engine.adata.obs_names.astype(str).tolist(), "Metabolome PCA", cfg)),
-    )
-    html_text = html_text.replace(
-        "__TOTAL_NETWORK_PAYLOAD__",
-        _json_dumps(_build_network_payload(engine, "total", max_edges=cfg.network_plot_top_edges)),
-    )
-    html_text = html_text.replace(
-        "__HIGH_NETWORK_PAYLOAD__",
-        _json_dumps(_build_network_payload(engine, "high_confidence", max_edges=cfg.network_plot_top_edges)),
-    )
-
-    output_path.write_text(html_text, encoding="utf-8")
+    output_path.write_text(render_interactive_report_html(engine, cfg), encoding="utf-8")
 
 
 __all__ = [
     "PALETTE",
+    "ControlSpec",
+    "InteractiveReportModel",
+    "InteractiveViewSpec",
+    "_build_module_heatmap_payload",
+    "_build_network_payload",
+    "_build_pca_payload",
+    "_build_summary_payload",
+    "_interactive_html_template",
     "_json_default",
     "_json_dumps",
-    "_build_summary_payload",
-    "_build_pca_payload",
-    "_build_network_payload",
-    "_interactive_html_template",
     "generate_interactive_visual_report",
+    "render_interactive_report_html",
 ]

@@ -75,6 +75,12 @@ from .visualization.static.regression import (
     _module_top_metabolite_regression_rows,
     plot_module_top_metabolite_regression_panels,
 )
+from .visualization.static.upset import (
+    EVIDENCE_SPECS,
+    _build_evidence_intersection_table,
+    _coerce_evidence_edge_table,
+    plot_association_evidence_upset,
+)
 from .visualization.static.module import (
     _significance_star,
     _shared_sample_id_field,
@@ -181,6 +187,10 @@ __all__ = [
     "plot_top_edge_scatter_panels",
     "_module_top_metabolite_regression_rows",
     "plot_module_top_metabolite_regression_panels",
+    "EVIDENCE_SPECS",
+    "_coerce_evidence_edge_table",
+    "_build_evidence_intersection_table",
+    "plot_association_evidence_upset",
     "_significance_star",
     "_shared_sample_id_field",
     "_coerce_module_eigengene_df",

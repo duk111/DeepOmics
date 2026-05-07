@@ -19,6 +19,7 @@ FIGURE_FILE_PREFIXES = {
     "module_metabolite_association_heatmap": "F05_Module_Metabolite_Association_Heatmap",
     "compressed_circos_network": "F06_Compressed_Circos_Network",
     "floating_cnet_circos_network": "F07_Floating_CNet_Circos_Network",
+    "association_evidence_upset": "F08_Association_Evidence_UpSet",
 }
 
 

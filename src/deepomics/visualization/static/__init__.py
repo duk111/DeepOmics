@@ -21,6 +21,7 @@ from .pca import (
     plot_transcriptome_pca_subgroups,
 )
 from .regression import plot_module_top_metabolite_regression_panels, plot_top_edge_scatter_panels
+from .upset import plot_association_evidence_upset
 
 __all__ = [
     "PALETTE",
@@ -43,4 +44,5 @@ __all__ = [
     "plot_module_metabolite_association_heatmap",
     "plot_compressed_circos_network",
     "plot_floating_cnet_circos_network",
+    "plot_association_evidence_upset",
 ]

@@ -48,6 +48,7 @@ class AnalysisConfig:
     top_pairs_plot_n: int = 6
     support_plot_top_metabolites: int = 20
     top_key_genes_plot_n: int = 20
+    upset_plot_top_intersections: int = 30
 
     enable_module_detection: bool = True
     module_corr_method: str = "spearman"
@@ -112,6 +113,8 @@ class AnalysisConfig:
             raise ValueError("support_plot_top_metabolites must be at least 1.")
         if self.top_key_genes_plot_n < 1:
             raise ValueError("top_key_genes_plot_n must be at least 1.")
+        if self.upset_plot_top_intersections < 1:
+            raise ValueError("upset_plot_top_intersections must be at least 1.")
 
         if str(self.module_corr_method).lower().strip() not in {"spearman"}:
             raise ValueError("module_corr_method currently only supports 'spearman'.")

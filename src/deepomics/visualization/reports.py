@@ -65,6 +65,7 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         f"- `plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['association_evidence_upset']}.pdf|svg|png`",
         "- `DeepOmics_Interactive_Report.html`",
     ]
     Path(report_path).write_text("\n".join(lines), encoding="utf-8")
@@ -98,6 +99,7 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap'])}.pdf|svg|png</code></td><td>Module-metabolite association heatmap colored by Spearman rho with significance stars.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['compressed_circos_network'])}.pdf|svg|png</code></td><td>Compact Circos overview using all unique genes and metabolites from T03 only.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['floating_cnet_circos_network'])}.pdf|svg|png</code></td><td>Floating circular cnetplot-style network using T03 only, with circular non-overlapping nodes and metabolite-colored edges.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['association_evidence_upset'])}.pdf|svg|png</code></td><td>Global UpSet plot showing overlap among PCC, Spearman, MI, ElasticNet, and XGBoost evidence for metabolite-gene candidate edges.</td></tr>",
     ])
 
     html_text = f"""<!DOCTYPE html>
@@ -200,7 +202,8 @@ def generate_report_plots(engine, cfg) -> None:
         f"15. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png for the module-metabolite association heatmap.\n"
         f"16. Use plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png for the compact T03-only Circos overview.\n"
         f"17. Use plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png for the floating circular T03-only cnetplot-style overview.\n"
-        "18. Use DeepOmics_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
+        f"18. Use plots/{FIGURE_FILE_PREFIXES['association_evidence_upset']}.pdf|svg|png for global evidence-overlap interpretation across candidate metabolite-gene edges.\n"
+        "19. Use DeepOmics_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
     )
     (plots_dir / "visualization_notes.txt").write_text(notes, encoding="utf-8")
 
