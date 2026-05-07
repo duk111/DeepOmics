@@ -24,6 +24,8 @@ from .static.base import (
 )
 from .static.network import _build_circos_module_color_map
 from .static.pca import _compute_pca_result, _load_pca_group_table
+from .static.regression import _module_annotation_maps
+from .static.module import _coerce_module_eigengene_df, _module_order_from_summary
 
 
 PALETTE = {
@@ -284,6 +286,16 @@ def _safe_stats_from_vectors(x_values: np.ndarray, y_values: np.ndarray) -> dict
     return result
 
 
+def _numeric_matrix_payload(df: pd.DataFrame, columns: list[str]) -> dict[str, list[float | None]]:
+    payload: dict[str, list[float | None]] = {}
+    for column in columns:
+        if column not in df.columns:
+            continue
+        values = pd.to_numeric(df[column], errors="coerce").to_numpy(dtype=float, copy=False)
+        payload[str(column)] = [float(value) if np.isfinite(value) else None for value in values.tolist()]
+    return payload
+
+
 def _build_pca_payload(matrix, sample_names, title: str, cfg, group_df: pd.DataFrame | None = None) -> dict[str, Any] | None:
     values = matrix.to_numpy(dtype=float, copy=False) if isinstance(matrix, pd.DataFrame) else np.asarray(matrix, dtype=float)
     if values.ndim != 2 or values.shape[0] < 2 or values.shape[1] < 2:
@@ -300,7 +312,7 @@ def _build_pca_payload(matrix, sample_names, title: str, cfg, group_df: pd.DataF
         title,
         cfg,
         group_df=group_df,
-        max_components=2,
+        max_components=5,
     )
     if pca_result is None:
         return None
@@ -309,6 +321,7 @@ def _build_pca_payload(matrix, sample_names, title: str, cfg, group_df: pd.DataF
     var_exp = np.asarray(pca_result["var_exp"], dtype=float)
     if coords.shape[1] < 2 or var_exp.size < 2:
         return None
+    component_count = min(5, int(coords.shape[1]), int(var_exp.size))
 
     plot_group_df = pca_result.get("plot_group_df")
     plot_sample_names = [str(name) for name in pca_result["plot_sample_names"]]
@@ -337,6 +350,7 @@ def _build_pca_payload(matrix, sample_names, title: str, cfg, group_df: pd.DataF
                     "label": sample_name,
                     "x": float(coords[idx, 0]),
                     "y": float(coords[idx, 1]),
+                    "components": [float(coords[idx, comp_idx]) for comp_idx in range(component_count)],
                     "group1": group1,
                     "group2": group2,
                     "group1Color": group1_color_map.get(group1, "#6b7280"),
@@ -357,6 +371,7 @@ def _build_pca_payload(matrix, sample_names, title: str, cfg, group_df: pd.DataF
                     "label": sample_name,
                     "x": float(coords[idx, 0]),
                     "y": float(coords[idx, 1]),
+                    "components": [float(coords[idx, comp_idx]) for comp_idx in range(component_count)],
                     "group1": "Missing",
                     "group2": "Missing",
                     "group1Color": "#6b7280",
@@ -370,7 +385,11 @@ def _build_pca_payload(matrix, sample_names, title: str, cfg, group_df: pd.DataF
         "title": title,
         "kind": "pca",
         "sampleCount": len(points),
-        "varianceExplained": {"pc1": float(var_exp[0]), "pc2": float(var_exp[1])},
+        "componentCount": component_count,
+        "varianceExplained": {
+            **{f"pc{idx + 1}": float(var_exp[idx]) for idx in range(component_count)},
+            "components": [float(var_exp[idx]) for idx in range(component_count)],
+        },
         "points": points,
         "groupOptions": {
             "group1": {
@@ -510,6 +529,7 @@ def _build_association_payload(engine, cfg, tier: str, group_df: pd.DataFrame | 
     return {
         "id": f"associations.{tier}",
         "title": title,
+        "kind": "gene_metabolite",
         "tier": tier,
         "sampleIds": sample_names,
         "sampleAnnotations": sample_annotations_payload["sampleAnnotations"],
@@ -522,6 +542,180 @@ def _build_association_payload(engine, cfg, tier: str, group_df: pd.DataFrame | 
             "edgeId": default_edge["id"],
             "gene": default_edge["gene"],
             "metabolite": default_edge["metabolite"],
+        },
+    }
+
+
+def _build_gene_metabolite_regression_payload(engine, cfg) -> dict[str, Any] | None:
+    edge_df = engine.ml_results.get("high_confidence_network_df", pd.DataFrame())
+    if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
+        edge_df = engine.ml_results.get("total_association_network_df", pd.DataFrame())
+    if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
+        return None
+
+    required_columns = {"Gene", "Metabolite", "EdgeWeight"}
+    if not required_columns.issubset(edge_df.columns):
+        return None
+
+    gene_df = _coerce_association_source_df(engine, engine.adata, "gene_expression_df", _gene_expression_df)
+    metab_df = _coerce_association_source_df(engine, engine.adata, "metabolomics_df", _metabolomics_df)
+    if gene_df.empty or metab_df.empty:
+        return None
+
+    sample_names = [sample for sample in gene_df.index.astype(str).tolist() if sample in set(metab_df.index.astype(str))]
+    if len(sample_names) < 2:
+        return None
+    gene_df = gene_df.reindex(sample_names)
+    metab_df = metab_df.reindex(sample_names)
+
+    ranked = edge_df.copy()
+    ranked["Gene"] = ranked["Gene"].astype(str).str.strip()
+    ranked["Metabolite"] = ranked["Metabolite"].astype(str).str.strip()
+    ranked["EdgeWeight"] = pd.to_numeric(ranked["EdgeWeight"], errors="coerce").fillna(0.0)
+    if "RRARank" in ranked.columns:
+        ranked["RRARank"] = pd.to_numeric(ranked["RRARank"], errors="coerce")
+    else:
+        ranked["RRARank"] = np.nan
+    ranked = ranked.loc[ranked["Gene"].ne("") & ranked["Metabolite"].ne("")].copy()
+    if ranked.empty:
+        return None
+
+    ranked = ranked.sort_values(["EdgeWeight", "RRARank", "Gene", "Metabolite"], ascending=[False, True, True, True], kind="mergesort")
+    gene_to_module, gene_to_color, _module_to_color = _module_annotation_maps(engine)
+
+    gene_order = [gene for gene in _ordered_unique(ranked["Gene"].astype(str).tolist()) if gene in gene_df.columns]
+    metabolite_order = [metabolite for metabolite in _ordered_unique(ranked["Metabolite"].astype(str).tolist()) if metabolite in metab_df.columns]
+    if not gene_order or not metabolite_order:
+        return None
+
+    edge_lookup: dict[str, dict[str, Any]] = {}
+    for row in ranked.itertuples(index=False):
+        gene = str(row.Gene)
+        metabolite = str(row.Metabolite)
+        if gene not in gene_df.columns or metabolite not in metab_df.columns:
+            continue
+        pair_id = f"gene||{gene}||{metabolite}"
+        if pair_id in edge_lookup:
+            continue
+        edge_lookup[pair_id] = {
+            "id": pair_id,
+            "gene": gene,
+            "metabolite": metabolite,
+            "label": f"{gene} vs {metabolite}",
+            "edgeWeight": float(row.EdgeWeight),
+            "rraRank": int(getattr(row, "RRARank", 0)) if hasattr(row, "RRARank") and pd.notna(getattr(row, "RRARank")) else None,
+        }
+
+    default_gene = gene_order[0]
+    default_metabolite = metabolite_order[0]
+    return {
+        "id": "regression.gene_metabolite",
+        "title": "Gene-Metabolite Regression",
+        "kind": "gene_metabolite",
+        "sampleIds": sample_names,
+        "topEdges": list(edge_lookup.values()),
+        "geneOptions": [{"value": gene, "label": gene} for gene in gene_order],
+        "metaboliteOptions": [{"value": metabolite, "label": metabolite} for metabolite in metabolite_order],
+        "xMatrix": _numeric_matrix_payload(gene_df, gene_order),
+        "yMatrix": _numeric_matrix_payload(metab_df, metabolite_order),
+        "geneModules": {
+            gene: {
+                "module": gene_to_module.get(gene, "Unassigned"),
+                "color": gene_to_color.get(gene, PALETTE["gene"]),
+            }
+            for gene in gene_order
+        },
+        "defaultSelection": {
+            "edgeId": f"gene||{default_gene}||{default_metabolite}",
+            "gene": default_gene,
+            "metabolite": default_metabolite,
+        },
+    }
+
+
+def _build_module_metabolite_regression_payload(engine, cfg) -> dict[str, Any] | None:
+    eigengenes_df = _coerce_module_eigengene_df(engine.ml_results.get("module_eigengenes_df", pd.DataFrame()))
+    if eigengenes_df.empty:
+        return None
+
+    metab_df = _coerce_association_source_df(engine, engine.adata, "metabolomics_df", _metabolomics_df)
+    if metab_df.empty:
+        return None
+
+    _gene_to_module, _gene_to_color, module_to_color = _module_annotation_maps(engine)
+    module_order = _module_order_from_summary(
+        engine.ml_results.get("module_summary_df", pd.DataFrame()),
+        eigengenes_df.columns.astype(str).tolist(),
+    )
+    module_order = [module for module in module_order if module in eigengenes_df.columns]
+    if not module_order:
+        return None
+
+    sample_names = [sample for sample in eigengenes_df.index.astype(str).tolist() if sample in set(metab_df.index.astype(str))]
+    if len(sample_names) < 2:
+        return None
+    eigengenes_df = eigengenes_df.reindex(sample_names)
+    metab_df = metab_df.reindex(sample_names)
+
+    assoc_df = _get_module_metabolite_association_df(engine)
+    metabolite_order: list[str] = []
+    pair_lookup: dict[str, dict[str, Any]] = {}
+    if isinstance(assoc_df, pd.DataFrame) and not assoc_df.empty and {"Module", "Metabolite"}.issubset(assoc_df.columns):
+        assoc_work = assoc_df.copy()
+        assoc_work["Module"] = assoc_work["Module"].astype(str).str.strip()
+        assoc_work["Metabolite"] = assoc_work["Metabolite"].astype(str).str.strip()
+        if "SpearmanRho" in assoc_work.columns:
+            assoc_work["SpearmanRho"] = pd.to_numeric(assoc_work["SpearmanRho"], errors="coerce")
+            assoc_work["_AbsRho"] = assoc_work["SpearmanRho"].abs()
+        else:
+            assoc_work["SpearmanRho"] = np.nan
+            assoc_work["_AbsRho"] = 0.0
+        assoc_work = assoc_work.loc[
+            assoc_work["Module"].isin(module_order)
+            & assoc_work["Metabolite"].isin(metab_df.columns.astype(str))
+        ].copy()
+        if not assoc_work.empty:
+            assoc_work["_ModuleOrder"] = assoc_work["Module"].map({module: idx for idx, module in enumerate(module_order)}).fillna(len(module_order)).astype(int)
+            assoc_work = assoc_work.sort_values(["_ModuleOrder", "_AbsRho", "Metabolite"], ascending=[True, False, True], kind="mergesort")
+            metabolite_order = _ordered_unique(assoc_work["Metabolite"].astype(str).tolist())
+            for row in assoc_work.itertuples(index=False):
+                module_name = str(row.Module)
+                metabolite = str(row.Metabolite)
+                pair_lookup[f"module||{module_name}||{metabolite}"] = {
+                    "id": f"module||{module_name}||{metabolite}",
+                    "module": module_name,
+                    "gene": module_name,
+                    "metabolite": metabolite,
+                    "label": f"{module_name} module vs {metabolite}",
+                    "spearmanRho": float(row.SpearmanRho) if pd.notna(row.SpearmanRho) else None,
+                }
+
+    metabolite_order = _ordered_unique([*metabolite_order, *metab_df.columns.astype(str).tolist()])
+    metabolite_order = [metabolite for metabolite in metabolite_order if metabolite in metab_df.columns]
+    if not metabolite_order:
+        return None
+
+    fallback_colors = _build_circos_module_color_map(module_order)
+    default_module = module_order[0]
+    default_metabolite = metabolite_order[0]
+    return {
+        "id": "regression.module_metabolite",
+        "title": "Module-Metabolite Regression",
+        "kind": "module_metabolite",
+        "sampleIds": sample_names,
+        "topEdges": list(pair_lookup.values()),
+        "geneOptions": [{"value": module, "label": module} for module in module_order],
+        "metaboliteOptions": [{"value": metabolite, "label": metabolite} for metabolite in metabolite_order],
+        "xMatrix": _numeric_matrix_payload(eigengenes_df, module_order),
+        "yMatrix": _numeric_matrix_payload(metab_df, metabolite_order),
+        "moduleColors": {
+            module: module_to_color.get(module, fallback_colors.get(module, "#9ca3af"))
+            for module in module_order
+        },
+        "defaultSelection": {
+            "edgeId": f"module||{default_module}||{default_metabolite}",
+            "gene": default_module,
+            "metabolite": default_metabolite,
         },
     }
 
@@ -957,6 +1151,38 @@ def _build_pca_schema(default_dataset: str) -> dict[str, Any]:
                 ],
             },
             {
+                "id": "xComponent",
+                "type": "select",
+                "label": "X component",
+                "default": 1,
+                "options": [
+                    {"value": 1, "label": "PC1"},
+                    {"value": 2, "label": "PC2"},
+                    {"value": 3, "label": "PC3"},
+                    {"value": 4, "label": "PC4"},
+                    {"value": 5, "label": "PC5"},
+                ],
+            },
+            {
+                "id": "yComponent",
+                "type": "select",
+                "label": "Y component",
+                "default": 2,
+                "options": [
+                    {"value": 1, "label": "PC1"},
+                    {"value": 2, "label": "PC2"},
+                    {"value": 3, "label": "PC3"},
+                    {"value": 4, "label": "PC4"},
+                    {"value": 5, "label": "PC5"},
+                ],
+            },
+            {
+                "id": "showGroupEnvelope",
+                "type": "toggle",
+                "label": "Group envelope",
+                "default": True,
+            },
+            {
                 "id": "pointSize",
                 "type": "range",
                 "label": "Point size",
@@ -993,25 +1219,25 @@ def _build_pca_schema(default_dataset: str) -> dict[str, Any]:
     }
 
 
-def _build_association_schema(default_tier: str, default_gene: str, default_metabolite: str) -> dict[str, Any]:
+def _build_association_schema(default_pair_type: str, default_gene: str, default_metabolite: str) -> dict[str, Any]:
     return {
         "id": "association.scatter",
         "title": "Association Scatter Studio",
         "controls": [
             {
-                "id": "tier",
+                "id": "pairType",
                 "type": "select",
-                "label": "Network tier",
-                "default": default_tier,
+                "label": "Type",
+                "default": default_pair_type,
                 "options": [
-                    {"value": "high_confidence", "label": "High-confidence"},
-                    {"value": "total", "label": "Total"},
+                    {"value": "gene_metabolite", "label": "Gene-metabolite"},
+                    {"value": "module_metabolite", "label": "Module-metabolite"},
                 ],
             },
             {
                 "id": "topEdgeId",
                 "type": "select",
-                "label": "Top edge",
+                "label": "Pair",
                 "default": "",
                 "optionsSource": "topEdges",
                 "allowEmpty": True,
@@ -1020,7 +1246,7 @@ def _build_association_schema(default_tier: str, default_gene: str, default_meta
             {
                 "id": "gene",
                 "type": "select",
-                "label": "Gene",
+                "label": "Gene / module",
                 "default": default_gene,
                 "optionsSource": "geneOptions",
             },
@@ -1030,17 +1256,6 @@ def _build_association_schema(default_tier: str, default_gene: str, default_meta
                 "label": "Metabolite",
                 "default": default_metabolite,
                 "optionsSource": "metaboliteOptions",
-            },
-            {
-                "id": "colorBy",
-                "type": "select",
-                "label": "Color",
-                "default": "group1",
-                "options": [
-                    {"value": "group1", "label": "Group 1"},
-                    {"value": "group2", "label": "Group 2"},
-                    {"value": "none", "label": "None"},
-                ],
             },
             {
                 "id": "pointSize",
@@ -1319,6 +1534,8 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
     )
     association_high_payload = _build_association_payload(engine, cfg, "high_confidence", group_df=group_df)
     association_total_payload = _build_association_payload(engine, cfg, "total", group_df=group_df)
+    gene_metabolite_payload = _build_gene_metabolite_regression_payload(engine, cfg)
+    module_metabolite_payload = _build_module_metabolite_regression_payload(engine, cfg)
     module_heatmap_payload = _build_module_heatmap_payload(engine, cfg)
     network_default_top_edges = max(1, int(getattr(cfg, "network_plot_top_edges", 120)))
     network_payload_max_edges = max(1000, network_default_top_edges)
@@ -1340,12 +1557,14 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
         "pca.metabolome": metabolome_payload,
         "association.high_confidence": association_high_payload,
         "association.total": association_total_payload,
+        "association.gene_metabolite": gene_metabolite_payload,
+        "association.module_metabolite": module_metabolite_payload,
         "module_heatmap": module_heatmap_payload,
         "network.high_confidence": network_high_payload,
         "network.total": network_total_payload,
     }
 
-    association_default = association_high_payload or association_total_payload
+    association_default = gene_metabolite_payload or module_metabolite_payload
     association_default_gene = ""
     association_default_metabolite = ""
     if association_default is not None and association_default.get("defaultSelection"):
@@ -1368,8 +1587,8 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
             kind="association",
             schema_id="association.scatter",
             enabled=association_default is not None,
-            description="Sample-level scatter for gene-metabolite association pairs.",
-            data_key="association.high_confidence",
+            description="Sample-level regression scatter for gene-metabolite and module-metabolite pairs.",
+            data_key="association.gene_metabolite",
         ),
         InteractiveViewSpec(
             id="module_heatmap",
@@ -1400,7 +1619,7 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
     schemas = {
         "pca.scatter": _build_pca_schema(default_dataset),
         "association.scatter": _build_association_schema(
-            "high_confidence" if association_high_payload is not None else "total",
+            "gene_metabolite" if gene_metabolite_payload is not None else "module_metabolite",
             association_default_gene,
             association_default_metabolite,
         ),
@@ -1418,6 +1637,9 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
     pca_defaults = {
         "dataset": default_dataset,
         "colorBy": "group1",
+        "xComponent": 1,
+        "yComponent": 2,
+        "showGroupEnvelope": True,
         "pointSize": 5,
         "showLabels": False,
         "width": 900,
@@ -1429,11 +1651,10 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
         "controls": {
             "pca": pca_defaults,
             "association": {
-                "tier": "high_confidence" if association_high_payload is not None else "total",
+                "pairType": "gene_metabolite" if gene_metabolite_payload is not None else "module_metabolite",
                 "topEdgeId": "",
                 "gene": association_default_gene,
                 "metabolite": association_default_metabolite,
-                "colorBy": "group1",
                 "pointSize": 5,
                 "alpha": 0.85,
                 "showLabels": False,
@@ -1831,8 +2052,8 @@ def _interactive_html_template() -> str:
 
     function getAssociationDataset() {
       const controls = getViewControls("association");
-      const tier = controls.tier === "total" ? "total" : "high_confidence";
-      return report.datasets[`association.${tier}`] || report.datasets["association.high_confidence"] || report.datasets["association.total"];
+      const pairType = controls.pairType === "module_metabolite" ? "module_metabolite" : "gene_metabolite";
+      return report.datasets[`association.${pairType}`] || report.datasets["association.gene_metabolite"] || report.datasets["association.module_metabolite"] || null;
     }
 
     function getNetworkDataset() {
@@ -1850,35 +2071,69 @@ def _interactive_html_template() -> str:
     }
 
     function findAssociationEdge(dataset, controls) {
-      if (!dataset || !Array.isArray(dataset.topEdges) || dataset.topEdges.length === 0) return null;
+      if (!dataset) return null;
       const topEdgeId = String(controls.topEdgeId || "").trim();
-      const gene = String(controls.gene || "").trim();
-      const metabolite = String(controls.metabolite || "").trim();
+      const geneOptions = Array.isArray(dataset.geneOptions) ? dataset.geneOptions : [];
+      const metaboliteOptions = Array.isArray(dataset.metaboliteOptions) ? dataset.metaboliteOptions : [];
+      let gene = String(controls.gene || "").trim();
+      let metabolite = String(controls.metabolite || "").trim();
 
-      if (topEdgeId) {
-        const byId = dataset.topEdges.find(edge => edge.id === topEdgeId);
-        if (byId) return byId;
+      let known = null;
+      if (topEdgeId && Array.isArray(dataset.topEdges)) {
+        known = dataset.topEdges.find(edge => edge.id === topEdgeId) || null;
+        if (known) {
+          gene = String(known.gene || known.module || gene).trim();
+          metabolite = String(known.metabolite || metabolite).trim();
+        }
       }
-      const exact = dataset.topEdges.find(edge => edge.gene === gene && edge.metabolite === metabolite);
-      if (exact) return exact;
-      const geneMatch = dataset.topEdges.find(edge => edge.gene === gene);
-      if (geneMatch) return geneMatch;
-      const metabMatch = dataset.topEdges.find(edge => edge.metabolite === metabolite);
-      if (metabMatch) return metabMatch;
-      return dataset.topEdges[0] || null;
+      if (!gene || !dataset.xMatrix || !Object.prototype.hasOwnProperty.call(dataset.xMatrix, gene)) {
+        gene = geneOptions.length ? String(geneOptions[0].value) : "";
+      }
+      if (!metabolite || !dataset.yMatrix || !Object.prototype.hasOwnProperty.call(dataset.yMatrix, metabolite)) {
+        metabolite = metaboliteOptions.length ? String(metaboliteOptions[0].value) : "";
+      }
+      if (!gene || !metabolite || !dataset.xMatrix?.[gene] || !dataset.yMatrix?.[metabolite]) return null;
+
+      const pairPrefix = dataset.kind === "module_metabolite" ? "module" : "gene";
+      const pairId = `${pairPrefix}||${gene}||${metabolite}`;
+      if (!known && Array.isArray(dataset.topEdges)) known = dataset.topEdges.find(edge => edge.id === pairId) || null;
+
+      const geneInfo = dataset.geneModules?.[gene] || {};
+      const moduleName = dataset.kind === "module_metabolite" ? gene : (geneInfo.module || "Unassigned");
+      const moduleColor = dataset.kind === "module_metabolite"
+        ? (dataset.moduleColors?.[gene] || "#9ca3af")
+        : (geneInfo.color || "#4c78a8");
+      return {
+        ...(known || {}),
+        id: pairId,
+        kind: dataset.kind,
+        gene,
+        module: moduleName,
+        metabolite,
+        label: dataset.kind === "module_metabolite" ? `${gene} module vs ${metabolite}` : `${gene} vs ${metabolite}`,
+        xLabel: dataset.kind === "module_metabolite" ? `${gene} module eigengene` : gene,
+        yLabel: metabolite,
+        moduleColor,
+        pointColor: moduleColor,
+        rLabel: dataset.kind === "module_metabolite" ? "rho" : "r",
+        rValue: null,
+        x: dataset.xMatrix[gene],
+        y: dataset.yMatrix[metabolite],
+      };
     }
 
     function syncAssociationControlsFromDataset(controls, dataset) {
-      if (!dataset || !Array.isArray(dataset.topEdges) || dataset.topEdges.length === 0) {
+      if (!dataset) {
         controls.topEdgeId = "";
         controls.gene = "";
         controls.metabolite = "";
         return;
       }
 
-      const current = findAssociationEdge(dataset, controls) || dataset.topEdges[0];
+      const current = findAssociationEdge(dataset, controls);
       if (!current) return;
-      controls.topEdgeId = current.id;
+      const known = Array.isArray(dataset.topEdges) ? dataset.topEdges.find(edge => edge.id === current.id) : null;
+      controls.topEdgeId = known ? current.id : "";
       controls.gene = current.gene;
       controls.metabolite = current.metabolite;
     }
@@ -1889,31 +2144,25 @@ def _interactive_html_template() -> str:
 
       if (viewId === "association") {
         const dataset = getAssociationDataset();
-        if (key === "tier") {
+        if (key === "pairType") {
           syncAssociationControlsFromDataset(controls, dataset);
         } else if (key === "topEdgeId") {
           const edge = findAssociationEdge(dataset, controls);
           if (edge) {
-            controls.topEdgeId = edge.id;
+            controls.topEdgeId = Array.isArray(dataset.topEdges) && dataset.topEdges.find(item => item.id === edge.id) ? edge.id : "";
             controls.gene = edge.gene;
             controls.metabolite = edge.metabolite;
           }
         } else if (key === "gene") {
-          const geneEdge = dataset && Array.isArray(dataset.topEdges) ? dataset.topEdges.find(edge => edge.gene === String(value).trim()) : null;
-          if (geneEdge) {
-            controls.topEdgeId = geneEdge.id;
-            controls.metabolite = geneEdge.metabolite;
-          } else {
-            controls.topEdgeId = "";
-          }
+          controls.topEdgeId = "";
+          const edge = findAssociationEdge(dataset, controls);
+          controls.topEdgeId = edge && Array.isArray(dataset.topEdges) && dataset.topEdges.find(item => item.id === edge.id) ? edge.id : "";
+          if (edge) controls.metabolite = edge.metabolite;
         } else if (key === "metabolite") {
-          const metabEdge = dataset && Array.isArray(dataset.topEdges) ? dataset.topEdges.find(edge => edge.metabolite === String(value).trim()) : null;
-          if (metabEdge) {
-            controls.topEdgeId = metabEdge.id;
-            controls.gene = metabEdge.gene;
-          } else {
-            controls.topEdgeId = "";
-          }
+          controls.topEdgeId = "";
+          const edge = findAssociationEdge(dataset, controls);
+          controls.topEdgeId = edge && Array.isArray(dataset.topEdges) && dataset.topEdges.find(item => item.id === edge.id) ? edge.id : "";
+          if (edge) controls.gene = edge.gene;
         }
       } else if (viewId === "network_explorer") {
         if (key !== "selectedNodeId") {
@@ -2072,46 +2321,10 @@ def _interactive_html_template() -> str:
     }
 
     function resolveAssociationControlDefaults(dataset, controls) {
-      if (!dataset || !Array.isArray(dataset.topEdges) || dataset.topEdges.length === 0) {
+      if (!dataset) {
         return;
       }
-
-      const byTopEdge = dataset.topEdges.find(edge => edge.id === String(controls.topEdgeId || "").trim());
-      if (byTopEdge) {
-        controls.gene = byTopEdge.gene;
-        controls.metabolite = byTopEdge.metabolite;
-        controls.topEdgeId = byTopEdge.id;
-        return;
-      }
-
-      const exact = dataset.topEdges.find(edge => edge.gene === String(controls.gene || "").trim() && edge.metabolite === String(controls.metabolite || "").trim());
-      if (exact) {
-        controls.topEdgeId = exact.id;
-        controls.gene = exact.gene;
-        controls.metabolite = exact.metabolite;
-        return;
-      }
-
-      const geneMatch = dataset.topEdges.find(edge => edge.gene === String(controls.gene || "").trim());
-      if (geneMatch) {
-        controls.topEdgeId = geneMatch.id;
-        controls.gene = geneMatch.gene;
-        controls.metabolite = geneMatch.metabolite;
-        return;
-      }
-
-      const metabMatch = dataset.topEdges.find(edge => edge.metabolite === String(controls.metabolite || "").trim());
-      if (metabMatch) {
-        controls.topEdgeId = metabMatch.id;
-        controls.gene = metabMatch.gene;
-        controls.metabolite = metabMatch.metabolite;
-        return;
-      }
-
-      const fallback = dataset.topEdges[0];
-      controls.topEdgeId = fallback.id;
-      controls.gene = fallback.gene;
-      controls.metabolite = fallback.metabolite;
+      syncAssociationControlsFromDataset(controls, dataset);
     }
 
     function renderPcaLegend(dataset, colorBy) {
@@ -2278,20 +2491,81 @@ def _interactive_html_template() -> str:
       });
     }
 
+    function pcaComponentValue(point, componentIndex, fallbackField) {
+      const components = Array.isArray(point.components) ? point.components : [];
+      const value = Number(components[componentIndex]);
+      if (Number.isFinite(value)) return value;
+      return Number(point[fallbackField] || 0);
+    }
+
+    function pcaVariancePct(dataset, componentIndex) {
+      const values = dataset.varianceExplained?.components;
+      if (Array.isArray(values) && Number.isFinite(Number(values[componentIndex]))) {
+        return Number(values[componentIndex]);
+      }
+      const key = `pc${componentIndex + 1}`;
+      return Number(dataset.varianceExplained?.[key]);
+    }
+
+    function pcaEnvelopePath(groupPoints) {
+      if (!Array.isArray(groupPoints) || groupPoints.length === 0) return "";
+      const points = [...groupPoints].sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
+      if (points.length === 1) {
+        const p = points[0];
+        const r = 16;
+        return `M ${p.x - r} ${p.y} a ${r} ${r} 0 1 0 ${r * 2} 0 a ${r} ${r} 0 1 0 ${-r * 2} 0`;
+      }
+      if (points.length === 2) {
+        const [a, b] = points;
+        return `M ${a.x} ${a.y} L ${b.x} ${b.y}`;
+      }
+      const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+      const lower = [];
+      for (const point of points) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], point) <= 0) lower.pop();
+        lower.push(point);
+      }
+      const upper = [];
+      for (let idx = points.length - 1; idx >= 0; idx--) {
+        const point = points[idx];
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], point) <= 0) upper.pop();
+        upper.push(point);
+      }
+      const hull = lower.slice(0, -1).concat(upper.slice(0, -1));
+      if (hull.length < 3) return "";
+      const centroid = hull.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
+      centroid.x /= hull.length;
+      centroid.y /= hull.length;
+      const padded = hull.map(p => {
+        const dx = p.x - centroid.x;
+        const dy = p.y - centroid.y;
+        const length = Math.sqrt(dx * dx + dy * dy) || 1;
+        return { x: p.x + (dx / length) * 12, y: p.y + (dy / length) * 12 };
+      });
+      return `M ${padded.map(p => `${p.x} ${p.y}`).join(" L ")} Z`;
+    }
+
     function renderPcaChart(dataset, controls) {
       const width = clamp(Number(controls.width || 900), 640, 2000);
       const height = clamp(Number(controls.height || 620), 480, 1800);
       const pointSize = clamp(Number(controls.pointSize || 5), 2, 14);
       const showLabels = Boolean(controls.showLabels);
+      const showGroupEnvelope = Boolean(controls.showGroupEnvelope);
       const colorBy = controls.colorBy === "group2" ? "group2" : "group1";
       const points = Array.isArray(dataset.points) ? dataset.points : [];
+      const componentCount = Math.max(2, Number(dataset.componentCount || 2));
+      let xComponent = clamp(Number(controls.xComponent || 1), 1, componentCount);
+      let yComponent = clamp(Number(controls.yComponent || 2), 1, componentCount);
+      if (xComponent === yComponent) yComponent = xComponent === 1 ? Math.min(2, componentCount) : 1;
+      const xComponentIndex = xComponent - 1;
+      const yComponentIndex = yComponent - 1;
       const title = dataset.title || "PCA";
       const margin = { top: 48, right: 38, bottom: 60, left: 72 };
       const innerWidth = Math.max(1, width - margin.left - margin.right);
       const innerHeight = Math.max(1, height - margin.top - margin.bottom);
 
-      const xs = points.map(p => Number(p.x || 0));
-      const ys = points.map(p => Number(p.y || 0));
+      const xs = points.map(p => pcaComponentValue(p, xComponentIndex, "x"));
+      const ys = points.map(p => pcaComponentValue(p, yComponentIndex, "y"));
       const xmin = Math.min(0, ...xs);
       const xmax = Math.max(0, ...xs);
       const ymin = Math.min(0, ...ys);
@@ -2348,7 +2622,7 @@ def _interactive_html_template() -> str:
         "font-size": 13,
         fill: axisColor
       }));
-      svg.lastChild.textContent = `PC1 (${fmtPct(dataset.varianceExplained?.pc1)})`;
+      svg.lastChild.textContent = `PC${xComponent} (${fmtPct(pcaVariancePct(dataset, xComponentIndex))})`;
 
       svg.appendChild(svgEl("text", {
         x: 20,
@@ -2358,13 +2632,49 @@ def _interactive_html_template() -> str:
         "font-size": 13,
         fill: axisColor
       }));
-      svg.lastChild.textContent = `PC2 (${fmtPct(dataset.varianceExplained?.pc2)})`;
+      svg.lastChild.textContent = `PC${yComponent} (${fmtPct(pcaVariancePct(dataset, yComponentIndex))})`;
+
+      if (showGroupEnvelope) {
+        const envelopeGroups = new Map();
+        for (const point of points) {
+          const groupName = colorBy === "group2" ? (point.group2 || "Missing") : (point.group1 || "Missing");
+          const color = colorBy === "group2" ? (point.group2Color || "#6b7280") : (point.group1Color || "#6b7280");
+          const cx = sx(pcaComponentValue(point, xComponentIndex, "x"));
+          const cy = sy(pcaComponentValue(point, yComponentIndex, "y"));
+          if (!envelopeGroups.has(groupName)) envelopeGroups.set(groupName, { color, points: [] });
+          envelopeGroups.get(groupName).points.push({ x: cx, y: cy });
+        }
+        for (const group of envelopeGroups.values()) {
+          const pathData = pcaEnvelopePath(group.points);
+          if (!pathData) continue;
+          const attrs = {
+            d: pathData,
+            fill: group.points.length >= 3 ? group.color : "none",
+            stroke: group.color,
+            "stroke-width": group.points.length >= 3 ? 1.4 : 8,
+            opacity: group.points.length >= 3 ? 0.18 : 0.16,
+            "stroke-linejoin": "round",
+            "stroke-linecap": "round"
+          };
+          svg.appendChild(svgEl("path", attrs));
+          if (group.points.length === 2) {
+            svg.appendChild(svgEl("path", {
+              d: pathData,
+              fill: "none",
+              stroke: group.color,
+              "stroke-width": 1.3,
+              opacity: 0.90,
+              "stroke-linecap": "round"
+            }));
+          }
+        }
+      }
 
       for (const point of points) {
         const color = colorBy === "group2" ? (point.group2Color || "#6b7280") : (point.group1Color || "#6b7280");
         const marker = colorBy === "group2" ? (point.group1Marker || "circle") : "circle";
-        const cx = sx(Number(point.x || 0));
-        const cy = sy(Number(point.y || 0));
+        const cx = sx(pcaComponentValue(point, xComponentIndex, "x"));
+        const cy = sy(pcaComponentValue(point, yComponentIndex, "y"));
         const markerNode = pcaMarkerNode(marker, cx, cy, pointSize, color, "#ffffff");
         const markerTitle = svgEl("title");
         markerTitle.textContent = point.id || point.label || "";
@@ -2410,6 +2720,10 @@ def _interactive_html_template() -> str:
       const slope = sxy / sxx;
       const intercept = yMean - slope * xMean;
       const pearson = sxy / Math.sqrt(sxx * syy);
+      const fitted = xs.map(x => intercept + slope * x);
+      const residualSs = ys.reduce((acc, y, idx) => acc + Math.pow(y - fitted[idx], 2), 0);
+      const dof = n - 2;
+      const residualSe = dof > 0 ? Math.sqrt(residualSs / dof) : null;
 
       const rankedX = xs.map((v, i) => ({ v, i })).sort((a, b) => a.v - b.v);
       const rx = new Array(n);
@@ -2430,7 +2744,24 @@ def _interactive_html_template() -> str:
         rsxy += dx * dy;
       }
       const spearman = rsxx > 0 && rsyy > 0 ? rsxy / Math.sqrt(rsxx * rsyy) : null;
-      return { slope, intercept, pearson, spearman };
+      return { slope, intercept, pearson, spearman, xMean, sxx, residualSe, dof };
+    }
+
+    function approximateTCritical(dof) {
+      const df = Math.max(1, Math.floor(Number(dof || 1)));
+      const table = {
+        1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571,
+        6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
+        11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145, 15: 2.131,
+        16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093, 20: 2.086,
+        21: 2.080, 22: 2.074, 23: 2.069, 24: 2.064, 25: 2.060,
+        26: 2.056, 27: 2.052, 28: 2.048, 29: 2.045, 30: 2.042
+      };
+      if (table[df]) return table[df];
+      if (df <= 40) return 2.021;
+      if (df <= 60) return 2.000;
+      if (df <= 120) return 1.980;
+      return 1.960;
     }
 
     function renderAssociationChart(dataset, controls) {
@@ -2440,7 +2771,6 @@ def _interactive_html_template() -> str:
       const alpha = clamp(Number(controls.alpha || 0.85), 0.15, 1.0);
       const showLabels = Boolean(controls.showLabels);
       const showRegression = Boolean(controls.showRegression);
-      const colorBy = controls.colorBy || "group1";
       const selected = findAssociationEdge(dataset, controls) || (Array.isArray(dataset.topEdges) ? dataset.topEdges[0] : null);
       const title = dataset.title || "Association Scatter";
       const margin = { top: 48, right: 38, bottom: 60, left: 72 };
@@ -2449,7 +2779,7 @@ def _interactive_html_template() -> str:
       const samples = dataset.sampleIds || [];
 
       if (!selected) {
-        return el("div", { className: "placeholder", text: "No association payload available for the selected tier." });
+        return el("div", { className: "placeholder", text: "No regression payload available for the selected type." });
       }
 
       const xs = selected.x || [];
@@ -2468,24 +2798,19 @@ def _interactive_html_template() -> str:
       const y1 = ymax + ypad;
       const sx = value => margin.left + ((value - x0) / Math.max(1e-6, x1 - x0)) * innerWidth;
       const sy = value => margin.top + ((y1 - value) / Math.max(1e-6, y1 - y0)) * innerHeight;
+      const moduleColor = selected.pointColor || selected.moduleColor || "#4c78a8";
 
       const points = samples.map((sampleId, idx) => {
-        const x = Number(xs[idx]);
-        const y = Number(ys[idx]);
-        const ann = (dataset.sampleAnnotations || []).find(item => item.id === sampleId) || {};
+        const x = xs[idx] === null || xs[idx] === undefined ? Number.NaN : Number(xs[idx]);
+        const y = ys[idx] === null || ys[idx] === undefined ? Number.NaN : Number(ys[idx]);
         return {
           id: sampleId,
           x,
-          y,
-          group1: ann.group1 || "Missing",
-          group2: ann.group2 || "Missing",
-          group1Color: ann.group1Color || "#6b7280",
-          group2Color: ann.group2Color || "#6b7280"
+          y
         };
       }).filter(point => Number.isFinite(point.x) && Number.isFinite(point.y));
 
       const stats = computeLinearFit(points);
-      const colorField = colorBy === "group2" ? "group2Color" : colorBy === "group1" ? "group1Color" : null;
       const svg = svgEl("svg", {
         width,
         height,
@@ -2520,7 +2845,7 @@ def _interactive_html_template() -> str:
         "font-weight": 700,
         fill: "#111827"
       }));
-      svg.lastChild.textContent = `${title}: ${selected.gene} vs ${selected.metabolite}`;
+      svg.lastChild.textContent = `${title}: ${selected.label || `${selected.gene} vs ${selected.metabolite}`}`;
 
       svg.appendChild(svgEl("text", {
         x: width / 2,
@@ -2529,7 +2854,7 @@ def _interactive_html_template() -> str:
         "font-size": 13,
         fill: "#334155"
       }));
-      svg.lastChild.textContent = selected.gene;
+      svg.lastChild.textContent = selected.xLabel || selected.gene;
 
       svg.appendChild(svgEl("text", {
         x: 20,
@@ -2539,13 +2864,36 @@ def _interactive_html_template() -> str:
         "font-size": 13,
         fill: "#334155"
       }));
-      svg.lastChild.textContent = selected.metabolite;
+      svg.lastChild.textContent = selected.yLabel || selected.metabolite;
 
       if (showRegression && stats) {
         const xStart = x0;
         const xEnd = x1;
         const yStart = stats.intercept + stats.slope * xStart;
         const yEnd = stats.intercept + stats.slope * xEnd;
+        if (stats.residualSe !== null && stats.dof > 0 && stats.sxx > 0) {
+          const tValue = approximateTCritical(stats.dof);
+          const upper = [];
+          const lower = [];
+          for (let idx = 0; idx < 80; idx++) {
+            const xValue = xStart + (xEnd - xStart) * idx / 79;
+            const yFit = stats.intercept + stats.slope * xValue;
+            const seMean = stats.residualSe * Math.sqrt((1 / points.length) + Math.pow(xValue - stats.xMean, 2) / stats.sxx);
+            const delta = tValue * seMean;
+            if (!Number.isFinite(delta)) continue;
+            upper.push({ x: sx(xValue), y: sy(yFit + delta) });
+            lower.push({ x: sx(xValue), y: sy(yFit - delta) });
+          }
+          if (upper.length > 1 && lower.length > 1) {
+            const bandPoints = upper.concat(lower.reverse()).map(p => `${p.x},${p.y}`).join(" ");
+            svg.appendChild(svgEl("polygon", {
+              points: bandPoints,
+              fill: moduleColor,
+              opacity: 0.16,
+              stroke: "none"
+            }));
+          }
+        }
         svg.appendChild(svgEl("line", {
           x1: sx(xStart),
           y1: sy(yStart),
@@ -2556,15 +2904,42 @@ def _interactive_html_template() -> str:
         }));
       }
 
+      const rLabel = selected.rLabel || "r";
+      const realtimeR = rLabel === "rho" ? (stats ? stats.spearman : null) : (stats ? stats.pearson : null);
+      const rValue = realtimeR !== null && realtimeR !== undefined ? Number(realtimeR) : (
+        selected.rValue !== null && selected.rValue !== undefined ? Number(selected.rValue) : null
+      );
+      const rText = Number.isFinite(rValue) ? `${rLabel} = ${rValue.toFixed(2)}` : `${rLabel} = NA`;
+      const rGroup = svgEl("g");
+      rGroup.appendChild(svgEl("rect", {
+        x: margin.left + 10,
+        y: margin.top + 10,
+        width: Math.max(58, rText.length * 8 + 14),
+        height: 22,
+        fill: "#ffffff",
+        opacity: 0.75,
+        stroke: "none",
+        rx: 3
+      }));
+      const rTextNode = svgEl("text", {
+        x: margin.left + 17,
+        y: margin.top + 26,
+        "font-size": 12,
+        "font-weight": 700,
+        fill: "#111827"
+      });
+      rTextNode.textContent = rText;
+      rGroup.appendChild(rTextNode);
+      svg.appendChild(rGroup);
+
       for (const point of points) {
-        const color = colorField ? (point[colorField] || "#4c78a8") : "#4c78a8";
         const cx = sx(point.x);
         const cy = sy(point.y);
         const circle = svgEl("circle", {
           cx,
           cy,
           r: pointSize,
-          fill: color,
+          fill: moduleColor,
           opacity: alpha,
           stroke: "#ffffff",
           "stroke-width": 1.0
@@ -2588,14 +2963,8 @@ def _interactive_html_template() -> str:
       }
 
       const summary = el("div", { className: "legend" });
-      const chips = [
-        `EdgeWeight: ${Number(selected.edgeWeight).toFixed(3)}`,
-        `ModelSupportCount: ${selected.modelSupportCount}`,
-        `ScreenSupportCount: ${selected.screenSupportCount}`,
-        `Pearson: ${stats && stats.pearson !== null ? stats.pearson.toFixed(3) : (selected.pearsonR !== null && selected.pearsonR !== undefined ? Number(selected.pearsonR).toFixed(3) : "NA")}`,
-        `Spearman: ${stats && stats.spearman !== null ? stats.spearman.toFixed(3) : (selected.spearmanRho !== null && selected.spearmanRho !== undefined ? Number(selected.spearmanRho).toFixed(3) : "NA")}`,
-        `Samples: ${selected.sampleCount}`
-      ];
+      const chips = [`Module: ${selected.module || "Unassigned"}`, `Samples: ${points.length}`];
+      if (selected.edgeWeight !== undefined && selected.edgeWeight !== null) chips.splice(1, 0, `EdgeWeight: ${Number(selected.edgeWeight).toFixed(3)}`);
       for (const text of chips) summary.appendChild(el("span", { className: "legend-item", text }));
 
       return { svg, summary, selected };
@@ -3464,7 +3833,7 @@ def _interactive_html_template() -> str:
         el("h2", { className: "panel-title", text: dataset ? `${dataset.title}` : view.title }),
         el("p", {
           className: "panel-note",
-          text: "Select a gene-metabolite pair or pick from the top edges list. Sample-level scatter, regression, and network statistics update together."
+          text: "Switch between gene-metabolite and module-metabolite pairs. Scatter points and confidence bands use the associated module color."
         })
       ]));
 
@@ -3489,14 +3858,13 @@ def _interactive_html_template() -> str:
           chartShell.appendChild(rendered.svg);
           chartWrap.appendChild(chartShell);
           panel.appendChild(chartWrap);
-          panel.appendChild(renderAssociationLegend(dataset, controls.colorBy));
           panel.appendChild(rendered.summary);
         } else {
           chartWrap.appendChild(el("div", { className: "placeholder", text: "No valid association payload available." }));
           panel.appendChild(chartWrap);
         }
       } else {
-        chartWrap.appendChild(el("div", { className: "placeholder", text: "No association payload available for the selected tier." }));
+        chartWrap.appendChild(el("div", { className: "placeholder", text: "No regression payload available for the selected type." }));
         panel.appendChild(chartWrap);
       }
       return panel;
