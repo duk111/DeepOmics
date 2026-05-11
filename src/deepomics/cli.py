@@ -21,6 +21,7 @@ def _build_config(
     export_cytoscape: bool,
     no_plots: bool,
     no_save_state: bool,
+    trans_log2: bool,
     enable_modules: bool,
     module_graph_k: int,
     module_min_edge_weight: float,
@@ -39,6 +40,7 @@ def _build_config(
         save_h5ad=not no_save_state,
         generate_reports=not no_plots,
         export_cytoscape=export_cytoscape,
+        trans_log2=trans_log2,
         enable_module_detection=enable_modules,
         module_graph_k=module_graph_k,
         module_min_edge_weight=module_min_edge_weight,
@@ -65,6 +67,7 @@ def main() -> None:
 @click.option("--export-cytoscape/--no-export-cytoscape", default=True, show_default=True, help="Whether to export the Cytoscape-specific edge table.")
 @click.option("--no-plots", is_flag=True, help="Skip plot and report generation.")
 @click.option("--no-save-state", is_flag=True, help="Do not save the final H5AD state file.")
+@click.option("--trans-log2/--no-trans-log2", default=True, show_default=True, help="Apply log2(x+1) to transcriptome input. Disable for VST or already transformed matrices.")
 @click.option("--enable-modules/--disable-modules", default=True, show_default=True, help="Enable post-T03 gene module detection.")
 @click.option("--module-graph-k", type=int, default=10, show_default=True, help="Top-k positive neighbors retained per gene before module detection.")
 @click.option("--module-min-edge-weight", type=float, default=0.15, show_default=True, help="Minimum positive edge weight retained after Spearman graph construction.")
@@ -83,6 +86,7 @@ def run(
     export_cytoscape: bool,
     no_plots: bool,
     no_save_state: bool,
+    trans_log2: bool,
     enable_modules: bool,
     module_graph_k: int,
     module_min_edge_weight: float,
@@ -105,6 +109,7 @@ def run(
         export_cytoscape=export_cytoscape,
         no_plots=no_plots,
         no_save_state=no_save_state,
+        trans_log2=trans_log2,
         enable_modules=enable_modules,
         module_graph_k=module_graph_k,
         module_min_edge_weight=module_min_edge_weight,
@@ -122,6 +127,7 @@ def run(
             adata,
             missing_feature_threshold=cfg.missing_feature_threshold,
             knn_neighbors=cfg.knn_neighbors,
+            trans_log2=cfg.trans_log2,
         )
 
         engine = MultiOmicsEngine(adata, cfg)

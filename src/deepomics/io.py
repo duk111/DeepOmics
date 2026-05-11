@@ -273,8 +273,9 @@ def preprocess_adata(
     scale: bool = True,
     missing_feature_threshold: float = 0.5,
     knn_neighbors: int = 5,
+    trans_log2: bool = True,
 ) -> ad.AnnData:
-    """Apply filtering, log transformation, KNN imputation, variance filtering, and scaling."""
+    """Apply filtering, optional transcriptome log transformation, KNN imputation, variance filtering, and scaling."""
     if "metabolomics" not in adata.obsm:
         raise KeyError("adata.obsm['metabolomics'] is required.")
 
@@ -288,18 +289,27 @@ def preprocess_adata(
         label="Transcriptome",
         missing_feature_threshold=missing_feature_threshold,
     )
-    gene_df = _apply_log2p1(gene_df, label="Transcriptome")
+    if trans_log2:
+        gene_df = _apply_log2p1(gene_df, label="Transcriptome")
+        gene_log_info = {
+            "label": "Transcriptome",
+            "applied": True,
+            "method": "log2(x+1)",
+            "stage": "after_high_missing_filter_before_knn_imputation",
+        }
+    else:
+        logger.info("Skipped log2(x+1) transformation for Transcriptome.")
+        gene_log_info = {
+            "label": "Transcriptome",
+            "applied": False,
+            "method": "none",
+            "stage": "after_high_missing_filter_before_knn_imputation",
+        }
     gene_df, gene_impute_info = _impute_missing_with_knn(
         gene_df,
         label="Transcriptome",
         n_neighbors=knn_neighbors,
     )
-    gene_log_info = {
-        "label": "Transcriptome",
-        "applied": True,
-        "method": "log2(x+1)",
-        "stage": "after_high_missing_filter_before_knn_imputation",
-    }
 
     gene_var = np.nanvar(gene_df.to_numpy(dtype=np.float32, copy=False), axis=0)
     keep_genes = gene_var > 0
@@ -378,7 +388,10 @@ def preprocess_adata(
         "n_genes": int(adata.n_vars),
         "n_metabolites": int(len(adata.uns["metabolite_names"])),
         "scaled": bool(scale),
-        "log_transform": True,
+        "log_transform": {
+            "transcriptome": bool(trans_log2),
+            "metabolomics": True,
+        },
         "missing_feature_threshold": float(missing_feature_threshold),
         "knn_neighbors": int(knn_neighbors),
         "transcriptome_missing_filter": gene_missing_filter_info,

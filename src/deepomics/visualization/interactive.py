@@ -22,7 +22,15 @@ from .static.base import (
     _metabolomics_df,
     _ordered_unique_with_order,
 )
-from .static.network import _build_circos_module_color_map
+from .static.network import (
+    _attach_circos_module_annotations,
+    _build_circos_module_color_map,
+    _positive_scale,
+    _prepare_circos_node_tables,
+    _prepare_group1_mean_track_data,
+    _prepare_metabolite_module_core_map,
+    _robust_abs_scale,
+)
 from .static.pca import _compute_pca_result, _load_pca_group_table
 from .static.regression import _module_annotation_maps
 from .static.module import _coerce_module_eigengene_df, _module_order_from_summary
@@ -294,6 +302,14 @@ def _numeric_matrix_payload(df: pd.DataFrame, columns: list[str]) -> dict[str, l
         values = pd.to_numeric(df[column], errors="coerce").to_numpy(dtype=float, copy=False)
         payload[str(column)] = [float(value) if np.isfinite(value) else None for value in values.tolist()]
     return payload
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
 
 
 def _build_pca_payload(matrix, sample_names, title: str, cfg, group_df: pd.DataFrame | None = None) -> dict[str, Any] | None:
@@ -899,202 +915,147 @@ def _build_module_heatmap_payload(engine, cfg) -> dict[str, Any] | None:
 
 def _build_network_payload(
     engine,
+    cfg,
     tier: str,
     max_edges: int,
     default_top_edges: int | None = None,
 ) -> dict[str, Any] | None:
-    if tier == "high_confidence":
-        edge_df = engine.ml_results.get("high_confidence_network_df", pd.DataFrame())
-        title = "High-Confidence Network Explorer"
-    else:
-        edge_df = engine.ml_results.get("total_association_network_df", pd.DataFrame())
-        title = "Total Network Explorer"
-
-    if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
+    edge_df, gene_summary, metabolite_summary = _prepare_circos_node_tables(engine)
+    if edge_df.empty or gene_summary.empty or metabolite_summary.empty:
         return None
 
-    required_columns = {"Gene", "Metabolite", "EdgeWeight"}
-    if not required_columns.issubset(edge_df.columns):
-        return None
+    module_df = engine.ml_results.get("gene_module_assignment_df", pd.DataFrame())
+    if isinstance(module_df, pd.DataFrame) and not module_df.empty and "IsGrey" not in module_df.columns:
+        module_df = module_df.copy()
+        if "Module" in module_df.columns:
+            module_df["IsGrey"] = module_df["Module"].astype(str).str.lower().eq("grey").astype(int)
+        else:
+            module_df["IsGrey"] = 1
+        engine.ml_results["gene_module_assignment_df"] = module_df
 
-    work = edge_df.copy()
-    work["Gene"] = work["Gene"].astype(str).str.strip()
-    work["Metabolite"] = work["Metabolite"].astype(str).str.strip()
-    work["EdgeWeight"] = pd.to_numeric(work["EdgeWeight"], errors="coerce")
-    work = work.loc[work["Gene"].ne("") & work["Metabolite"].ne("") & work["EdgeWeight"].notna()].copy()
-    if work.empty:
-        return None
+    title = "T03 High-Confidence Network Explorer"
+    gene_summary, _module_color_map = _attach_circos_module_annotations(engine, gene_summary)
+    metabolite_module_core = _prepare_metabolite_module_core_map(engine)
+    metabolite_summary = metabolite_summary.copy()
+    metabolite_summary["Module"] = ""
+    metabolite_summary["ModuleColor"] = "#c9ad85"
+    metabolite_summary["ModuleCore"] = metabolite_summary["Node"].map(metabolite_module_core).astype(float)
+    gene_summary["ModuleCore"] = pd.to_numeric(gene_summary.get("kME", np.nan), errors="coerce").abs()
 
-    if "ModelSupportCount" in work.columns:
-        work["ModelSupportCount"] = pd.to_numeric(work["ModelSupportCount"], errors="coerce").fillna(0).astype(int)
-    else:
-        work["ModelSupportCount"] = 0
-    if "ScreenSupportCount" in work.columns:
-        work["ScreenSupportCount"] = pd.to_numeric(work["ScreenSupportCount"], errors="coerce").fillna(0).astype(int)
-    else:
-        work["ScreenSupportCount"] = 0
-    if "RRARank" in work.columns:
-        work["RRARank"] = pd.to_numeric(work["RRARank"], errors="coerce")
-    else:
-        work["RRARank"] = np.nan
-    if "RRAWeight" in work.columns:
-        work["RRAWeight"] = pd.to_numeric(work["RRAWeight"], errors="coerce")
-    else:
-        work["RRAWeight"] = np.nan
-    if "PearsonR" in work.columns:
-        work["PearsonR"] = pd.to_numeric(work["PearsonR"], errors="coerce")
-    else:
-        work["PearsonR"] = np.nan
-    if "SpearmanRho" in work.columns:
-        work["SpearmanRho"] = pd.to_numeric(work["SpearmanRho"], errors="coerce")
-    else:
-        work["SpearmanRho"] = np.nan
-    if "Sign" in work.columns:
-        work["Sign"] = work["Sign"].astype(str).str.strip()
-    else:
-        work["Sign"] = np.where(work["EdgeWeight"] >= 0, "positive", "negative")
-    if "EdgeTier" in work.columns:
-        work["EdgeTier"] = work["EdgeTier"].astype(str).str.strip()
-    else:
-        work["EdgeTier"] = tier
+    circos_track_adata = getattr(engine, "plot_adata", getattr(engine, "unaggregated_adata", engine.adata))
+    group_df = _load_pca_group_table(cfg)
+    gene_track_data = _prepare_group1_mean_track_data(_gene_expression_df(circos_track_adata), group_df)
+    metabolite_track_data = _prepare_group1_mean_track_data(_metabolomics_df(circos_track_adata), group_df)
 
-    work["_AbsWeight"] = work["EdgeWeight"].abs()
-    sort_columns = ["_AbsWeight"]
-    ascending = [False]
-    if work["RRARank"].notna().any():
-        sort_columns.append("RRARank")
-        ascending.append(True)
-    sort_columns.extend(["ModelSupportCount", "ScreenSupportCount", "Gene", "Metabolite"])
-    ascending.extend([False, False, True, True])
-    work = work.sort_values(sort_columns, ascending=ascending, kind="mergesort").head(max(1, int(max_edges))).copy()
-    if work.empty:
-        return None
+    gene_mean_scale = _robust_abs_scale(gene_summary["MeanZScore"])
+    metabolite_mean_scale = _robust_abs_scale(metabolite_summary["MeanZScore"])
+    gene_degree_scale = _positive_scale(gene_summary["WeightedDegree"])
+    metabolite_degree_scale = _positive_scale(metabolite_summary["WeightedDegree"])
+    gene_core_scale = _positive_scale(gene_summary["ModuleCore"])
+    metabolite_core_scale = _positive_scale(metabolite_summary["ModuleCore"])
 
-    gene_metrics: dict[str, dict[str, Any]] = {}
-    metabolite_metrics: dict[str, dict[str, Any]] = {}
+    def _track_values(track_data: dict[str, object] | None, node_id: str) -> list[float]:
+        if track_data is None:
+            return []
+        values = dict(track_data.get("feature_to_values", {})).get(str(node_id), [])
+        return [float(value) for value in values if np.isfinite(float(value))]
+
+    genes: list[dict[str, Any]] = []
+    for row in gene_summary.itertuples(index=False):
+        node = str(row.Node)
+        genes.append(
+            {
+                "id": f"gene:{node}",
+                "label": node,
+                "type": "gene",
+                "degree": int(getattr(row, "PositiveEdgeCount", 0)) + int(getattr(row, "NegativeEdgeCount", 0)),
+                "weightedDegree": float(row.WeightedDegree),
+                "maxAbsWeight": float(row.WeightedDegree),
+                "positiveEdges": int(row.PositiveEdgeCount),
+                "negativeEdges": int(row.NegativeEdgeCount),
+                "directionBias": float(row.DirectionBias),
+                "meanZScore": float(row.MeanZScore),
+                "interSampleVariability": float(row.InterSampleVariability),
+                "module": str(row.Module),
+                "moduleColor": str(row.ModuleColor),
+                "moduleSize": int(row.ModuleSize) if pd.notna(row.ModuleSize) else 0,
+                "kME": _float_or_none(getattr(row, "kME", None)),
+                "intramodularDegree": _float_or_none(getattr(row, "IntramodularDegree", None)),
+                "moduleCore": _float_or_none(getattr(row, "ModuleCore", None)),
+                "color": str(row.ModuleColor),
+                "track2Values": _track_values(gene_track_data, node),
+            }
+        )
+
+    metabolites: list[dict[str, Any]] = []
+    for row in metabolite_summary.itertuples(index=False):
+        node = str(row.Node)
+        metabolites.append(
+            {
+                "id": f"metabolite:{node}",
+                "label": node,
+                "type": "metabolite",
+                "degree": int(getattr(row, "PositiveEdgeCount", 0)) + int(getattr(row, "NegativeEdgeCount", 0)),
+                "weightedDegree": float(row.WeightedDegree),
+                "maxAbsWeight": float(row.WeightedDegree),
+                "positiveEdges": int(row.PositiveEdgeCount),
+                "negativeEdges": int(row.NegativeEdgeCount),
+                "directionBias": float(row.DirectionBias),
+                "meanZScore": float(row.MeanZScore),
+                "interSampleVariability": float(row.InterSampleVariability),
+                "module": "",
+                "moduleColor": "#c9ad85",
+                "moduleCore": _float_or_none(getattr(row, "ModuleCore", None)),
+                "color": "#c9ad85",
+                "edgeColor": "#8c6d46",
+                "track2Values": _track_values(metabolite_track_data, node),
+            }
+        )
+
+    metabolite_edge_colors = _hue_wheel_color_series(len(metabolites), hue_start=18.0, lightness=63.0, safety=0.92)
+    metabolite_color_map = {str(item["label"]): metabolite_edge_colors[idx] for idx, item in enumerate(metabolites)}
+    for metabolite in metabolites:
+        metabolite["edgeColor"] = metabolite_color_map.get(str(metabolite["label"]), "#9ca3af")
+
     edges: list[dict[str, Any]] = []
-    for idx, row in enumerate(work.itertuples(index=False)):
+    edge_ordered = edge_df.sort_values(["EdgeWeight", "ModelSupportCount", "Gene", "Metabolite"], ascending=[True, True, True, True], kind="mergesort")
+    for idx, row in enumerate(edge_ordered.itertuples(index=False)):
         gene = str(row.Gene)
         metabolite = str(row.Metabolite)
-        edge_weight = float(row.EdgeWeight)
+        edge_weight = float(np.clip(getattr(row, "EdgeWeight", 0.0), 0.0, None))
         sign = str(row.Sign).strip().lower()
         if sign not in {"positive", "negative"}:
-            sign = "positive" if edge_weight >= 0 else "negative"
-        edge_id = f"{gene}||{metabolite}||{idx}"
+            sign = "positive"
         edges.append(
             {
-                "id": edge_id,
+                "id": f"{gene}||{metabolite}||{idx}",
                 "source": f"gene:{gene}",
                 "target": f"metabolite:{metabolite}",
                 "gene": gene,
                 "metabolite": metabolite,
                 "edgeWeight": edge_weight,
-                "absWeight": abs(edge_weight),
+                "absWeight": edge_weight,
                 "sign": sign,
-                "edgeTier": str(row.EdgeTier),
-                "modelSupportCount": int(row.ModelSupportCount),
-                "screenSupportCount": int(row.ScreenSupportCount),
-                "rraRank": int(row.RRARank) if pd.notna(row.RRARank) else None,
-                "rraWeight": float(row.RRAWeight) if pd.notna(row.RRAWeight) else None,
-                "pearsonR": float(row.PearsonR) if pd.notna(row.PearsonR) else None,
-                "spearmanRho": float(row.SpearmanRho) if pd.notna(row.SpearmanRho) else None,
+                "edgeTier": "high_confidence",
+                "modelSupportCount": int(getattr(row, "ModelSupportCount", 0)),
+                "screenSupportCount": int(getattr(row, "ScreenSupportCount", 0)) if hasattr(row, "ScreenSupportCount") else 0,
+                "rraRank": int(row.RRARank) if hasattr(row, "RRARank") and pd.notna(row.RRARank) else None,
+                "rraWeight": _float_or_none(getattr(row, "RRAWeight", None)),
+                "pearsonR": _float_or_none(getattr(row, "PearsonR", None)),
+                "spearmanRho": _float_or_none(getattr(row, "SpearmanRho", None)),
+                "metaboliteColor": metabolite_color_map.get(metabolite, "#9ca3af"),
             }
         )
-
-        gene_node = gene_metrics.setdefault(
-            gene,
-            {"id": f"gene:{gene}", "label": gene, "type": "gene", "degree": 0, "maxAbsWeight": 0.0, "positiveEdges": 0, "negativeEdges": 0},
-        )
-        metabolite_node = metabolite_metrics.setdefault(
-            metabolite,
-            {
-                "id": f"metabolite:{metabolite}",
-                "label": metabolite,
-                "type": "metabolite",
-                "degree": 0,
-                "maxAbsWeight": 0.0,
-                "positiveEdges": 0,
-                "negativeEdges": 0,
-            },
-        )
-        for node in (gene_node, metabolite_node):
-            node["degree"] += 1
-            node["maxAbsWeight"] = max(float(node["maxAbsWeight"]), abs(edge_weight))
-            if sign == "positive":
-                node["positiveEdges"] += 1
-            else:
-                node["negativeEdges"] += 1
 
     if not edges:
         return None
 
-    genes = sorted(gene_metrics.values(), key=lambda item: (-int(item["degree"]), -float(item["maxAbsWeight"]), str(item["label"])))
-    metabolites = sorted(
-        metabolite_metrics.values(),
-        key=lambda item: (-int(item["degree"]), -float(item["maxAbsWeight"]), str(item["label"])),
-    )
-
-    module_df = engine.ml_results.get("gene_module_assignment_df", pd.DataFrame())
-    gene_module_colors: dict[str, dict[str, Any]] = {}
-    if isinstance(module_df, pd.DataFrame) and not module_df.empty and {"Gene", "Module"}.issubset(module_df.columns):
-        module_work = module_df.loc[:, [col for col in ["Gene", "Module", "ModuleColorHex", "ModuleSize", "kME", "IntramodularDegree"] if col in module_df.columns]].copy()
-        module_work["Gene"] = module_work["Gene"].astype(str).str.strip()
-        module_work["Module"] = module_work["Module"].astype(str).str.strip().replace("", "grey")
-        module_work = module_work.loc[module_work["Gene"].ne("")].drop_duplicates(subset=["Gene"], keep="first")
-        if "ModuleSize" in module_work.columns:
-            module_work["_ModuleSizeSort"] = pd.to_numeric(module_work["ModuleSize"], errors="coerce").fillna(0).astype(int)
-        else:
-            module_work["_ModuleSizeSort"] = 0
-        module_order = (
-            module_work.loc[module_work["Module"].str.lower().ne("grey"), ["Module", "_ModuleSizeSort"]]
-            .drop_duplicates(subset=["Module"], keep="first")
-            .sort_values(["_ModuleSizeSort", "Module"], ascending=[False, True], kind="mergesort")["Module"]
-            .astype(str)
-            .tolist()
-        )
-        if module_work["Module"].str.lower().eq("grey").any():
-            module_order.append("grey")
-        module_color_map = _build_circos_module_color_map(module_order)
-        for row in module_work.itertuples(index=False):
-            gene_name = str(row.Gene)
-            module_name = str(row.Module) if str(row.Module).strip() else "grey"
-            color_value = getattr(row, "ModuleColorHex", None)
-            color = str(color_value) if color_value is not None and pd.notna(color_value) and str(color_value).strip() else module_color_map.get(module_name, "#E5E7EB")
-            gene_module_colors[gene_name] = {
-                "module": module_name,
-                "moduleColor": module_color_map.get(module_name, color),
-                "moduleSize": int(getattr(row, "ModuleSize", 0)) if pd.notna(getattr(row, "ModuleSize", np.nan)) else 0,
-                "kME": float(getattr(row, "kME")) if pd.notna(getattr(row, "kME", np.nan)) else None,
-                "intramodularDegree": float(getattr(row, "IntramodularDegree")) if pd.notna(getattr(row, "IntramodularDegree", np.nan)) else None,
-            }
-
-    metabolite_edge_colors = _hue_wheel_color_series(len(metabolites), hue_start=18.0, lightness=63.0, safety=0.92)
-    metabolite_color_map = {
-        str(item["label"]): metabolite_edge_colors[idx]
-        for idx, item in enumerate(metabolites)
-    }
-    for gene in genes:
-        module_info = gene_module_colors.get(str(gene["label"]), {})
-        gene["module"] = module_info.get("module", "grey")
-        gene["moduleColor"] = module_info.get("moduleColor", "#E5E7EB")
-        gene["moduleSize"] = int(module_info.get("moduleSize", 0) or 0)
-        gene["kME"] = module_info.get("kME")
-        gene["intramodularDegree"] = module_info.get("intramodularDegree")
-        gene["color"] = gene["moduleColor"]
-    for metabolite in metabolites:
-        metabolite["module"] = ""
-        metabolite["moduleColor"] = "#c9ad85"
-        metabolite["color"] = "#c9ad85"
-        metabolite["edgeColor"] = metabolite_color_map.get(str(metabolite["label"]), "#9ca3af")
-    for edge in edges:
-        edge["metaboliteColor"] = metabolite_color_map.get(str(edge["metabolite"]), "#9ca3af")
-
     nodes = genes + metabolites
 
     return {
-        "id": f"network.{tier}",
+        "id": "network.high_confidence",
         "title": title,
-        "tier": tier,
+        "tier": "high_confidence",
         "layout": "circos",
         "nodes": nodes,
         "edges": edges,
@@ -1103,7 +1064,7 @@ def _build_network_payload(
                 {"module": module_name, "color": module_color}
                 for module_name, module_color in {
                     str(value["module"]): str(value["moduleColor"])
-                    for value in gene_module_colors.values()
+                    for value in genes
                     if str(value.get("module", "")).strip()
                 }.items()
             ],
@@ -1112,8 +1073,24 @@ def _build_network_payload(
         "geneOptions": [{"value": item["label"], "label": item["label"]} for item in genes],
         "metaboliteOptions": [{"value": item["label"], "label": item["label"]} for item in metabolites],
         "defaults": {
-            "topEdges": min(len(edges), max(1, int(default_top_edges if default_top_edges is not None else max_edges))),
+            "topEdges": len(edges),
             "minEdgeWeight": 0.0,
+        },
+        "trackScales": {
+            "geneMean": float(gene_mean_scale),
+            "metaboliteMean": float(metabolite_mean_scale),
+            "geneDegree": float(gene_degree_scale),
+            "metaboliteDegree": float(metabolite_degree_scale),
+            "geneCore": float(gene_core_scale),
+            "metaboliteCore": float(metabolite_core_scale),
+            "geneTrack2": float(gene_track_data.get("abs_scale", gene_mean_scale)) if gene_track_data is not None else float(gene_mean_scale),
+            "metaboliteTrack2": float(metabolite_track_data.get("abs_scale", metabolite_mean_scale)) if metabolite_track_data is not None else float(metabolite_mean_scale),
+        },
+        "track2": {
+            "geneMode": str(gene_track_data.get("mode", "")) if gene_track_data is not None else "",
+            "metaboliteMode": str(metabolite_track_data.get("mode", "")) if metabolite_track_data is not None else "",
+            "group1Order": [str(value) for value in gene_track_data.get("group1_order", [])] if gene_track_data is not None else [],
+            "group1Colors": {str(key): str(value) for key, value in dict(gene_track_data.get("group1_color_map", {})).items()} if gene_track_data is not None else {},
         },
         "summary": {
             "nodes": len(nodes),
@@ -1401,21 +1378,11 @@ def _build_module_heatmap_schema(default_top_modules: int, default_top_metabolit
     }
 
 
-def _build_network_schema(default_tier: str, default_top_edges: int) -> dict[str, Any]:
+def _build_network_schema(default_top_edges: int) -> dict[str, Any]:
     return {
         "id": "network.explorer",
         "title": "Network Explorer",
         "controls": [
-            {
-                "id": "tier",
-                "type": "select",
-                "label": "Network tier",
-                "default": default_tier,
-                "options": [
-                    {"value": "high_confidence", "label": "High-confidence"},
-                    {"value": "total", "label": "Total"},
-                ],
-            },
             {
                 "id": "layout",
                 "type": "select",
@@ -1425,47 +1392,6 @@ def _build_network_schema(default_tier: str, default_top_edges: int) -> dict[str
                     {"value": "circos", "label": "Circos"},
                     {"value": "cnet", "label": "CNet"},
                 ],
-            },
-            {
-                "id": "topEdges",
-                "type": "number",
-                "label": "Top edges",
-                "default": int(default_top_edges),
-                "min": 1,
-                "max": 1000,
-                "step": 1,
-            },
-            {
-                "id": "minEdgeWeight",
-                "type": "number",
-                "label": "Min EdgeWeight",
-                "default": 0.0,
-                "min": 0.0,
-                "max": 1.0,
-                "step": 0.01,
-            },
-            {
-                "id": "sign",
-                "type": "select",
-                "label": "Sign",
-                "default": "all",
-                "options": [
-                    {"value": "all", "label": "All"},
-                    {"value": "positive", "label": "Positive"},
-                    {"value": "negative", "label": "Negative"},
-                ],
-            },
-            {
-                "id": "geneSearch",
-                "type": "text",
-                "label": "Gene search",
-                "default": "",
-            },
-            {
-                "id": "metaboliteSearch",
-                "type": "text",
-                "label": "Metabolite search",
-                "default": "",
             },
             {
                 "id": "nodeSize",
@@ -1537,19 +1463,12 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
     gene_metabolite_payload = _build_gene_metabolite_regression_payload(engine, cfg)
     module_metabolite_payload = _build_module_metabolite_regression_payload(engine, cfg)
     module_heatmap_payload = _build_module_heatmap_payload(engine, cfg)
-    network_default_top_edges = max(1, int(getattr(cfg, "network_plot_top_edges", 120)))
-    network_payload_max_edges = max(1000, network_default_top_edges)
     network_high_payload = _build_network_payload(
         engine,
+        cfg,
         "high_confidence",
-        max_edges=network_payload_max_edges,
-        default_top_edges=network_default_top_edges,
-    )
-    network_total_payload = _build_network_payload(
-        engine,
-        "total",
-        max_edges=network_payload_max_edges,
-        default_top_edges=network_default_top_edges,
+        max_edges=0,
+        default_top_edges=None,
     )
 
     datasets = {
@@ -1561,7 +1480,6 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
         "association.module_metabolite": module_metabolite_payload,
         "module_heatmap": module_heatmap_payload,
         "network.high_confidence": network_high_payload,
-        "network.total": network_total_payload,
     }
 
     association_default = gene_metabolite_payload or module_metabolite_payload
@@ -1604,7 +1522,7 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
             title="Network Explorer",
             kind="network",
             schema_id="network.explorer",
-            enabled=network_high_payload is not None or network_total_payload is not None,
+            enabled=network_high_payload is not None,
             description="Bipartite gene-metabolite association network explorer.",
             data_key="network.high_confidence",
         ),
@@ -1628,8 +1546,7 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
             int(module_heatmap_payload["defaults"]["topMetabolites"]) if module_heatmap_payload is not None else 20,
         ),
         "network.explorer": _build_network_schema(
-            "high_confidence" if network_high_payload is not None else "total",
-            int((network_high_payload or network_total_payload or {"defaults": {"topEdges": 120}})["defaults"]["topEdges"]),
+            int((network_high_payload or {"defaults": {"topEdges": 120}})["defaults"]["topEdges"]),
         ),
         "placeholder.network_explorer": _build_placeholder_schema("placeholder.network_explorer", "Network Explorer"),
     }
@@ -1674,13 +1591,7 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
                 "height": 720,
             },
             "network_explorer": {
-                "tier": "high_confidence" if network_high_payload is not None else "total",
                 "layout": "circos",
-                "topEdges": int((network_high_payload or network_total_payload or {"defaults": {"topEdges": 120}})["defaults"]["topEdges"]),
-                "minEdgeWeight": 0.0,
-                "sign": "all",
-                "geneSearch": "",
-                "metaboliteSearch": "",
                 "nodeSize": 7,
                 "showLabels": False,
                 "width": 1100,
@@ -1696,7 +1607,7 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
         implemented_views.append("module_heatmap")
     else:
         placeholder_views.append("module_heatmap")
-    if network_high_payload is not None or network_total_payload is not None:
+    if network_high_payload is not None:
         implemented_views.append("network_explorer")
     else:
         placeholder_views.append("network_explorer")
@@ -2057,9 +1968,7 @@ def _interactive_html_template() -> str:
     }
 
     function getNetworkDataset() {
-      const controls = getViewControls("network_explorer");
-      const tier = controls.tier === "total" ? "total" : "high_confidence";
-      return report.datasets[`network.${tier}`] || report.datasets["network.high_confidence"] || report.datasets["network.total"];
+      return report.datasets["network.high_confidence"] || null;
     }
 
     function getDatasetForView(viewId) {
@@ -3284,17 +3193,7 @@ def _interactive_html_template() -> str:
     }
 
     function filterNetworkEdges(dataset, controls) {
-      const topEdges = clamp(Math.round(Number(controls.topEdges || 120)), 1, Math.max(1, (dataset.edges || []).length));
-      const minEdgeWeight = Math.max(0, Number(controls.minEdgeWeight || 0));
-      const sign = controls.sign || "all";
-      const geneSearch = normalizeSearch(controls.geneSearch);
-      const metaboliteSearch = normalizeSearch(controls.metaboliteSearch);
-      return (dataset.edges || [])
-        .filter(edge => Number(edge.absWeight || Math.abs(edge.edgeWeight || 0)) >= minEdgeWeight)
-        .filter(edge => sign === "all" || edge.sign === sign)
-        .filter(edge => !geneSearch || String(edge.gene || "").toLowerCase().includes(geneSearch))
-        .filter(edge => !metaboliteSearch || String(edge.metabolite || "").toLowerCase().includes(metaboliteSearch))
-        .slice(0, topEdges);
+      return dataset.edges || [];
     }
 
     function prepareNetworkGraph(dataset, controls) {
@@ -3455,10 +3354,17 @@ def _interactive_html_template() -> str:
     }
 
     function biasColor(node) {
-      const total = Number(node.positiveEdges || 0) + Number(node.negativeEdges || 0);
-      if (!total) return "#e5e7eb";
-      const bias = (Number(node.positiveEdges || 0) - Number(node.negativeEdges || 0)) / total;
+      const bias = Number.isFinite(Number(node.directionBias)) ? Number(node.directionBias) : (() => {
+        const total = Number(node.positiveEdges || 0) + Number(node.negativeEdges || 0);
+        return total ? (Number(node.positiveEdges || 0) - Number(node.negativeEdges || 0)) / total : 0;
+      })();
       return bias >= 0 ? mixHex("#f8fafc", "#dc2626", Math.min(1, Math.abs(bias))) : mixHex("#f8fafc", "#2563eb", Math.min(1, Math.abs(bias)));
+    }
+
+    function signedHeatColor(value, scale) {
+      const limit = Math.max(1e-6, Number(scale || 1));
+      const normalized = clamp((Number(value || 0) + limit) / (2 * limit), 0, 1);
+      return heatmapColor(normalized * 2 - 1, { min: -1, max: 1 }, "rdbu");
     }
 
     function addNetworkTitle(svg, dataset, graph, layoutName, width) {
@@ -3516,6 +3422,33 @@ def _interactive_html_template() -> str:
       svg.appendChild(legend);
     }
 
+    function addTrackAnnotationLegend(svg, x, y) {
+      const rows = [
+        ["track 1", "sector strip"],
+        ["track 2", "group-wise mean"],
+        ["track 3", "mean z-score heatmap"],
+        ["track 4", "weighted degree"],
+        ["track 5", "module/core strength"],
+        ["track 6", "direction bias"]
+      ];
+      const legend = svgEl("g", {});
+      legend.appendChild(svgEl("rect", { x: x - 16, y: y - 22, width: 210, height: 178, fill: "#ffffff", stroke: "#d7dde5", rx: 8 }));
+      const title = svgEl("text", { x, y, "font-size": 12, "font-weight": 700, fill: "#334155" });
+      title.textContent = "Track annotations";
+      legend.appendChild(title);
+      for (let idx = 0; idx < rows.length; idx++) {
+        const [label, desc] = rows[idx];
+        const yy = y + 24 + idx * 20;
+        const labelNode = svgEl("text", { x, y: yy, "font-size": 10.5, "font-weight": 700, fill: "#374151" });
+        labelNode.textContent = label;
+        legend.appendChild(labelNode);
+        const descNode = svgEl("text", { x: x + 58, y: yy, "font-size": 10.5, fill: "#64748b" });
+        descNode.textContent = desc;
+        legend.appendChild(descNode);
+      }
+      svg.appendChild(legend);
+    }
+
     function shouldShowNetworkLabel(node, graph, showLabels) {
       if (!showLabels) return false;
       if (graph.nodes.length <= 70) return true;
@@ -3561,12 +3494,22 @@ def _interactive_html_template() -> str:
       const cy = height / 2 + 18;
       const radius = Math.max(190, Math.min(width - 260, height - 120) / 2);
       const outerR = radius;
-      const stripInner = radius - Math.max(12, baseNodeSize * 2.1);
-      const degreeInner = stripInner - 24;
-      const degreeOuter = stripInner - 8;
-      const biasInner = degreeInner - 18;
-      const biasOuter = degreeInner - 4;
-      const linkR = biasInner - 24;
+      const scaleR = radius / 1.035;
+      const radii = {
+        outerStripInner: scaleR * 0.992,
+        outerStripOuter: scaleR * 1.035,
+        trackMeanbarInner: scaleR * 0.86,
+        trackMeanbarOuter: scaleR * 0.975,
+        trackMeanheatInner: scaleR * 0.795,
+        trackMeanheatOuter: scaleR * 0.85,
+        trackDegreeInner: scaleR * 0.685,
+        trackDegreeOuter: scaleR * 0.775,
+        trackCoreInner: scaleR * 0.605,
+        trackCoreOuter: scaleR * 0.675,
+        trackBiasInner: scaleR * 0.53,
+        trackBiasOuter: scaleR * 0.58,
+        linkRadius: scaleR * 0.47
+      };
       const layoutMap = computeCircosLayout(graph.genes, graph.metabolites);
       const positions = new Map();
       for (const [nodeId, geometry] of layoutMap.entries()) {
@@ -3574,8 +3517,10 @@ def _interactive_html_template() -> str:
         positions.set(nodeId, { ...geometry, x: xy.x, y: xy.y, theta: geometry.thetaMid });
       }
       const selection = networkSelectionState(graph, positions, controls);
-      const maxDegree = Math.max(1, ...graph.nodes.map(node => Number(node.degree || 0)));
+      const maxDegree = Math.max(1, ...graph.nodes.map(node => Number(node.weightedDegree || node.degree || 0)));
+      const maxCore = Math.max(1e-6, ...graph.nodes.map(node => Number(node.moduleCore || 0)).filter(Number.isFinite));
       const maxAbs = Number(dataset.summary?.maxAbsWeight || 1);
+      const trackScales = dataset.trackScales || {};
 
       const svg = svgEl("svg", {
         width,
@@ -3596,7 +3541,7 @@ def _interactive_html_template() -> str:
         const absWeight = Number(edge.absWeight || Math.abs(edge.edgeWeight || 0));
         const strokeWidth = 0.35 + 3.2 * Math.sqrt(Math.min(1, absWeight / Math.max(1e-6, maxAbs)));
         const path = svgEl("path", {
-          d: chordPath(cx, cy, source.thetaMid, target.thetaMid, linkR),
+          d: chordPath(cx, cy, source.thetaMid, target.thetaMid, radii.linkRadius),
           fill: "none",
           stroke: edgeColor(edge),
           "stroke-width": connectedToSelection ? strokeWidth + 1.2 : strokeWidth,
@@ -3616,7 +3561,7 @@ def _interactive_html_template() -> str:
         const isNeighbor = selection.hasSelection && selection.selectedVisible && selection.neighborIds.has(node.id);
         const dimmed = selection.hasSelection && selection.selectedVisible && !isSelected && !isNeighbor;
         const outerSegment = svgEl("path", {
-          d: annularPath(cx, cy, stripInner, outerR, geometry.thetaStart, geometry.thetaEnd),
+          d: annularPath(cx, cy, radii.outerStripInner, radii.outerStripOuter, geometry.thetaStart, geometry.thetaEnd),
           fill: nodeColor(node),
           opacity: dimmed ? 0.22 : 1,
           stroke: isSelected ? "#f59e0b" : isNeighbor ? "#fbbf24" : "#ffffff",
@@ -3633,15 +3578,77 @@ def _interactive_html_template() -> str:
         outerSegment.appendChild(titleNode);
         svg.appendChild(outerSegment);
 
-        const degreeOuterR = degreeInner + (degreeOuter - degreeInner) * Math.min(1, Number(node.degree || 0) / maxDegree);
+        const track2Values = Array.isArray(node.track2Values) ? node.track2Values.map(Number).filter(Number.isFinite) : [];
+        const track2Scale = node.type === "gene" ? Number(trackScales.geneTrack2 || trackScales.geneMean || 1) : Number(trackScales.metaboliteTrack2 || trackScales.metaboliteMean || 1);
         svg.appendChild(svgEl("path", {
-          d: annularPath(cx, cy, degreeInner, degreeOuterR, geometry.thetaStart, geometry.thetaEnd),
-          fill: "#475569",
-          opacity: dimmed ? 0.15 : 0.80,
+          d: annularPath(cx, cy, radii.trackMeanbarInner, radii.trackMeanbarOuter, geometry.thetaStart, geometry.thetaEnd),
+          fill: "#fbfbfb",
+          opacity: dimmed ? 0.18 : 1,
+          stroke: "#eef2f7",
+          "stroke-width": 0.25
+        }));
+        if (track2Values.length > 1) {
+          const groupColors = dataset.track2?.group1Colors || {};
+          const groupOrder = dataset.track2?.group1Order || [];
+          for (let idx = 0; idx < track2Values.length; idx++) {
+            const value = track2Values[idx];
+            const theta = (geometry.thetaStart + geometry.thetaEnd) / 2 + (idx - (track2Values.length - 1) / 2) * Math.max(0.002, (geometry.thetaEnd - geometry.thetaStart) * 0.10);
+            const rMid = 0.5 * (radii.trackMeanbarInner + radii.trackMeanbarOuter);
+            const radialHalf = 0.42 * (radii.trackMeanbarOuter - radii.trackMeanbarInner);
+            const r = rMid + clamp(value / Math.max(1e-6, track2Scale), -1, 1) * radialHalf;
+            const xy = polarPoint(cx, cy, r, theta);
+            svg.appendChild(svgEl("circle", {
+              cx: xy.x,
+              cy: xy.y,
+              r: 2.2,
+              fill: groupColors[groupOrder[idx]] || "#6b7280",
+              opacity: dimmed ? 0.18 : 0.92,
+              stroke: "none"
+            }));
+          }
+        } else {
+          const value = track2Values.length ? track2Values[0] : Number(node.meanZScore || 0);
+          const rMid = 0.5 * (radii.trackMeanbarInner + radii.trackMeanbarOuter);
+          const rOuter = value >= 0
+            ? rMid + clamp(value / Math.max(1e-6, track2Scale), 0, 1) * (radii.trackMeanbarOuter - rMid)
+            : rMid + clamp(value / Math.max(1e-6, track2Scale), -1, 0) * (rMid - radii.trackMeanbarInner);
+          svg.appendChild(svgEl("path", {
+            d: annularPath(cx, cy, Math.min(rMid, rOuter), Math.max(rMid, rOuter), geometry.thetaStart, geometry.thetaEnd),
+            fill: "#6b7280",
+            opacity: dimmed ? 0.12 : 0.88,
+            stroke: "none"
+          }));
+        }
+
+        const meanScale = node.type === "gene" ? Number(trackScales.geneMean || 1) : Number(trackScales.metaboliteMean || 1);
+        svg.appendChild(svgEl("path", {
+          d: annularPath(cx, cy, radii.trackMeanheatInner, radii.trackMeanheatOuter, geometry.thetaStart, geometry.thetaEnd),
+          fill: signedHeatColor(Number(node.meanZScore || 0), meanScale),
+          opacity: dimmed ? 0.15 : 1,
+          stroke: "#ffffff",
+          "stroke-width": 0.25
+        }));
+
+        const degreeScale = node.type === "gene" ? Number(trackScales.geneDegree || maxDegree) : Number(trackScales.metaboliteDegree || maxDegree);
+        const degreeOuterR = radii.trackDegreeInner + (radii.trackDegreeOuter - radii.trackDegreeInner) * Math.min(1, Number(node.weightedDegree || 0) / Math.max(1e-6, degreeScale));
+        svg.appendChild(svgEl("path", {
+          d: annularPath(cx, cy, radii.trackDegreeInner, degreeOuterR, geometry.thetaStart, geometry.thetaEnd),
+          fill: "#4b5563",
+          opacity: dimmed ? 0.15 : 0.92,
           stroke: "none"
         }));
+
+        const coreScale = node.type === "gene" ? Number(trackScales.geneCore || maxCore) : Number(trackScales.metaboliteCore || maxCore);
+        const coreOuterR = radii.trackCoreInner + (radii.trackCoreOuter - radii.trackCoreInner) * Math.min(1, Number(node.moduleCore || 0) / Math.max(1e-6, coreScale));
         svg.appendChild(svgEl("path", {
-          d: annularPath(cx, cy, biasInner, biasOuter, geometry.thetaStart, geometry.thetaEnd),
+          d: annularPath(cx, cy, radii.trackCoreInner, coreOuterR, geometry.thetaStart, geometry.thetaEnd),
+          fill: node.type === "gene" ? (node.moduleColor || "#9ca3af") : "#8c6d46",
+          opacity: dimmed ? 0.14 : 0.92,
+          stroke: "none"
+        }));
+
+        svg.appendChild(svgEl("path", {
+          d: annularPath(cx, cy, radii.trackBiasInner, radii.trackBiasOuter, geometry.thetaStart, geometry.thetaEnd),
           fill: biasColor(node),
           opacity: dimmed ? 0.15 : 0.95,
           stroke: "#ffffff",
@@ -3666,6 +3673,7 @@ def _interactive_html_template() -> str:
       metabLabel.textContent = "Metabolites";
       svg.appendChild(metabLabel);
       addNetworkLegend(svg, 24, 88, "circos");
+      addTrackAnnotationLegend(svg, 24, 206);
 
       svg.addEventListener("click", () => {
         if (getViewControls("network_explorer").selectedNodeId) {
@@ -3770,8 +3778,8 @@ def _interactive_html_template() -> str:
 
     function renderNetworkSummary(dataset, rendered) {
       const legend = el("div", { className: "legend" });
-      legend.appendChild(el("span", { className: "legend-item", text: `Tier: ${dataset.tier === "high_confidence" ? "High-confidence" : "Total"}` }));
-      legend.appendChild(el("span", { className: "legend-item", text: `Edges shown: ${rendered.graph.edges.length}/${(dataset.edges || []).length}` }));
+      legend.appendChild(el("span", { className: "legend-item", text: "Source: T03 high-confidence network" }));
+      legend.appendChild(el("span", { className: "legend-item", text: `Edges: ${rendered.graph.edges.length}/${(dataset.edges || []).length}` }));
       legend.appendChild(el("span", { className: "legend-item", text: `Genes shown: ${rendered.graph.genes.length}/${dataset.summary?.genes || 0}` }));
       legend.appendChild(el("span", { className: "legend-item", text: `Metabolites shown: ${rendered.graph.metabolites.length}/${dataset.summary?.metabolites || 0}` }));
       if (getViewControls("network_explorer").selectedNodeId) {
@@ -3926,7 +3934,7 @@ def _interactive_html_template() -> str:
         el("h2", { className: "panel-title", text: dataset ? dataset.title : view.title }),
         el("p", {
           className: "panel-note",
-          text: "Filter network edges, inspect nodes by hover, and click a node to highlight first-order neighbors."
+          text: "T03-only Circos and CNet views. Inspect nodes by hover and click a node to highlight first-order neighbors."
         })
       ]));
 
@@ -3960,7 +3968,7 @@ def _interactive_html_template() -> str:
           panel.appendChild(chartWrap);
         }
       } else {
-        chartWrap.appendChild(el("div", { className: "placeholder", text: "No network payload available for the selected tier." }));
+        chartWrap.appendChild(el("div", { className: "placeholder", text: "No T03 high-confidence network payload available." }));
         panel.appendChild(chartWrap);
       }
       return panel;
