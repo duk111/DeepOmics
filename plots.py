@@ -16,8 +16,8 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from deepomics.config import AnalysisConfig
-from deepomics import plotting
+from omicsprism.config import AnalysisConfig
+from omicsprism import plotting
 
 
 TABLE_FILES = {
@@ -36,7 +36,7 @@ TABLE_FILES = {
 
 @dataclass
 class VisualizationOnlyEngine:
-    """Minimal engine object required by deepomics.plotting."""
+    """Minimal engine object required by omicsprism.plotting."""
 
     adata: ad.AnnData
     ml_results: dict[str, pd.DataFrame]
@@ -73,13 +73,13 @@ class VisualizationOnlyEngine:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Regenerate DeepOmics visualizations from saved h5ad and CSV result tables."
+        description="Regenerate OmicsPrism visualizations from saved h5ad and CSV result tables."
     )
     parser.add_argument(
         "--result-dir",
         required=True,
         type=Path,
-        help="Existing DeepOmics result directory containing .h5ad and T01~T10 CSV files.",
+        help="Existing OmicsPrism result directory containing .h5ad and T01~T10 CSV files.",
     )
     parser.add_argument(
         "--output-dir",
@@ -101,7 +101,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--project",
-        default="DeepOmics_Visualization_Test",
+        default="OmicsPrism_Visualization_Test",
         help="Project name used in regenerated reports.",
     )
     parser.add_argument(
