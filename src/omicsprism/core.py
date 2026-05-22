@@ -47,7 +47,6 @@ class MultiOmicsEngine:
             "module_summary_df": pd.DataFrame(),
         }
         self.run_metadata: Dict[str, object] = {
-            "project_name": self.config.project_name,
             "n_samples": int(self.adata.n_obs),
             "n_genes": int(self.adata.n_vars),
             "n_metabolites": int(len(self.adata.uns.get("metabolite_names", []))),
@@ -260,7 +259,7 @@ class MultiOmicsEngine:
 
     def run_all(self, generate_plots: bool = True) -> None:
         logger.info("=" * 80)
-        logger.info("Project [%s] started", self.config.project_name)
+        logger.info("OmicsPrism analysis started")
         logger.info("=" * 80)
 
         with log_step(logger, "Gene-metabolite association modeling"):
@@ -755,31 +754,6 @@ class MultiOmicsEngine:
         if isinstance(module_summary_df, pd.DataFrame) and not module_summary_df.empty:
             module_summary_df.to_csv(out_dir / TABLE_FILE_PREFIXES["module_summary"], index=False)
 
-        if self.config.export_cytoscape:
-            export_frames = [
-                df
-                for df in (
-                    total_network_df if isinstance(total_network_df, pd.DataFrame) else pd.DataFrame(),
-                    high_confidence_network_df if isinstance(high_confidence_network_df, pd.DataFrame) else pd.DataFrame(),
-                )
-                if not df.empty
-            ]
-            if export_frames:
-                cytoscape_df = pd.concat(export_frames, ignore_index=True).rename(
-                    columns={
-                        "Source": "source",
-                        "Target": "target",
-                        "Interaction": "interaction",
-                        "EdgeTier": "edge_tier",
-                        "EdgeWeight": "edge_weight",
-                        "RRARank": "rra_rank",
-                        "RRAScore": "rra_score",
-                        "ScreenSupportCount": "screen_support_count",
-                        "ModelSupportCount": "model_support_count",
-                    }
-                )
-                cytoscape_df.to_csv(out_dir / TABLE_FILE_PREFIXES["cytoscape_network"], index=False)
-
         self.run_metadata["n_total_association_edges"] = (
             int(len(total_network_df)) if isinstance(total_network_df, pd.DataFrame) else 0
         )
@@ -798,14 +772,10 @@ class MultiOmicsEngine:
 
         write_json(
             {
-                "project": self.config.project_name,
                 "config": self.config.to_dict(),
                 "summary": self.run_metadata,
             },
             out_dir / "analysis_metadata.json",
         )
-
-        if self.config.save_h5ad:
-            self.adata.write_h5ad(out_dir / "OmicsPrism_Final_State.h5ad")
 
         logger.info("Structured result tables have been exported to %s", out_dir)

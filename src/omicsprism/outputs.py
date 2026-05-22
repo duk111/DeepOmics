@@ -30,7 +30,6 @@ TABLE_FILE_PREFIXES = {
     "high_confidence_network": "T03_High_Confidence_Network.csv",
     "key_gene_summary": "T04_Key_Gene_Summary.csv",
     "metabolite_summary": "T05_Metabolite_Association_Summary.csv",
-    "cytoscape_network": "T06_Association_Network_Cytoscape.csv",
     "gene_module_assignment": "T07_Gene_Module_Assignment.csv",
     "module_eigengenes": "T08_Module_Eigengenes.csv",
     "module_metabolite_association": "T09_Module_Metabolite_Association.csv",

@@ -28,7 +28,7 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
     key_gene_summary = engine.ml_results.get("key_gene_summary_df", pd.DataFrame())
 
     lines = [
-        f"# OmicsPrism Report: {cfg.project_name}",
+        "# OmicsPrism Report",
         "",
         "## Run Summary",
         f"- Samples: {engine.adata.n_obs}",
@@ -42,7 +42,6 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         f"- `{TABLE_FILE_PREFIXES['high_confidence_network']}`: high-confidence subnetwork of the total association network after RRA and multi-evidence filtering.",
         f"- `{TABLE_FILE_PREFIXES['key_gene_summary']}`: merged key-gene summary across metabolites.",
         f"- `{TABLE_FILE_PREFIXES['metabolite_summary']}`: metabolite-level candidate and network summary.",
-        f"- `{TABLE_FILE_PREFIXES['cytoscape_network']}`: Cytoscape-ready edge table with updated association fields.",
         "",
         "## Metabolite-Level Summary",
         _df_to_markdown(metabolite_summary, max_rows=20),
@@ -81,7 +80,6 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
         f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['high_confidence_network'])}</code></td><td>High-confidence subnetwork of the total association network after RRA and multi-evidence filtering.</td></tr>",
         f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['key_gene_summary'])}</code></td><td>Merged key-gene summary across metabolites.</td></tr>",
         f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['metabolite_summary'])}</code></td><td>Metabolite-level candidate and network summary.</td></tr>",
-        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['cytoscape_network'])}</code></td><td>Cytoscape-ready edge table with updated association fields.</td></tr>",
     ])
 
     figure_rows = "".join([
@@ -106,7 +104,7 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>OmicsPrism Report - {html.escape(cfg.project_name)}</title>
+  <title>OmicsPrism Report</title>
   <style>
     body {{ font-family: Arial, sans-serif; margin: 32px; line-height: 1.5; color: #111827; }}
     h1, h2 {{ color: #1f2937; }}
@@ -134,7 +132,7 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
 </head>
 <body>
   <div class="hero">
-    <h1>OmicsPrism Report: {html.escape(cfg.project_name)}</h1>
+    <h1>OmicsPrism Report</h1>
     <p>This page summarizes structured association tables and figure file names.</p>
   </div>
 
@@ -188,22 +186,21 @@ def generate_report_plots(engine, cfg) -> None:
         f"1. Use {TABLE_FILE_PREFIXES['gene_scores']} for full metabolite-level candidate scoring.\n"
         f"2. Use {TABLE_FILE_PREFIXES['total_network']} for broad association recovery.\n"
         f"3. Use {TABLE_FILE_PREFIXES['high_confidence_network']} for the stricter high-confidence subset of the total network.\n"
-        f"4. Use {TABLE_FILE_PREFIXES['cytoscape_network']} for Cytoscape import.\n"
-        f"5. Use plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs']}.pdf|svg|png for the transcriptome PCA pairs overview (group1).\n"
-        f"6. Use plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs']}.pdf|svg|png for the metabolome PCA pairs overview (group1).\n"
-        f"7. Use plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs_subgroups']}.pdf|svg|png for the transcriptome PCA pairs overview (group2).\n"
-        f"8. Use plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs_subgroups']}.pdf|svg|png for the metabolome PCA pairs overview (group2).\n"
-        f"9. Use plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png for the top regression-panel overview.\n"
-        f"10. Use plots/{FIGURE_FILE_PREFIXES['module_top_metabolite_regressions']}.pdf|svg|png for module eigengene vs top metabolite regressions.\n"
-        f"11. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap']}.pdf|svg|png for the module eigengene heatmap with group2/group1 annotation tracks.\n"
-        f"12. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap_group2']}.pdf|svg|png for the module eigengene heatmap grouped by group2.\n"
-        f"13. Use plots/{FIGURE_FILE_PREFIXES['module_zscore_line_panels']}.pdf|svg|png for module z-score line panels faceted by group1 with group2 color strips.\n"
-        f"14. Use plots/{FIGURE_FILE_PREFIXES['module_gene_zscore_line_panels']}.pdf|svg|png for module gene z-score line panels with grey gene trajectories and black module trajectories.\n"
-        f"15. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png for the module-metabolite association heatmap.\n"
-        f"16. Use plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png for the compact T03-only Circos overview.\n"
-        f"17. Use plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png for the floating circular T03-only cnetplot-style overview.\n"
-        f"18. Use plots/{FIGURE_FILE_PREFIXES['association_evidence_upset']}.pdf|svg|png for global evidence-overlap interpretation across candidate metabolite-gene edges.\n"
-        "19. Use OmicsPrism_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
+        f"4. Use plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs']}.pdf|svg|png for the transcriptome PCA pairs overview (group1).\n"
+        f"5. Use plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs']}.pdf|svg|png for the metabolome PCA pairs overview (group1).\n"
+        f"6. Use plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs_subgroups']}.pdf|svg|png for the transcriptome PCA pairs overview (group2).\n"
+        f"7. Use plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs_subgroups']}.pdf|svg|png for the metabolome PCA pairs overview (group2).\n"
+        f"8. Use plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png for the top regression-panel overview.\n"
+        f"9. Use plots/{FIGURE_FILE_PREFIXES['module_top_metabolite_regressions']}.pdf|svg|png for module eigengene vs top metabolite regressions.\n"
+        f"10. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap']}.pdf|svg|png for the module eigengene heatmap with group2/group1 annotation tracks.\n"
+        f"11. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap_group2']}.pdf|svg|png for the module eigengene heatmap grouped by group2.\n"
+        f"12. Use plots/{FIGURE_FILE_PREFIXES['module_zscore_line_panels']}.pdf|svg|png for module z-score line panels faceted by group1 with group2 color strips.\n"
+        f"13. Use plots/{FIGURE_FILE_PREFIXES['module_gene_zscore_line_panels']}.pdf|svg|png for module gene z-score line panels with grey gene trajectories and black module trajectories.\n"
+        f"14. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png for the module-metabolite association heatmap.\n"
+        f"15. Use plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png for the compact T03-only Circos overview.\n"
+        f"16. Use plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png for the floating circular T03-only cnetplot-style overview.\n"
+        f"17. Use plots/{FIGURE_FILE_PREFIXES['association_evidence_upset']}.pdf|svg|png for global evidence-overlap interpretation across candidate metabolite-gene edges.\n"
+        "18. Use OmicsPrism_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
     )
     (plots_dir / "visualization_notes.txt").write_text(notes, encoding="utf-8")
 

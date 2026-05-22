@@ -15,14 +15,13 @@ _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 class AnalysisConfig:
     """Configuration container for the OmicsPrism workflow."""
 
-    project_name: str = "OmicsPrism_Association_Analysis"
     output_dir: str = "results"
     group_table_path: str | None = None
     random_state: int = 42
 
     missing_feature_threshold: float = 0.5
     knn_neighbors: int = 5
-    trans_log2: bool = True
+    trans_log2: bool = False
 
     screen_top_k_per_method: int = 1000
     fdr_alpha: float = 0.05
@@ -66,12 +65,9 @@ class AnalysisConfig:
     export_pdf: bool = True
     export_svg: bool = True
     export_png: bool = True
-    export_cytoscape: bool = True
-    save_h5ad: bool = True
     log_level: str = "INFO"
 
     def __post_init__(self) -> None:
-        self.project_name = str(self.project_name).strip()
         self.output_dir = str(self.output_dir)
         self.group_table_path = (
             None if self.group_table_path is None else str(self.group_table_path).strip() or None
@@ -81,8 +77,6 @@ class AnalysisConfig:
         self.module_method = str(self.module_method).lower().strip()
         self.report_formats = self._normalize_report_formats(self.report_formats)
 
-        if not self.project_name:
-            raise ValueError("project_name must not be empty.")
         if self.group_table_path is None:
             raise ValueError(
                 "group_table_path is required and must point to a group table with "

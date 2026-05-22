@@ -273,7 +273,7 @@ def preprocess_adata(
     scale: bool = True,
     missing_feature_threshold: float = 0.5,
     knn_neighbors: int = 5,
-    trans_log2: bool = True,
+    trans_log2: bool = False,
 ) -> ad.AnnData:
     """Apply filtering, optional transcriptome log transformation, KNN imputation, variance filtering, and scaling."""
     if "metabolomics" not in adata.obsm:
@@ -402,12 +402,6 @@ def preprocess_adata(
         "metabolomics_log2p1": metab_log_info,
     }
     return adata
-
-
-def save_h5ad(adata: ad.AnnData, filename: str | Path) -> None:
-    """Persist an AnnData object to disk."""
-    adata.write_h5ad(str(filename))
-    logger.info("Analysis state saved to %s", filename)
 
 
 def read_h5ad(filename: str | Path) -> ad.AnnData:

@@ -26,7 +26,6 @@ TABLE_FILES = {
     "high_confidence_network_df": "T03_High_Confidence_Network.csv",
     "key_gene_summary_df": "T04_Key_Gene_Summary.csv",
     "metabolite_summary": "T05_Metabolite_Association_Summary.csv",
-    "cytoscape_network_df": "T06_Association_Network_Cytoscape.csv",
     "gene_module_assignment_df": "T07_Gene_Module_Assignment.csv",
     "module_eigengenes_df": "T08_Module_Eigengenes.csv",
     "module_metabolite_assoc_df": "T09_Module_Metabolite_Association.csv",
@@ -100,11 +99,6 @@ def parse_args() -> argparse.Namespace:
         help="Optional PCA group table with sample_id and group/group1 columns.",
     )
     parser.add_argument(
-        "--project",
-        default="OmicsPrism_Visualization_Test",
-        help="Project name used in regenerated reports.",
-    )
-    parser.add_argument(
         "--formats",
         nargs="+",
         default=["html"],
@@ -141,7 +135,7 @@ def find_h5ad(result_dir: Path, explicit_state: Path | None) -> Path:
     if not candidates:
         raise FileNotFoundError(
             f"No .h5ad file found in {result_dir}. "
-            "Run the original analysis without --no-save-state first, or pass --state explicitly."
+            "Pass --state explicitly to use an existing AnnData file."
         )
 
     if len(candidates) > 1:
@@ -174,7 +168,6 @@ def build_config(args: argparse.Namespace, output_dir: Path) -> AnalysisConfig:
     group_table = resolve_path(args.group_table) if args.group_table is not None else None
 
     return AnalysisConfig(
-        project_name=args.project,
         output_dir=str(output_dir),
         group_table_path=str(group_table) if group_table is not None else None,
         generate_reports=not args.no_report,
@@ -182,7 +175,6 @@ def build_config(args: argparse.Namespace, output_dir: Path) -> AnalysisConfig:
         export_pdf=not args.png_only,
         export_svg=not args.png_only,
         export_png=True,
-        save_h5ad=False,
     )
 
 

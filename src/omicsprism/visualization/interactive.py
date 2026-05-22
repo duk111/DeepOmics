@@ -199,7 +199,7 @@ def _build_summary_payload(engine, cfg) -> dict[str, Any]:
     total_df = engine.ml_results.get("total_association_network_df", pd.DataFrame())
     high_df = engine.ml_results.get("high_confidence_network_df", pd.DataFrame())
     return {
-        "projectName": str(cfg.project_name),
+        "projectName": "OmicsPrism",
         "samples": int(engine.adata.n_obs),
         "genes": int(engine.adata.n_vars),
         "metabolites": int(len(engine.adata.uns.get("metabolite_names", []))),

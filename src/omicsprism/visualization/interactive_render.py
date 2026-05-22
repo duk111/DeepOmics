@@ -33,9 +33,9 @@ def _json_script_payload(data: Any) -> str:
     return _json_dumps(data).replace("</", "<\\/")
 
 
-def render_interactive_report_html_from_model(model: InteractiveReportModel, project_name: str) -> str:
+def render_interactive_report_html_from_model(model: InteractiveReportModel, report_name: str) -> str:
     html_text = _interactive_html_template()
-    html_text = html_text.replace("__PROJECT_NAME__", html.escape(str(project_name)))
+    html_text = html_text.replace("__PROJECT_NAME__", html.escape(str(report_name)))
     html_text = html_text.replace("__PAYLOAD__", _json_script_payload(model.to_dict()))
     return html_text
 
@@ -46,7 +46,7 @@ def render_interactive_report_html(
     model_builder: Callable[[Any, Any], InteractiveReportModel],
 ) -> str:
     model = model_builder(engine, cfg)
-    return render_interactive_report_html_from_model(model, str(cfg.project_name))
+    return render_interactive_report_html_from_model(model, "OmicsPrism")
 
 
 def generate_interactive_visual_report(
