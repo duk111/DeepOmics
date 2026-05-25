@@ -140,25 +140,6 @@ def _plot_volcano(
     plt.close(fig)
 
 
-def _plot_combined_volcano(
-    all_results: list[pd.DataFrame],
-    output_path: Path,
-    padj_cutoff: float,
-    log2fc_cutoff: float,
-) -> None:
-    if not all_results:
-        return
-
-    combined = pd.concat(all_results, ignore_index=True)
-    _plot_volcano(
-        results_df=combined,
-        comparison="All Contrasts",
-        output_path=output_path,
-        padj_cutoff=padj_cutoff,
-        log2fc_cutoff=log2fc_cutoff,
-    )
-
-
 def _plot_ma(
     results_df: pd.DataFrame,
     comparison: str,
@@ -206,25 +187,6 @@ def _plot_ma(
     fig.tight_layout()
     fig.savefig(output_path, dpi=300)
     plt.close(fig)
-
-
-def _plot_combined_ma(
-    all_results: list[pd.DataFrame],
-    output_path: Path,
-    padj_cutoff: float,
-    log2fc_cutoff: float,
-) -> None:
-    if not all_results:
-        return
-
-    combined = pd.concat(all_results, ignore_index=True)
-    _plot_ma(
-        results_df=combined,
-        comparison="All Contrasts",
-        output_path=output_path,
-        padj_cutoff=padj_cutoff,
-        log2fc_cutoff=log2fc_cutoff,
-    )
 
 
 def _build_differential_gene_counts(all_results: list[pd.DataFrame]) -> pd.DataFrame:
@@ -503,18 +465,6 @@ def run_pipeline(
         sig.to_csv(out_dir / f"{contrast_name}.sig.csv", index=False)
         sig_results.append(sig)
 
-    _plot_combined_volcano(
-        all_results=all_contrast_results,
-        output_path=volcano_plot_dir / "all_contrasts.volcano.png",
-        padj_cutoff=padj_cutoff,
-        log2fc_cutoff=log2fc_cutoff,
-    )
-    _plot_combined_ma(
-        all_results=all_contrast_results,
-        output_path=ma_plot_dir / "all_contrasts.ma.png",
-        padj_cutoff=padj_cutoff,
-        log2fc_cutoff=log2fc_cutoff,
-    )
     deg_counts = _build_differential_gene_counts(all_contrast_results)
     deg_counts_path = out_dir / "differential_gene_counts.csv"
     deg_counts.to_csv(deg_counts_path, index=False)

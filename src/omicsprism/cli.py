@@ -6,6 +6,7 @@ import click
 
 from .config import AnalysisConfig
 from .core import MultiOmicsEngine
+from .dem.pipeline import run_pipeline as run_dem_pipeline
 from .deg.pipeline import run_pipeline as run_deg_pipeline
 from .deg.utils import parse_csv_arg
 from .io import load_as_anndata, preprocess_adata
@@ -171,6 +172,85 @@ def deg(
     click.echo(f"Valid contrasts: {result['n_contrasts']}")
     click.echo(f"Union significant genes: {result['n_union_significant_genes']}")
     click.echo(f"OmicsPrism-ready VST matrix: {result['union_significant_genes_vst']}")
+
+
+@main.command()
+@click.option("--metabs", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Metabolite abundance matrix CSV. Rows are metabolites and columns are samples.")
+@click.option("--metadata", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Sample metadata CSV. Must contain sample_id.")
+@click.option("--out", required=True, type=click.Path(file_okay=False, path_type=Path), help="Output directory for DEM results.")
+@click.option("--same-fields", default=None, help="Comma-separated metadata fields that must be identical inside each contrast, for example line,timepoint.")
+@click.option("--compare-field", required=True, help="Metadata field to compare, for example treatment.")
+@click.option("--tested-levels", required=True, help="Comma-separated tested levels, for example salt or salt,drought,heat.")
+@click.option("--reference-level", required=True, help="Reference level, for example control.")
+@click.option("--vip-cutoff", type=float, default=1.0, show_default=True, help="OPLS-DA VIP cutoff for significant metabolites.")
+@click.option("--padj-cutoff", type=float, default=0.05, show_default=True, help="Benjamini-Hochberg adjusted p-value cutoff for significant metabolites.")
+@click.option("--log2fc-cutoff", type=float, default=1.0, show_default=True, help="Absolute log2 fold-change cutoff for significant metabolites.")
+@click.option("--pseudocount", type=float, default=1e-9, show_default=True, help="Small value added before fold-change calculation.")
+@click.option("--max-missing-fraction", type=float, default=0.5, show_default=True, help="Drop metabolites above this missing-value fraction within a contrast.")
+@click.option("--min-replicates", type=int, default=2, show_default=True, help="Minimum samples required for each tested/reference group in a contrast.")
+@click.option("--opls-orthogonal-components", type=int, default=1, show_default=True, help="Number of orthogonal components to remove in the OPLS-DA model.")
+def dem(
+    metabs: Path,
+    metadata: Path,
+    out: Path,
+    same_fields: str | None,
+    compare_field: str,
+    tested_levels: str,
+    reference_level: str,
+    vip_cutoff: float,
+    padj_cutoff: float,
+    log2fc_cutoff: float,
+    pseudocount: float,
+    max_missing_fraction: float,
+    min_replicates: int,
+    opls_orthogonal_components: int,
+) -> None:
+    """Run differential metabolite analysis before the main OmicsPrism workflow."""
+    try:
+        same_fields_list = parse_csv_arg(same_fields)
+        tested_levels_list = parse_csv_arg(tested_levels)
+
+        if not tested_levels_list:
+            raise ValueError("--tested-levels must contain at least one level.")
+        if vip_cutoff < 0:
+            raise ValueError("--vip-cutoff must be non-negative.")
+        if padj_cutoff <= 0 or padj_cutoff > 1:
+            raise ValueError("--padj-cutoff must be in the interval (0, 1].")
+        if log2fc_cutoff < 0:
+            raise ValueError("--log2fc-cutoff must be non-negative.")
+        if pseudocount < 0:
+            raise ValueError("--pseudocount must be non-negative.")
+        if max_missing_fraction < 0 or max_missing_fraction > 1:
+            raise ValueError("--max-missing-fraction must be in the interval [0, 1].")
+        if min_replicates < 2:
+            raise ValueError("--min-replicates must be at least 2 for t-test based DEM analysis.")
+        if opls_orthogonal_components < 0:
+            raise ValueError("--opls-orthogonal-components must be non-negative.")
+
+        result = run_dem_pipeline(
+            metabs_path=metabs,
+            metadata_path=metadata,
+            out_dir=out,
+            same_fields=same_fields_list,
+            compare_field=compare_field,
+            tested_levels=tested_levels_list,
+            reference_level=reference_level,
+            vip_cutoff=vip_cutoff,
+            padj_cutoff=padj_cutoff,
+            log2fc_cutoff=log2fc_cutoff,
+            pseudocount=pseudocount,
+            max_missing_fraction=max_missing_fraction,
+            min_replicates=min_replicates,
+            n_orthogonal_components=opls_orthogonal_components,
+        )
+    except Exception as exc:  # pragma: no cover
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo("Differential metabolite analysis finished.")
+    click.echo(f"Output directory: {result['out_dir']}")
+    click.echo(f"Valid contrasts: {result['n_contrasts']}")
+    click.echo(f"Union significant metabolites: {result['n_union_significant_metabolites']}")
+    click.echo(f"OmicsPrism-ready metabolite matrix: {result['union_significant_metabolites_matrix']}")
 
 
 if __name__ == "__main__":
