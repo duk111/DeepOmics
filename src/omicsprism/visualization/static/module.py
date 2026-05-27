@@ -8,7 +8,9 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib import colors
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from scipy.stats import gaussian_kde
 
 from .base import (
     _gene_expression_df,
@@ -1098,6 +1100,225 @@ def plot_module_gene_zscore_line_panels(
     _save_figure(fig, save_stem, cfg)
 
 
+def _module_color_map_from_results(engine, module_order: list[str]) -> dict[str, str]:
+    module_color_map: dict[str, str] = {}
+    module_summary_df = engine.ml_results.get("module_summary_df", pd.DataFrame())
+    if isinstance(module_summary_df, pd.DataFrame) and not module_summary_df.empty:
+        if {"Module", "ModuleColorHex"}.issubset(module_summary_df.columns):
+            for _, row in module_summary_df.loc[:, ["Module", "ModuleColorHex"]].iterrows():
+                module_name = str(row["Module"]).strip()
+                color_value = str(row["ModuleColorHex"]).strip()
+                if not module_name or not color_value:
+                    continue
+                try:
+                    module_color_map[module_name] = colors.to_hex(colors.to_rgba(color_value), keep_alpha=False)
+                except ValueError:
+                    continue
+
+    fallback_colors = sns.color_palette("tab20", n_colors=max(1, len(module_order))).as_hex()
+    for idx, module_name in enumerate(module_order):
+        module_color_map.setdefault(str(module_name), fallback_colors[idx % len(fallback_colors)])
+    return module_color_map
+
+
+def _density_curve(values: np.ndarray, x_grid: np.ndarray) -> np.ndarray | None:
+    clean_values = np.asarray(values, dtype=float)
+    clean_values = clean_values[np.isfinite(clean_values)]
+    if clean_values.size < 2:
+        return None
+    if float(np.nanstd(clean_values)) <= 1e-9:
+        return None
+    try:
+        density = gaussian_kde(clean_values)(x_grid)
+    except (ValueError, np.linalg.LinAlgError):
+        return None
+    density = np.asarray(density, dtype=float)
+    if not np.isfinite(density).any() or float(np.nanmax(density)) <= 0:
+        return None
+    return density / float(np.nanmax(density))
+
+
+def _prepare_module_ridge_matrix(engine) -> tuple[pd.DataFrame, list[str]]:
+    eigengenes_df = _coerce_module_eigengene_df(engine.ml_results.get("module_eigengenes_df", pd.DataFrame()))
+    if eigengenes_df.empty:
+        return pd.DataFrame(), []
+
+    module_order = _module_order_from_summary(
+        engine.ml_results.get("module_summary_df", pd.DataFrame()),
+        eigengenes_df.columns.astype(str).tolist(),
+    )
+    module_order = [module for module in module_order if module in eigengenes_df.columns]
+    if not module_order:
+        return pd.DataFrame(), []
+
+    eigengenes_df = eigengenes_df.loc[:, module_order].copy()
+    zscore_df = _row_zscore(eigengenes_df.T).T
+    return zscore_df, module_order
+
+
+def plot_module_eigengene_ridge(
+    engine,
+    save_stem: str | Path,
+    cfg,
+    group_df: pd.DataFrame | None = None,
+) -> None:
+    zscore_df, module_order = _prepare_module_ridge_matrix(engine)
+    if zscore_df.empty or not module_order:
+        return
+
+    finite_values = zscore_df.to_numpy(dtype=float, copy=False)
+    finite_values = finite_values[np.isfinite(finite_values)]
+    if finite_values.size < 2:
+        return
+
+    x_min = float(np.nanmin(finite_values))
+    x_max = float(np.nanmax(finite_values))
+    if np.isclose(x_min, x_max):
+        x_min -= 1.0
+        x_max += 1.0
+    x_pad = max(0.25, 0.10 * (x_max - x_min))
+    x_grid = np.linspace(x_min - x_pad, x_max + x_pad, 256)
+
+    module_color_map = _module_color_map_from_results(engine, module_order)
+    n_modules = len(module_order)
+    fig_width = 9.2
+    fig_height = max(4.8, min(22.0, 0.58 * n_modules + 1.6))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+    ridge_height = 0.78
+    for row_idx, module_name in enumerate(module_order):
+        y_base = float(n_modules - row_idx - 1)
+        values = pd.to_numeric(zscore_df[module_name], errors="coerce").dropna().to_numpy(dtype=float)
+        density = _density_curve(values, x_grid)
+        color_value = module_color_map.get(str(module_name), "#9ca3af")
+        if density is not None:
+            y_values = y_base + density * ridge_height
+            ax.fill_between(x_grid, y_base, y_values, color=color_value, alpha=0.42, linewidth=0)
+            ax.plot(x_grid, y_values, color=color_value, linewidth=1.25)
+        else:
+            ax.hlines(y_base, x_grid[0], x_grid[-1], color=color_value, linewidth=1.0, alpha=0.8)
+        if values.size:
+            ax.vlines(
+                values,
+                y_base,
+                y_base + ridge_height * 0.12,
+                color=color_value,
+                linewidth=0.55,
+                alpha=0.35,
+            )
+        ax.axhline(y_base, color="#e5e7eb", linewidth=0.55, zorder=0)
+
+    ax.set_yticks(np.arange(n_modules, dtype=float))
+    ax.set_yticklabels(list(reversed(module_order)))
+    ax.set_xlabel("Module eigengene z-score")
+    ax.set_ylabel("Module")
+    ax.set_title("Module Eigengene Ridge Distribution")
+    ax.set_ylim(-0.35, n_modules - 1 + ridge_height + 0.20)
+    ax.grid(axis="x", color="#e5e7eb", linewidth=0.55)
+    ax.set_axisbelow(True)
+    _save_figure(fig, save_stem, cfg)
+
+
+def plot_module_eigengene_ridge_group1(
+    engine,
+    save_stem: str | Path,
+    cfg,
+    group_df: pd.DataFrame | None = None,
+) -> None:
+    zscore_df, module_order = _prepare_module_ridge_matrix(engine)
+    if zscore_df.empty or not module_order:
+        return
+
+    sample_names = zscore_df.index.astype(str).tolist()
+    annotation_df = _align_group_annotations_to_samples(sample_names, group_df)
+    if annotation_df.empty:
+        return
+    annotation_df = annotation_df.reindex(sample_names)
+
+    group_orders = annotation_df["_group_table_order"].astype(int).tolist()
+    group_orders_by_col, color_maps_by_col = _module_group_orders_and_colors(
+        group_df,
+        annotation_df["group1"].astype(str).tolist(),
+        annotation_df["group2"].astype(str).tolist(),
+        group_orders,
+    )
+    group1_order = group_orders_by_col.get("group1", [])
+    group1_color_map = color_maps_by_col.get("group1", {})
+    if not group1_order:
+        return
+
+    finite_values = zscore_df.to_numpy(dtype=float, copy=False)
+    finite_values = finite_values[np.isfinite(finite_values)]
+    if finite_values.size < 2:
+        return
+    x_min = float(np.nanmin(finite_values))
+    x_max = float(np.nanmax(finite_values))
+    if np.isclose(x_min, x_max):
+        x_min -= 1.0
+        x_max += 1.0
+    x_pad = max(0.25, 0.10 * (x_max - x_min))
+    x_grid = np.linspace(x_min - x_pad, x_max + x_pad, 256)
+
+    n_modules = len(module_order)
+    fig_width = 9.6
+    fig_height = max(4.8, min(22.0, 0.62 * n_modules + 1.9))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+    ridge_height = 0.72
+    group_offsets = _centered_point_offsets(len(group1_order), width=0.12)
+    for row_idx, module_name in enumerate(module_order):
+        y_base = float(n_modules - row_idx - 1)
+        for group_idx, group1_name in enumerate(group1_order):
+            group_samples = annotation_df.index[
+                annotation_df["group1"].astype(str).eq(str(group1_name))
+            ].astype(str).tolist()
+            values = pd.to_numeric(zscore_df.loc[group_samples, module_name], errors="coerce").dropna().to_numpy(dtype=float)
+            density = _density_curve(values, x_grid)
+            color_value = group1_color_map.get(str(group1_name), "#9ca3af")
+            if density is not None:
+                y_values = y_base + density * ridge_height
+                ax.fill_between(x_grid, y_base, y_values, color=color_value, alpha=0.16, linewidth=0)
+                ax.plot(x_grid, y_values, color=color_value, linewidth=1.0, alpha=0.92)
+            if values.size:
+                ax.vlines(
+                    values,
+                    y_base + group_offsets[group_idx],
+                    y_base + group_offsets[group_idx] + ridge_height * 0.10,
+                    color=color_value,
+                    linewidth=0.55,
+                    alpha=0.36,
+                )
+        ax.axhline(y_base, color="#e5e7eb", linewidth=0.55, zorder=0)
+
+    legend_handles = [
+        Line2D([0], [0], color=group1_color_map.get(str(group_name), "#9ca3af"), linewidth=2.0, label=str(group_name))
+        for group_name in group1_order
+    ]
+    if legend_handles:
+        legend_ncol = min(len(legend_handles), max(1, int(fig_width // 1.15)))
+        fig.legend(
+            handles=legend_handles,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.012),
+            ncol=legend_ncol,
+            frameon=False,
+            fontsize=9,
+            handlelength=1.5,
+            columnspacing=0.9,
+        )
+
+    ax.set_yticks(np.arange(n_modules, dtype=float))
+    ax.set_yticklabels(list(reversed(module_order)))
+    ax.set_xlabel("Module eigengene z-score")
+    ax.set_ylabel("Module")
+    ax.set_title("Module Eigengene Ridge Distribution by group1")
+    ax.set_ylim(-0.35, n_modules - 1 + ridge_height + 0.20)
+    ax.grid(axis="x", color="#e5e7eb", linewidth=0.55)
+    ax.set_axisbelow(True)
+    fig.subplots_adjust(bottom=0.14)
+    _save_figure(fig, save_stem, cfg)
+
+
 def plot_module_metabolite_association_heatmap(engine, save_stem: str | Path, cfg) -> None:
     assoc_df = engine.ml_results.get("module_metabolite_assoc_df", pd.DataFrame())
     if not isinstance(assoc_df, pd.DataFrame) or assoc_df.empty:
@@ -1225,5 +1446,7 @@ __all__ = [
     "plot_module_eigengene_heatmap_group2",
     "plot_module_zscore_line_panels",
     "plot_module_gene_zscore_line_panels",
+    "plot_module_eigengene_ridge",
+    "plot_module_eigengene_ridge_group1",
     "plot_module_metabolite_association_heatmap",
 ]

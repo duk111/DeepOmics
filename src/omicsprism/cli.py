@@ -187,6 +187,9 @@ def deg(
 @click.option("--log2fc-cutoff", type=float, default=1.0, show_default=True, help="Absolute log2 fold-change cutoff for significant metabolites.")
 @click.option("--pseudocount", type=float, default=1e-9, show_default=True, help="Small value added before fold-change calculation.")
 @click.option("--max-missing-fraction", type=float, default=0.5, show_default=True, help="Drop metabolites above this missing-value fraction within a contrast.")
+@click.option("--impute", "impute_method", type=click.Choice(["half-min", "median"], case_sensitive=False), default="half-min", show_default=True, help="Missing-value imputation method after missing-rate filtering.")
+@click.option("--no-normalize", is_flag=True, help="Disable default sample-wise median normalization for raw metabolite peaks.")
+@click.option("--no-log", is_flag=True, help="Disable default log2 transformation before t-test and OPLS-DA.")
 @click.option("--min-replicates", type=int, default=2, show_default=True, help="Minimum samples required for each tested/reference group in a contrast.")
 @click.option("--opls-orthogonal-components", type=int, default=1, show_default=True, help="Number of orthogonal components to remove in the OPLS-DA model.")
 def dem(
@@ -202,6 +205,9 @@ def dem(
     log2fc_cutoff: float,
     pseudocount: float,
     max_missing_fraction: float,
+    impute_method: str,
+    no_normalize: bool,
+    no_log: bool,
     min_replicates: int,
     opls_orthogonal_components: int,
 ) -> None:
@@ -240,6 +246,9 @@ def dem(
             log2fc_cutoff=log2fc_cutoff,
             pseudocount=pseudocount,
             max_missing_fraction=max_missing_fraction,
+            impute_method=impute_method.lower(),
+            normalize=not no_normalize,
+            log_transform=not no_log,
             min_replicates=min_replicates,
             n_orthogonal_components=opls_orthogonal_components,
         )

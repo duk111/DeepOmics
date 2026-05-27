@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from omicsprism.differential_plots import plot_differential_sankey, plot_differential_upset
+
 from .utils import (
     align_counts_and_metadata,
     build_contrasts,
@@ -38,6 +40,18 @@ def _ensure_ma_plot_dir(out_dir: Path) -> Path:
 
 def _ensure_deg_count_plot_dir(out_dir: Path) -> Path:
     plot_dir = out_dir / "plots" / "deg_counts"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    return plot_dir
+
+
+def _ensure_upset_plot_dir(out_dir: Path) -> Path:
+    plot_dir = out_dir / "plots" / "upset"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    return plot_dir
+
+
+def _ensure_sankey_plot_dir(out_dir: Path) -> Path:
+    plot_dir = out_dir / "plots" / "sankey"
     plot_dir.mkdir(parents=True, exist_ok=True)
     return plot_dir
 
@@ -361,6 +375,8 @@ def run_pipeline(
     volcano_plot_dir = _ensure_volcano_plot_dir(out_dir)
     ma_plot_dir = _ensure_ma_plot_dir(out_dir)
     deg_count_plot_dir = _ensure_deg_count_plot_dir(out_dir)
+    upset_plot_dir = _ensure_upset_plot_dir(out_dir)
+    sankey_plot_dir = _ensure_sankey_plot_dir(out_dir)
 
     counts_gene_sample = load_counts(counts_path)
     metadata = load_metadata(metadata_path)
@@ -472,10 +488,31 @@ def run_pipeline(
         counts_df=deg_counts,
         output_path=deg_count_plot_dir / "differential_gene_counts.bar.png",
     )
+    plot_differential_sankey(
+        deg_counts,
+        contrasts,
+        same_fields=same_fields,
+        same_field_orders={
+            field: metadata_aligned[field].astype(str).drop_duplicates().tolist()
+            for field in same_fields
+        },
+        tested_level_order=tested_levels,
+        tested_level_count=len(tested_levels),
+        title="Differential Gene Count Flow",
+        output_html=sankey_plot_dir / "differential_sankey.html",
+        output_png=sankey_plot_dir / "differential_sankey.png",
+    )
 
     union = _build_union_significant_genes(sig_results)
     union_path = out_dir / "union_significant_genes.csv"
     union.to_csv(union_path, index=False)
+    plot_differential_upset(
+        sig_results,
+        feature_col="gene_id",
+        title="Differential Gene Overlap",
+        unit_label="Genes",
+        output_path=upset_plot_dir / "differential_gene_upset.png",
+    )
 
     union_genes = union["gene_id"].astype(str).tolist() if not union.empty else []
     union_vst = _extract_vst_matrix(

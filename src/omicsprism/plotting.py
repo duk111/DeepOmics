@@ -65,6 +65,19 @@ from .visualization.static.network import (
     plot_compressed_circos_network,
     plot_floating_cnet_circos_network,
 )
+from .visualization.static.correlation import (
+    plot_top_gene_metabolite_correlation_heatmaps,
+)
+from .visualization.static.embedding import (
+    plot_metabolome_tsne,
+    plot_metabolome_tsne_subgroups,
+    plot_metabolome_umap,
+    plot_metabolome_umap_subgroups,
+    plot_transcriptome_tsne,
+    plot_transcriptome_tsne_subgroups,
+    plot_transcriptome_umap,
+    plot_transcriptome_umap_subgroups,
+)
 from .visualization.static.regression import (
     _optional_plot_color,
     _module_annotation_maps,
@@ -104,6 +117,8 @@ from .visualization.static.module import (
     _coerce_engine_gene_expression_df,
     _module_gene_map_from_assignment,
     plot_module_gene_zscore_line_panels,
+    plot_module_eigengene_ridge,
+    plot_module_eigengene_ridge_group1,
     plot_module_metabolite_association_heatmap,
 )
 from .visualization.reports import (
@@ -179,6 +194,15 @@ __all__ = [
     "_add_track_annotation_legend",
     "plot_compressed_circos_network",
     "plot_floating_cnet_circos_network",
+    "plot_top_gene_metabolite_correlation_heatmaps",
+    "plot_transcriptome_umap",
+    "plot_transcriptome_umap_subgroups",
+    "plot_metabolome_umap",
+    "plot_metabolome_umap_subgroups",
+    "plot_transcriptome_tsne",
+    "plot_transcriptome_tsne_subgroups",
+    "plot_metabolome_tsne",
+    "plot_metabolome_tsne_subgroups",
     "_optional_plot_color",
     "_module_annotation_maps",
     "_finite_xy_arrays",
@@ -213,6 +237,8 @@ __all__ = [
     "_coerce_engine_gene_expression_df",
     "_module_gene_map_from_assignment",
     "plot_module_gene_zscore_line_panels",
+    "plot_module_eigengene_ridge",
+    "plot_module_eigengene_ridge_group1",
     "plot_module_metabolite_association_heatmap",
     "_df_to_markdown",
     "generate_markdown_report",

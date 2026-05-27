@@ -6,9 +6,22 @@ from typing import Callable
 
 from ..outputs import FIGURE_FILE_PREFIXES, TABLE_FILE_PREFIXES
 from .context import VisualizationContext
+from .static.correlation import plot_top_gene_metabolite_correlation_heatmaps
+from .static.embedding import (
+    plot_metabolome_tsne,
+    plot_metabolome_tsne_subgroups,
+    plot_metabolome_umap,
+    plot_metabolome_umap_subgroups,
+    plot_transcriptome_tsne,
+    plot_transcriptome_tsne_subgroups,
+    plot_transcriptome_umap,
+    plot_transcriptome_umap_subgroups,
+)
 from .static.module import (
     plot_module_eigengene_heatmap,
     plot_module_eigengene_heatmap_group2,
+    plot_module_eigengene_ridge,
+    plot_module_eigengene_ridge_group1,
     plot_module_gene_zscore_line_panels,
     plot_module_metabolite_association_heatmap,
     plot_module_zscore_line_panels,
@@ -142,8 +155,44 @@ def _render_metabolome_pca_pairs_subgroups(context: VisualizationContext, save_s
     )
 
 
+def _render_transcriptome_umap(context: VisualizationContext, save_stem: Path) -> None:
+    plot_transcriptome_umap(context.pca_adata, save_stem, context.cfg, group_df=context.pca_group_df)
+
+
+def _render_transcriptome_umap_subgroups(context: VisualizationContext, save_stem: Path) -> None:
+    plot_transcriptome_umap_subgroups(context.pca_adata, save_stem, context.cfg, group_df=context.pca_group_df)
+
+
+def _render_metabolome_umap(context: VisualizationContext, save_stem: Path) -> None:
+    plot_metabolome_umap(context.pca_adata, save_stem, context.cfg, group_df=context.pca_group_df)
+
+
+def _render_metabolome_umap_subgroups(context: VisualizationContext, save_stem: Path) -> None:
+    plot_metabolome_umap_subgroups(context.pca_adata, save_stem, context.cfg, group_df=context.pca_group_df)
+
+
+def _render_transcriptome_tsne(context: VisualizationContext, save_stem: Path) -> None:
+    plot_transcriptome_tsne(context.pca_adata, save_stem, context.cfg, group_df=context.pca_group_df)
+
+
+def _render_transcriptome_tsne_subgroups(context: VisualizationContext, save_stem: Path) -> None:
+    plot_transcriptome_tsne_subgroups(context.pca_adata, save_stem, context.cfg, group_df=context.pca_group_df)
+
+
+def _render_metabolome_tsne(context: VisualizationContext, save_stem: Path) -> None:
+    plot_metabolome_tsne(context.pca_adata, save_stem, context.cfg, group_df=context.pca_group_df)
+
+
+def _render_metabolome_tsne_subgroups(context: VisualizationContext, save_stem: Path) -> None:
+    plot_metabolome_tsne_subgroups(context.pca_adata, save_stem, context.cfg, group_df=context.pca_group_df)
+
+
 def _render_top_edge_scatter_panels(context: VisualizationContext, save_stem: Path) -> None:
     plot_top_edge_scatter_panels(context.engine, save_stem, context.cfg)
+
+
+def _render_top_gene_metabolite_correlation_heatmaps(context: VisualizationContext, save_stem: Path) -> None:
+    plot_top_gene_metabolite_correlation_heatmaps(context.engine, save_stem, context.cfg)
 
 
 def _render_module_top_metabolite_regression_panels(context: VisualizationContext, save_stem: Path) -> None:
@@ -186,6 +235,24 @@ def _render_module_gene_zscore_line_panels(context: VisualizationContext, save_s
     )
 
 
+def _render_module_eigengene_ridge(context: VisualizationContext, save_stem: Path) -> None:
+    plot_module_eigengene_ridge(
+        context.engine,
+        save_stem,
+        context.cfg,
+        group_df=context.pca_group_df,
+    )
+
+
+def _render_module_eigengene_ridge_group1(context: VisualizationContext, save_stem: Path) -> None:
+    plot_module_eigengene_ridge_group1(
+        context.engine,
+        save_stem,
+        context.cfg,
+        group_df=context.pca_group_df,
+    )
+
+
 def _render_module_metabolite_association_heatmap(context: VisualizationContext, save_stem: Path) -> None:
     plot_module_metabolite_association_heatmap(context.engine, save_stem, context.cfg)
 
@@ -208,6 +275,10 @@ STATIC_FIGURE_SPECS: tuple[FigureSpec, ...] = (
     FigureSpec("metabolome_pca", "metabolome_pca", _render_metabolome_pca),
     FigureSpec("transcriptome_pca_pairs", "transcriptome_pca_pairs", _render_transcriptome_pca_pairs),
     FigureSpec("metabolome_pca_pairs", "metabolome_pca_pairs", _render_metabolome_pca_pairs),
+    FigureSpec("transcriptome_umap", "transcriptome_umap", _render_transcriptome_umap),
+    FigureSpec("metabolome_umap", "metabolome_umap", _render_metabolome_umap),
+    FigureSpec("transcriptome_tsne", "transcriptome_tsne", _render_transcriptome_tsne),
+    FigureSpec("metabolome_tsne", "metabolome_tsne", _render_metabolome_tsne),
     FigureSpec(
         "transcriptome_pca_subgroups",
         "transcriptome_pca_subgroups",
@@ -232,7 +303,36 @@ STATIC_FIGURE_SPECS: tuple[FigureSpec, ...] = (
         _render_metabolome_pca_pairs_subgroups,
         enabled=_has_secondary_pca_grouping,
     ),
+    FigureSpec(
+        "transcriptome_umap_subgroups",
+        "transcriptome_umap_subgroups",
+        _render_transcriptome_umap_subgroups,
+        enabled=_has_secondary_pca_grouping,
+    ),
+    FigureSpec(
+        "metabolome_umap_subgroups",
+        "metabolome_umap_subgroups",
+        _render_metabolome_umap_subgroups,
+        enabled=_has_secondary_pca_grouping,
+    ),
+    FigureSpec(
+        "transcriptome_tsne_subgroups",
+        "transcriptome_tsne_subgroups",
+        _render_transcriptome_tsne_subgroups,
+        enabled=_has_secondary_pca_grouping,
+    ),
+    FigureSpec(
+        "metabolome_tsne_subgroups",
+        "metabolome_tsne_subgroups",
+        _render_metabolome_tsne_subgroups,
+        enabled=_has_secondary_pca_grouping,
+    ),
     FigureSpec("top_gene_metabolite_pairs", "top_gene_metabolite_pairs", _render_top_edge_scatter_panels),
+    FigureSpec(
+        "top_gene_metabolite_correlation_heatmaps",
+        "top_gene_metabolite_correlation_heatmaps",
+        _render_top_gene_metabolite_correlation_heatmaps,
+    ),
     FigureSpec(
         "module_top_metabolite_regressions",
         "module_top_metabolite_regressions",
@@ -249,6 +349,12 @@ STATIC_FIGURE_SPECS: tuple[FigureSpec, ...] = (
         "module_gene_zscore_line_panels",
         "module_gene_zscore_line_panels",
         _render_module_gene_zscore_line_panels,
+    ),
+    FigureSpec("module_eigengene_ridge", "module_eigengene_ridge", _render_module_eigengene_ridge),
+    FigureSpec(
+        "module_eigengene_ridge_group1",
+        "module_eigengene_ridge_group1",
+        _render_module_eigengene_ridge_group1,
     ),
     FigureSpec(
         "module_metabolite_association_heatmap",

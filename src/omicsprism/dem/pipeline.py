@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -7,7 +8,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy import stats
-from sklearn.preprocessing import StandardScaler
+
+from omicsprism.differential_plots import plot_dem_joint_scatter, plot_differential_sankey, plot_differential_upset
 
 from .utils import (
     align_metabolites_and_metadata,
@@ -59,6 +61,81 @@ def _median_impute(values: pd.DataFrame) -> pd.DataFrame:
     return values.fillna(medians)
 
 
+def _half_min_impute(values: pd.DataFrame) -> pd.DataFrame:
+    fill_values: dict[str, float] = {}
+    for column in values.columns:
+        observed = values[column].dropna().astype(float)
+        positive = observed.loc[observed > 0]
+        fill_values[column] = float(positive.min() / 2.0) if not positive.empty else 0.0
+    return values.fillna(pd.Series(fill_values))
+
+
+def _impute_metabolites(values: pd.DataFrame, method: str) -> pd.DataFrame:
+    if method == "half-min":
+        return _half_min_impute(values)
+    if method == "median":
+        return _median_impute(values)
+    raise ValueError("--impute must be either 'half-min' or 'median'.")
+
+
+def _median_normalize(values: pd.DataFrame) -> pd.DataFrame:
+    positive_values = values.where(values > 0)
+    sample_medians = positive_values.median(axis=1, skipna=True)
+    if sample_medians.isna().any() or (sample_medians <= 0).any():
+        bad_samples = sample_medians.loc[sample_medians.isna() | (sample_medians <= 0)].index.astype(str).tolist()
+        raise ValueError(
+            "Median normalization requires each sample to have at least one positive metabolite value. "
+            f"Problem samples include: {bad_samples[:10]}"
+        )
+    global_median = float(sample_medians.median())
+    if not np.isfinite(global_median) or global_median <= 0:
+        raise ValueError("Median normalization failed because the global sample median is not positive.")
+    return values.div(sample_medians, axis=0) * global_median
+
+
+def _log2_transform(values: pd.DataFrame, pseudocount: float) -> pd.DataFrame:
+    adjusted = values + pseudocount
+    if (adjusted <= 0).any().any():
+        raise ValueError("Log2 transformation requires all values + pseudocount to be positive.")
+    return np.log2(adjusted)
+
+
+def _pareto_scale(values: pd.DataFrame) -> pd.DataFrame:
+    centered = values - values.mean(axis=0)
+    std = values.std(axis=0, ddof=1)
+    keep = std.notna() & (std > 0)
+    if not keep.any():
+        raise ValueError("No variable metabolites remain for Pareto scaling.")
+    scaled = centered.loc[:, keep].div(np.sqrt(std.loc[keep]), axis=1)
+    return scaled
+
+
+def _welch_ttest(test_values: pd.Series, reference_values: pd.Series) -> tuple[float, float]:
+    test_arr = test_values.to_numpy(dtype=float)
+    reference_arr = reference_values.to_numpy(dtype=float)
+    if len(test_arr) < 2 or len(reference_arr) < 2:
+        return np.nan, np.nan
+
+    test_var = float(np.nanvar(test_arr, ddof=1))
+    reference_var = float(np.nanvar(reference_arr, ddof=1))
+    if np.isclose(test_var, 0.0, atol=1e-12) and np.isclose(reference_var, 0.0, atol=1e-12):
+        if np.isclose(float(np.nanmean(test_arr)), float(np.nanmean(reference_arr)), atol=1e-12):
+            return 0.0, 1.0
+        return np.nan, np.nan
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Precision loss occurred in moment calculation due to catastrophic cancellation.*",
+            category=RuntimeWarning,
+        )
+        t_res = stats.ttest_ind(test_arr, reference_arr, equal_var=False, nan_policy="omit")
+
+    t_stat = float(t_res.statistic) if np.isfinite(t_res.statistic) else np.nan
+    pvalue = float(t_res.pvalue) if np.isfinite(t_res.pvalue) else np.nan
+    return t_stat, pvalue
+
+
 def _fit_predictive_component(x_scaled: np.ndarray, y_centered: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     weights = x_scaled.T @ y_centered
     weight_norm = float(np.linalg.norm(weights))
@@ -85,8 +162,7 @@ def _fit_opls_da_vip(
     if len(np.unique(y_binary)) != 2:
         raise ValueError("OPLS-DA requires exactly two classes in each contrast.")
 
-    scaler = StandardScaler()
-    x_scaled = scaler.fit_transform(x.to_numpy(dtype=float))
+    x_scaled = x.to_numpy(dtype=float)
     y_centered = y_binary.astype(float) - float(np.mean(y_binary))
 
     initial_weights, _, initial_loadings, _ = _fit_predictive_component(x_scaled, y_centered)
@@ -344,6 +420,9 @@ def _analyze_contrast(
     log2fc_cutoff: float,
     pseudocount: float,
     max_missing_fraction: float,
+    impute_method: str,
+    normalize: bool,
+    log_transform: bool,
     n_orthogonal_components: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     comparison = str(contrast["name"])
@@ -361,26 +440,33 @@ def _analyze_contrast(
         raise ValueError(f"No metabolites remain for contrast {comparison} after missing-value filtering.")
 
     selected = selected.loc[:, valid]
-    imputed = _median_impute(selected)
-    variances = imputed.var(axis=0, ddof=1)
-    imputed = imputed.loc[:, variances > 0]
-    selected = selected.loc[:, imputed.columns]
-    if imputed.shape[1] == 0:
+    imputed = _impute_metabolites(selected, method=impute_method)
+    normalized = _median_normalize(imputed) if normalize else imputed.copy()
+    transformed = _log2_transform(normalized, pseudocount=pseudocount) if log_transform else normalized.copy()
+    opls_matrix = _pareto_scale(transformed)
+    normalized = normalized.loc[:, opls_matrix.columns]
+    transformed = transformed.loc[:, opls_matrix.columns]
+    selected = selected.loc[:, opls_matrix.columns]
+    if opls_matrix.shape[1] == 0:
         raise ValueError(f"No variable metabolites remain for contrast {comparison}.")
 
     y_binary = np.array([0] * len(reference_samples) + [1] * len(tested_samples), dtype=float)
     vip, predictive_score, model_summary, orthogonal_score = _fit_opls_da_vip(
-        x=imputed,
+        x=opls_matrix,
         y_binary=y_binary,
         n_orthogonal_components=n_orthogonal_components,
     )
 
     rows: list[dict[str, Any]] = []
-    tested_block = selected.loc[tested_samples]
-    reference_block = selected.loc[reference_samples]
-    for metabolite_id in selected.columns:
-        tested_values = tested_block[metabolite_id].dropna().astype(float)
-        reference_values = reference_block[metabolite_id].dropna().astype(float)
+    fc_tested_block = normalized.loc[tested_samples]
+    fc_reference_block = normalized.loc[reference_samples]
+    stat_tested_block = transformed.loc[tested_samples]
+    stat_reference_block = transformed.loc[reference_samples]
+    for metabolite_id in normalized.columns:
+        tested_values = fc_tested_block[metabolite_id].astype(float)
+        reference_values = fc_reference_block[metabolite_id].astype(float)
+        tested_observed = selected.loc[tested_samples, metabolite_id].dropna()
+        reference_observed = selected.loc[reference_samples, metabolite_id].dropna()
 
         tested_mean = float(tested_values.mean()) if not tested_values.empty else np.nan
         reference_mean = float(reference_values.mean()) if not reference_values.empty else np.nan
@@ -393,13 +479,9 @@ def _analyze_contrast(
             fold_change = np.nan
             log2_fold_change = np.nan
 
-        if len(tested_values) >= 2 and len(reference_values) >= 2:
-            t_res = stats.ttest_ind(tested_values, reference_values, equal_var=False, nan_policy="omit")
-            t_stat = float(t_res.statistic) if np.isfinite(t_res.statistic) else np.nan
-            pvalue = float(t_res.pvalue) if np.isfinite(t_res.pvalue) else np.nan
-        else:
-            t_stat = np.nan
-            pvalue = np.nan
+        stat_tested_values = stat_tested_block[metabolite_id].astype(float)
+        stat_reference_values = stat_reference_block[metabolite_id].astype(float)
+        t_stat, pvalue = _welch_ttest(stat_tested_values, stat_reference_values)
 
         rows.append(
             {
@@ -414,8 +496,8 @@ def _analyze_contrast(
                 "comparison": comparison,
                 "tested_level": str(contrast["tested_level"]),
                 "reference_level": str(contrast["reference_level"]),
-                "n_tested": int(len(tested_values)),
-                "n_reference": int(len(reference_values)),
+                "n_tested": int(len(tested_observed)),
+                "n_reference": int(len(reference_observed)),
             }
         )
 
@@ -516,6 +598,9 @@ def run_pipeline(
     log2fc_cutoff: float = 1.0,
     pseudocount: float = 1e-9,
     max_missing_fraction: float = 0.5,
+    impute_method: str = "half-min",
+    normalize: bool = True,
+    log_transform: bool = True,
     min_replicates: int = 2,
     n_orthogonal_components: int = 1,
 ) -> dict[str, Any]:
@@ -523,8 +608,12 @@ def run_pipeline(
     out_dir = _ensure_output_dir(out_dir)
     volcano_plot_dir = _ensure_plot_dir(out_dir, "volcano")
     vip_plot_dir = _ensure_plot_dir(out_dir, "vip")
+    vip_log2fc_padj_plot_dir = _ensure_plot_dir(out_dir, "vip_log2fc_padj")
+    padj_log2fc_vip_plot_dir = _ensure_plot_dir(out_dir, "padj_log2fc_vip")
     score_plot_dir = _ensure_plot_dir(out_dir, "oplsda_scores")
     count_plot_dir = _ensure_plot_dir(out_dir, "dem_counts")
+    upset_plot_dir = _ensure_plot_dir(out_dir, "upset")
+    sankey_plot_dir = _ensure_plot_dir(out_dir, "sankey")
 
     metabolites_feature_sample = load_metabolites(metabs_path)
     metadata = load_metadata(metadata_path)
@@ -573,6 +662,9 @@ def run_pipeline(
             log2fc_cutoff=log2fc_cutoff,
             pseudocount=pseudocount,
             max_missing_fraction=max_missing_fraction,
+            impute_method=impute_method,
+            normalize=normalize,
+            log_transform=log_transform,
             n_orthogonal_components=n_orthogonal_components,
         )
         all_results.to_csv(out_dir / f"{contrast_name}.all.csv", index=False)
@@ -597,6 +689,28 @@ def run_pipeline(
             output_path=vip_plot_dir / f"{contrast_name}.vip.png",
             vip_cutoff=vip_cutoff,
         )
+        plot_dem_joint_scatter(
+            all_results,
+            comparison=contrast_name,
+            output_path=vip_log2fc_padj_plot_dir / f"{contrast_name}.vip_log2fc_padj.png",
+            x_axis="log2fc",
+            y_axis="vip",
+            size_by="padj",
+            vip_cutoff=vip_cutoff,
+            padj_cutoff=padj_cutoff,
+            log2fc_cutoff=log2fc_cutoff,
+        )
+        plot_dem_joint_scatter(
+            all_results,
+            comparison=contrast_name,
+            output_path=padj_log2fc_vip_plot_dir / f"{contrast_name}.padj_log2fc_vip.png",
+            x_axis="log2fc",
+            y_axis="neg_log10_padj",
+            size_by="vip",
+            vip_cutoff=vip_cutoff,
+            padj_cutoff=padj_cutoff,
+            log2fc_cutoff=log2fc_cutoff,
+        )
         _plot_scores(
             scores_df=scores,
             comparison=contrast_name,
@@ -610,10 +724,31 @@ def run_pipeline(
         counts_df=dem_counts,
         output_path=count_plot_dir / "differential_metabolite_counts.bar.png",
     )
+    plot_differential_sankey(
+        dem_counts,
+        contrasts,
+        same_fields=same_fields,
+        same_field_orders={
+            field: metadata_aligned[field].astype(str).drop_duplicates().tolist()
+            for field in same_fields
+        },
+        tested_level_order=tested_levels,
+        tested_level_count=len(tested_levels),
+        title="Differential Metabolite Count Flow",
+        output_html=sankey_plot_dir / "differential_sankey.html",
+        output_png=sankey_plot_dir / "differential_sankey.png",
+    )
 
     union = _build_union_significant_metabolites(sig_results)
     union_path = out_dir / "union_significant_metabolites.csv"
     union.to_csv(union_path, index=False)
+    plot_differential_upset(
+        sig_results,
+        feature_col="metabolite_id",
+        title="Differential Metabolite Overlap",
+        unit_label="Metabolites",
+        output_path=upset_plot_dir / "differential_metabolite_upset.png",
+    )
 
     union_metabolites = union["metabolite_id"].astype(str).tolist() if not union.empty else []
     union_matrix = _extract_union_metabolite_matrix(
