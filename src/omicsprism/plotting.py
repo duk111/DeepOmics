@@ -68,6 +68,11 @@ from .visualization.static.network import (
 from .visualization.static.correlation import (
     plot_top_gene_metabolite_correlation_heatmaps,
 )
+from .visualization.static.distribution import (
+    plot_module_eigengene_group1_violin_box,
+    plot_module_kme_boxplot,
+    plot_top_metabolite_group1_violin_box,
+)
 from .visualization.static.embedding import (
     plot_metabolome_tsne,
     plot_metabolome_tsne_subgroups,
@@ -195,6 +200,9 @@ __all__ = [
     "plot_compressed_circos_network",
     "plot_floating_cnet_circos_network",
     "plot_top_gene_metabolite_correlation_heatmaps",
+    "plot_module_eigengene_group1_violin_box",
+    "plot_module_kme_boxplot",
+    "plot_top_metabolite_group1_violin_box",
     "plot_transcriptome_umap",
     "plot_transcriptome_umap_subgroups",
     "plot_metabolome_umap",

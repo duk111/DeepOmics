@@ -7,6 +7,11 @@ from typing import Callable
 from ..outputs import FIGURE_FILE_PREFIXES, TABLE_FILE_PREFIXES
 from .context import VisualizationContext
 from .static.correlation import plot_top_gene_metabolite_correlation_heatmaps
+from .static.distribution import (
+    plot_module_eigengene_group1_violin_box,
+    plot_module_kme_boxplot,
+    plot_top_metabolite_group1_violin_box,
+)
 from .static.embedding import (
     plot_metabolome_tsne,
     plot_metabolome_tsne_subgroups,
@@ -195,6 +200,16 @@ def _render_top_gene_metabolite_correlation_heatmaps(context: VisualizationConte
     plot_top_gene_metabolite_correlation_heatmaps(context.engine, save_stem, context.cfg)
 
 
+def _render_top_metabolite_group1_violin_box(context: VisualizationContext, save_stem: Path) -> None:
+    plot_top_metabolite_group1_violin_box(
+        context.engine,
+        context.pca_adata,
+        save_stem,
+        context.cfg,
+        group_df=context.pca_group_df,
+    )
+
+
 def _render_module_top_metabolite_regression_panels(context: VisualizationContext, save_stem: Path) -> None:
     plot_module_top_metabolite_regression_panels(context.engine, save_stem, context.cfg)
 
@@ -251,6 +266,19 @@ def _render_module_eigengene_ridge_group1(context: VisualizationContext, save_st
         context.cfg,
         group_df=context.pca_group_df,
     )
+
+
+def _render_module_eigengene_group1_violin_box(context: VisualizationContext, save_stem: Path) -> None:
+    plot_module_eigengene_group1_violin_box(
+        context.engine,
+        save_stem,
+        context.cfg,
+        group_df=context.pca_group_df,
+    )
+
+
+def _render_module_kme_boxplot(context: VisualizationContext, save_stem: Path) -> None:
+    plot_module_kme_boxplot(context.engine, save_stem, context.cfg)
 
 
 def _render_module_metabolite_association_heatmap(context: VisualizationContext, save_stem: Path) -> None:
@@ -334,6 +362,11 @@ STATIC_FIGURE_SPECS: tuple[FigureSpec, ...] = (
         _render_top_gene_metabolite_correlation_heatmaps,
     ),
     FigureSpec(
+        "top_metabolite_group1_violin_box",
+        "top_metabolite_group1_violin_box",
+        _render_top_metabolite_group1_violin_box,
+    ),
+    FigureSpec(
         "module_top_metabolite_regressions",
         "module_top_metabolite_regressions",
         _render_module_top_metabolite_regression_panels,
@@ -356,6 +389,12 @@ STATIC_FIGURE_SPECS: tuple[FigureSpec, ...] = (
         "module_eigengene_ridge_group1",
         _render_module_eigengene_ridge_group1,
     ),
+    FigureSpec(
+        "module_eigengene_group1_violin_box",
+        "module_eigengene_group1_violin_box",
+        _render_module_eigengene_group1_violin_box,
+    ),
+    FigureSpec("module_kme_boxplot", "module_kme_boxplot", _render_module_kme_boxplot),
     FigureSpec(
         "module_metabolite_association_heatmap",
         "module_metabolite_association_heatmap",
