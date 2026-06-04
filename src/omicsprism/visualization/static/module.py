@@ -650,6 +650,10 @@ def plot_module_zscore_line_panels(
     zscore_df = _row_zscore(eigengenes_df.T)
     if zscore_df.empty:
         return
+    module_color_map = _module_color_map_from_results(
+        engine,
+        zscore_df.index.astype(str).tolist(),
+    )
 
     sample_names = zscore_df.columns.astype(str).tolist()
     annotation_df = _align_group_annotations_to_samples(sample_names, group_df)
@@ -753,7 +757,14 @@ def plot_module_zscore_line_panels(
                 mean_y.append(float(np.nanmean(y_array)))
 
             if mean_x:
-                ax.plot(mean_x, mean_y, color="black", linewidth=1.15, alpha=0.95, zorder=4)
+                ax.plot(
+                    mean_x,
+                    mean_y,
+                    color=module_color_map.get(str(module_name), "#111827"),
+                    linewidth=1.35,
+                    alpha=0.96,
+                    zorder=4,
+                )
 
             ax.set_xlim(-0.5, n_group2 - 0.5)
             ax.set_ylim(y_min, y_max)
@@ -916,6 +927,7 @@ def plot_module_gene_zscore_line_panels(
     gene_zscore_df = _row_zscore(expr_df.loc[:, all_module_genes].T)
     if module_zscore_df.empty or gene_zscore_df.empty:
         return
+    module_color_map = _module_color_map_from_results(engine, module_order)
 
     sample_names = module_zscore_df.columns.astype(str).tolist()
     annotation_df = _align_group_annotations_to_samples(sample_names, group_df)
@@ -1040,7 +1052,14 @@ def plot_module_gene_zscore_line_panels(
 
             module_line = module_line_cache.get((str(module_name), str(group1_name)), np.array([], dtype=float))
             if module_line.size and np.isfinite(module_line).sum() >= 2:
-                ax.plot(x_positions, module_line, color="black", linewidth=1.35, alpha=0.96, zorder=4)
+                ax.plot(
+                    x_positions,
+                    module_line,
+                    color=module_color_map.get(str(module_name), "#111827"),
+                    linewidth=1.45,
+                    alpha=0.97,
+                    zorder=4,
+                )
 
             ax.set_xlim(-0.5, n_group2 - 0.5)
             ax.set_ylim(y_min, y_max)

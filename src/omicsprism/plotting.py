@@ -4,6 +4,13 @@ from .outputs import FIGURE_FILE_PREFIXES, TABLE_FILE_PREFIXES
 from .visualization.context import VisualizationContext
 from .visualization.registry import FIGURE_REGISTRY, STATIC_FIGURE_SPECS, FigureSpec, iter_figure_specs
 from .visualization.static.base import PALETTE, PCA_GROUP_MARKERS, PCA_GROUP_PALETTE, logger
+from .visualization.static.association import (
+    plot_association_direction_summary,
+    plot_edgeweight_distribution_by_module,
+    plot_gene_metabolite_correlation_bubble_heatmap,
+    plot_module_eigengene_metabolite_trend_panels,
+    plot_module_metabolite_bubble_plot,
+)
 from .visualization.static.base import (
     set_academic_style,
     _save_figure,
@@ -73,16 +80,6 @@ from .visualization.static.distribution import (
     plot_module_kme_boxplot,
     plot_top_metabolite_group1_violin_box,
 )
-from .visualization.static.embedding import (
-    plot_metabolome_tsne,
-    plot_metabolome_tsne_subgroups,
-    plot_metabolome_umap,
-    plot_metabolome_umap_subgroups,
-    plot_transcriptome_tsne,
-    plot_transcriptome_tsne_subgroups,
-    plot_transcriptome_umap,
-    plot_transcriptome_umap_subgroups,
-)
 from .visualization.static.regression import (
     _optional_plot_color,
     _module_annotation_maps,
@@ -139,6 +136,11 @@ __all__ = [
     "PALETTE",
     "PCA_GROUP_PALETTE",
     "PCA_GROUP_MARKERS",
+    "plot_gene_metabolite_correlation_bubble_heatmap",
+    "plot_module_metabolite_bubble_plot",
+    "plot_association_direction_summary",
+    "plot_module_eigengene_metabolite_trend_panels",
+    "plot_edgeweight_distribution_by_module",
     "VisualizationContext",
     "FigureSpec",
     "FIGURE_REGISTRY",
@@ -203,14 +205,6 @@ __all__ = [
     "plot_module_eigengene_group1_violin_box",
     "plot_module_kme_boxplot",
     "plot_top_metabolite_group1_violin_box",
-    "plot_transcriptome_umap",
-    "plot_transcriptome_umap_subgroups",
-    "plot_metabolome_umap",
-    "plot_metabolome_umap_subgroups",
-    "plot_transcriptome_tsne",
-    "plot_transcriptome_tsne_subgroups",
-    "plot_metabolome_tsne",
-    "plot_metabolome_tsne_subgroups",
     "_optional_plot_color",
     "_module_annotation_maps",
     "_finite_xy_arrays",

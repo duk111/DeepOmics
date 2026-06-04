@@ -55,16 +55,9 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_pca']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['transcriptome_umap']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['transcriptome_umap_subgroups']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_umap']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_umap_subgroups']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['transcriptome_tsne']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['transcriptome_tsne_subgroups']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_tsne']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_tsne_subgroups']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_correlation_heatmaps']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['gene_metabolite_correlation_bubble_heatmap']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['top_metabolite_group1_violin_box']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['module_top_metabolite_regressions']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap']}.pdf|svg|png`",
@@ -75,6 +68,10 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_ridge_group1']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_group1_violin_box']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['module_kme_boxplot']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['module_metabolite_bubble_plot']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['association_direction_summary']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_metabolite_trend_panels']}.pdf|svg|png`",
+        f"- `plots/{FIGURE_FILE_PREFIXES['edgeweight_distribution_by_module']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png`",
         f"- `plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png`",
@@ -102,16 +99,9 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_pca'])}.pdf|svg|png</code></td><td>Metabolome PCA scatter plot.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_pca_pairs'])}.pdf|svg|png</code></td><td>Transcriptome PCA pairs plot using the first principal components.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_pca_pairs'])}.pdf|svg|png</code></td><td>Metabolome PCA pairs plot using the first principal components.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_umap'])}.pdf|svg|png</code></td><td>Transcriptome UMAP scatter plot colored by group1.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_umap_subgroups'])}.pdf|svg|png</code></td><td>Transcriptome UMAP scatter plot colored by group2.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_umap'])}.pdf|svg|png</code></td><td>Metabolome UMAP scatter plot colored by group1.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_umap_subgroups'])}.pdf|svg|png</code></td><td>Metabolome UMAP scatter plot colored by group2.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_tsne'])}.pdf|svg|png</code></td><td>Transcriptome t-SNE scatter plot colored by group1.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_tsne_subgroups'])}.pdf|svg|png</code></td><td>Transcriptome t-SNE scatter plot colored by group2.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_tsne'])}.pdf|svg|png</code></td><td>Metabolome t-SNE scatter plot colored by group1.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_tsne_subgroups'])}.pdf|svg|png</code></td><td>Metabolome t-SNE scatter plot colored by group2.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs'])}.pdf|svg|png</code></td><td>Top association pair scatter panels ranked by EdgeWeight.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_gene_metabolite_correlation_heatmaps'])}.pdf|svg|png</code></td><td>Top gene x top metabolite Pearson and Spearman heatmaps with gene-side module color strip.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['gene_metabolite_correlation_bubble_heatmap'])}.pdf|svg|png</code></td><td>High-confidence gene-metabolite bubble heatmap using T03 genes; color is Spearman rho and point size is EdgeWeight.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_metabolite_group1_violin_box'])}.pdf|svg|png</code></td><td>Top metabolite abundance violin and box plots by group1.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_top_metabolite_regressions'])}.pdf|svg|png</code></td><td>Module eigengene regression panels against each module's top associated metabolite.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_heatmap'])}.pdf|svg|png</code></td><td>Module eigengene heatmap with group2 and group1 annotation tracks using PCA group colors.</td></tr>",
@@ -122,6 +112,10 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_ridge_group1'])}.pdf|svg|png</code></td><td>Module eigengene z-score ridge distribution overlaid by group1.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_group1_violin_box'])}.pdf|svg|png</code></td><td>Module eigengene z-score violin and box plots by group1.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_kme_boxplot'])}.pdf|svg|png</code></td><td>Intramodular gene kME boxplot by module.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_metabolite_bubble_plot'])}.pdf|svg|png</code></td><td>Module-metabolite bubble plot with Spearman rho color and FDR-scaled point size.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['association_direction_summary'])}.pdf|svg|png</code></td><td>Positive and negative high-confidence association counts by module.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_metabolite_trend_panels'])}.pdf|svg|png</code></td><td>Module eigengene and top metabolite z-score trends across group2, faceted by group1.</td></tr>",
+        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['edgeweight_distribution_by_module'])}.pdf|svg|png</code></td><td>High-confidence EdgeWeight distributions by gene module.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap'])}.pdf|svg|png</code></td><td>Module-metabolite association heatmap colored by Spearman rho with significance stars.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['compressed_circos_network'])}.pdf|svg|png</code></td><td>Compact Circos overview using all unique genes and metabolites from T03 only.</td></tr>",
         f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['floating_cnet_circos_network'])}.pdf|svg|png</code></td><td>Floating circular cnetplot-style network using T03 only, with circular non-overlapping nodes and metabolite-colored edges.</td></tr>",
@@ -218,27 +212,28 @@ def generate_report_plots(engine, cfg) -> None:
         f"5. Use plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs']}.pdf|svg|png for the metabolome PCA pairs overview (group1).\n"
         f"6. Use plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs_subgroups']}.pdf|svg|png for the transcriptome PCA pairs overview (group2).\n"
         f"7. Use plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs_subgroups']}.pdf|svg|png for the metabolome PCA pairs overview (group2).\n"
-        f"8. Use plots/{FIGURE_FILE_PREFIXES['transcriptome_umap']}.pdf|svg|png and plots/{FIGURE_FILE_PREFIXES['metabolome_umap']}.pdf|svg|png for UMAP group1 views.\n"
-        f"9. Use plots/{FIGURE_FILE_PREFIXES['transcriptome_umap_subgroups']}.pdf|svg|png and plots/{FIGURE_FILE_PREFIXES['metabolome_umap_subgroups']}.pdf|svg|png for UMAP group2 views.\n"
-        f"10. Use plots/{FIGURE_FILE_PREFIXES['transcriptome_tsne']}.pdf|svg|png and plots/{FIGURE_FILE_PREFIXES['metabolome_tsne']}.pdf|svg|png for t-SNE group1 views.\n"
-        f"11. Use plots/{FIGURE_FILE_PREFIXES['transcriptome_tsne_subgroups']}.pdf|svg|png and plots/{FIGURE_FILE_PREFIXES['metabolome_tsne_subgroups']}.pdf|svg|png for t-SNE group2 views.\n"
-        f"12. Use plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png for the top regression-panel overview.\n"
-        f"13. Use plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_correlation_heatmaps']}.pdf|svg|png for top gene x top metabolite Pearson/Spearman heatmaps.\n"
-        f"14. Use plots/{FIGURE_FILE_PREFIXES['top_metabolite_group1_violin_box']}.pdf|svg|png for top metabolite abundance distributions by group1.\n"
-        f"15. Use plots/{FIGURE_FILE_PREFIXES['module_top_metabolite_regressions']}.pdf|svg|png for module eigengene vs top metabolite regressions.\n"
-        f"16. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap']}.pdf|svg|png for the module eigengene heatmap with group2/group1 annotation tracks.\n"
-        f"17. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap_group2']}.pdf|svg|png for the module eigengene heatmap grouped by group2.\n"
-        f"18. Use plots/{FIGURE_FILE_PREFIXES['module_zscore_line_panels']}.pdf|svg|png for module z-score line panels faceted by group1 with group2 color strips.\n"
-        f"19. Use plots/{FIGURE_FILE_PREFIXES['module_gene_zscore_line_panels']}.pdf|svg|png for module gene z-score line panels with grey gene trajectories and black module trajectories.\n"
-        f"20. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_ridge']}.pdf|svg|png for module eigengene z-score ridge distributions across all averaged group states.\n"
-        f"21. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_ridge_group1']}.pdf|svg|png for group1-overlaid module eigengene ridge distributions.\n"
-        f"22. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_group1_violin_box']}.pdf|svg|png for module eigengene z-score distributions by group1.\n"
-        f"23. Use plots/{FIGURE_FILE_PREFIXES['module_kme_boxplot']}.pdf|svg|png for intramodular gene kME distributions by module.\n"
-        f"24. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png for the module-metabolite association heatmap.\n"
-        f"25. Use plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png for the compact T03-only Circos overview.\n"
-        f"26. Use plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png for the floating circular T03-only cnetplot-style overview.\n"
-        f"27. Use plots/{FIGURE_FILE_PREFIXES['association_evidence_upset']}.pdf|svg|png for global evidence-overlap interpretation across candidate metabolite-gene edges.\n"
-        "28. Use OmicsPrism_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
+        f"8. Use plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png for the top regression-panel overview.\n"
+        f"9. Use plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_correlation_heatmaps']}.pdf|svg|png for top gene x top metabolite Pearson/Spearman heatmaps.\n"
+        f"10. Use plots/{FIGURE_FILE_PREFIXES['gene_metabolite_correlation_bubble_heatmap']}.pdf|svg|png for T03 gene-metabolite Spearman/EdgeWeight bubble interpretation.\n"
+        f"11. Use plots/{FIGURE_FILE_PREFIXES['top_metabolite_group1_violin_box']}.pdf|svg|png for top metabolite abundance distributions by group1.\n"
+        f"12. Use plots/{FIGURE_FILE_PREFIXES['module_top_metabolite_regressions']}.pdf|svg|png for module eigengene vs top metabolite regressions.\n"
+        f"13. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap']}.pdf|svg|png for the module eigengene heatmap with group2/group1 annotation tracks.\n"
+        f"14. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap_group2']}.pdf|svg|png for the module eigengene heatmap grouped by group2.\n"
+        f"15. Use plots/{FIGURE_FILE_PREFIXES['module_zscore_line_panels']}.pdf|svg|png for module z-score line panels faceted by group1 with group2 color strips.\n"
+        f"16. Use plots/{FIGURE_FILE_PREFIXES['module_gene_zscore_line_panels']}.pdf|svg|png for module gene z-score line panels with grey gene trajectories and black module trajectories.\n"
+        f"17. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_ridge']}.pdf|svg|png for module eigengene z-score ridge distributions across all averaged group states.\n"
+        f"18. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_ridge_group1']}.pdf|svg|png for group1-overlaid module eigengene ridge distributions.\n"
+        f"19. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_group1_violin_box']}.pdf|svg|png for module eigengene z-score distributions by group1.\n"
+        f"20. Use plots/{FIGURE_FILE_PREFIXES['module_kme_boxplot']}.pdf|svg|png for intramodular gene kME distributions by module.\n"
+        f"21. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_bubble_plot']}.pdf|svg|png for module-metabolite Spearman/FDR bubble interpretation.\n"
+        f"22. Use plots/{FIGURE_FILE_PREFIXES['association_direction_summary']}.pdf|svg|png for positive/negative association direction counts by module.\n"
+        f"23. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_metabolite_trend_panels']}.pdf|svg|png for module eigengene and top metabolite trends across group2 within each group1.\n"
+        f"24. Use plots/{FIGURE_FILE_PREFIXES['edgeweight_distribution_by_module']}.pdf|svg|png for high-confidence EdgeWeight distributions by module.\n"
+        f"25. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png for the module-metabolite association heatmap.\n"
+        f"26. Use plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png for the compact T03-only Circos overview.\n"
+        f"27. Use plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png for the floating circular T03-only cnetplot-style overview.\n"
+        f"28. Use plots/{FIGURE_FILE_PREFIXES['association_evidence_upset']}.pdf|svg|png for global evidence-overlap interpretation across candidate metabolite-gene edges.\n"
+        "29. Use OmicsPrism_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
     )
     (plots_dir / "visualization_notes.txt").write_text(notes, encoding="utf-8")
 

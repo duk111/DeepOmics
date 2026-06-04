@@ -782,7 +782,7 @@ def plot_sample_dendrogram(adata, save_stem: str | Path, cfg) -> None:
 
     fig, ax = plt.subplots(figsize=(max(12, adata.n_obs * 0.12), 6))
     linkage_matrix = linkage(np.asarray(adata.X, dtype=np.float32), method="average")
-    color_threshold = float(np.percentile(linkage_matrix[:, 2], 50))
+    color_threshold = 0.70 * float(linkage_matrix[:, 2].max())
 
     dendrogram(
         linkage_matrix,
