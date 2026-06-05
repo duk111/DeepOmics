@@ -2516,7 +2516,7 @@ def _interactive_html_template() -> str:
 
     function renderNetworkSummary(dataset, rendered) {
       const legend = el("div", { className: "legend" });
-      legend.appendChild(el("span", { className: "legend-item", text: "Source: T03 high-confidence network" }));
+      legend.appendChild(el("span", { className: "legend-item", text: "Source: T02 high-confidence network" }));
       legend.appendChild(el("span", { className: "legend-item", text: `Edges: ${rendered.graph.edges.length}/${(dataset.edges || []).length}` }));
       legend.appendChild(el("span", { className: "legend-item", text: `Genes shown: ${rendered.graph.genes.length}/${dataset.summary?.genes || 0}` }));
       legend.appendChild(el("span", { className: "legend-item", text: `Metabolites shown: ${rendered.graph.metabolites.length}/${dataset.summary?.metabolites || 0}` }));
@@ -2672,7 +2672,7 @@ def _interactive_html_template() -> str:
         el("h2", { className: "panel-title", text: dataset ? dataset.title : view.title }),
         el("p", {
           className: "panel-note",
-          text: "T03-only Circos and CNet views. Inspect nodes by hover and click a node to highlight first-order neighbors."
+          text: "T02-only Circos and CNet views. Inspect nodes by hover and click a node to highlight first-order neighbors."
         })
       ]));
 
@@ -2706,7 +2706,7 @@ def _interactive_html_template() -> str:
           panel.appendChild(chartWrap);
         }
       } else {
-        chartWrap.appendChild(el("div", { className: "placeholder", text: "No T03 high-confidence network payload available." }));
+        chartWrap.appendChild(el("div", { className: "placeholder", text: "No T02 high-confidence network payload available." }));
         panel.appendChild(chartWrap);
       }
       return panel;

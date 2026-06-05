@@ -43,6 +43,7 @@ def _build_config(
     report_formats: tuple[str, ...],
     generate_reports: bool,
     n_threads: int,
+    export_audit_tables: bool,
 ) -> AnalysisConfig:
     return AnalysisConfig(
         output_dir=str(output_dir),
@@ -50,6 +51,7 @@ def _build_config(
         report_formats=report_formats,
         generate_reports=generate_reports,
         n_threads=n_threads,
+        export_audit_tables=export_audit_tables,
     )
 
 
@@ -102,6 +104,7 @@ def main() -> None:
         with col2:
             html_report = st.checkbox("HTML report", value=True)
             md_report = st.checkbox("Markdown report", value=False)
+            export_audit_tables = st.checkbox("Export audit table T99", value=False)
 
     report_formats = tuple(fmt for fmt, enabled in (("html", html_report), ("md", md_report)) if enabled)
     output_dir = output_root / _safe_filename(output_name, "omicsprism_ui_run")
@@ -127,6 +130,7 @@ def main() -> None:
                 report_formats=report_formats,
                 generate_reports=generate_reports,
                 n_threads=int(n_threads),
+                export_audit_tables=bool(export_audit_tables),
             )
 
             with st.spinner("Running OmicsPrism analysis. This may take several minutes."):

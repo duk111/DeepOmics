@@ -622,12 +622,12 @@ def run_gene_module_analysis(
 ) -> ModuleAnalysisArtifacts:
     gene_list = extract_module_gene_set(high_confidence_network_df)
     if len(gene_list) < 2:
-        logger.info("Module analysis skipped because fewer than 2 genes were present in T03.")
+        logger.info("Module analysis skipped because fewer than 2 genes were present in the high-confidence network.")
         return _empty_artifacts()
 
     gene_list = [gene for gene in gene_list if gene in expr_df.columns]
     if len(gene_list) < 2:
-        logger.info("Module analysis skipped because T03 genes were not found in the expression matrix.")
+        logger.info("Module analysis skipped because high-confidence network genes were not found in the expression matrix.")
         return _empty_artifacts()
 
     selected_expr = expr_df.loc[:, gene_list].copy()

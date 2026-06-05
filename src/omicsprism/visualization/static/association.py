@@ -120,16 +120,21 @@ def plot_gene_metabolite_correlation_bubble_heatmap(engine, save_stem: str | Pat
 
     plot_df["Module"] = plot_df["Gene"].map(gene_to_module).fillna("Unassigned")
     module_rank = {module: idx for idx, module in enumerate(module_order)}
-    gene_order = (
+    top_gene_df = (
         plot_df.groupby(["Gene", "Module"], sort=False)
         .agg(_BestEdgeWeight=("EdgeWeight", "max"), _EdgeCount=("Metabolite", "nunique"))
         .reset_index()
+        .sort_values(["_BestEdgeWeight", "_EdgeCount", "Gene"], ascending=[False, False, True], kind="mergesort")
+        .head(100)
         .assign(_ModuleRank=lambda df: df["Module"].map(module_rank).fillna(len(module_rank)).astype(int))
-        .sort_values(["_ModuleRank", "Module", "_EdgeCount", "_BestEdgeWeight", "Gene"], ascending=[True, True, False, False, True])
-        ["Gene"]
-        .astype(str)
-        .tolist()
+        .sort_values(
+            ["_ModuleRank", "Module", "_BestEdgeWeight", "_EdgeCount", "Gene"],
+            ascending=[True, True, False, False, True],
+            kind="mergesort",
+        )
     )
+    gene_order = top_gene_df["Gene"].astype(str).tolist()
+    plot_df = plot_df.loc[plot_df["Gene"].isin(gene_order)].copy()
     metabolite_order = (
         plot_df.groupby("Metabolite", sort=False)
         .agg(_BestEdgeWeight=("EdgeWeight", "max"), _EdgeCount=("Gene", "nunique"))
@@ -149,20 +154,40 @@ def plot_gene_metabolite_correlation_bubble_heatmap(engine, save_stem: str | Pat
     fig_height = max(7.0, min(34.0, 0.18 * len(gene_order) + 3.2))
     fig = plt.figure(figsize=(fig_width, fig_height))
     fig._skip_default_tight_layout = True
-    gs = fig.add_gridspec(1, 2, width_ratios=[0.12, 1.0], wspace=0.025)
-    ax_strip = fig.add_subplot(gs[0, 0])
-    ax = fig.add_subplot(gs[0, 1], sharey=ax_strip)
+    fig._skip_default_tight_layout = True
+    gs = fig.add_gridspec(1, 3, width_ratios=[0.24, 0.024, 1.0], wspace=0.006)
+    ax_labels = fig.add_subplot(gs[0, 0])
+    ax_strip = fig.add_subplot(gs[0, 1], sharey=ax_labels)
+    ax = fig.add_subplot(gs[0, 2], sharey=ax_labels)
 
     gene_colors = [gene_to_color.get(gene, "#d1d5db") for gene in gene_order]
     rgba = np.array([[colors.to_rgba(color_value) for color_value in gene_colors]], dtype=float).transpose((1, 0, 2))
+    ax_labels.set_xlim(0, 1)
+    ax_labels.set_ylim(len(gene_order) - 0.4, -0.6)
+    ax_labels.set_xticks([])
+    ax_labels.set_yticks(np.arange(len(gene_order)))
+    ax_labels.set_yticklabels(gene_order, fontsize=10)
+    ax_labels.tick_params(axis="y", left=False, labelleft=False, right=True, labelright=True, length=0, pad=1)
+    ax_labels.set_ylabel("High-confidence gene", labelpad=34)
+    for tick_label in ax_labels.get_yticklabels():
+        tick_label.set_horizontalalignment("right")
+    for spine in ax_labels.spines.values():
+        spine.set_visible(False)
+
     ax_strip.imshow(rgba, aspect="auto", interpolation="nearest")
     ax_strip.set_xticks([])
-    ax_strip.set_yticks(np.arange(len(gene_order)))
-    ax_strip.set_yticklabels([])
-    ax_strip.set_ylabel("Gene module", fontsize=10)
-    ax_strip.tick_params(axis="both", length=0)
+    ax_strip.tick_params(axis="y", left=False, labelleft=False)
+    ax_strip.tick_params(axis="both", left=False, labelleft=False, length=0)
     for spine in ax_strip.spines.values():
         spine.set_visible(False)
+
+    module_boundaries: list[int] = []
+    previous_module = None
+    for idx, gene in enumerate(gene_order):
+        module_name = str(gene_to_module.get(gene, "Unassigned"))
+        if previous_module is not None and module_name != previous_module:
+            module_boundaries.append(idx)
+        previous_module = module_name
 
     edge_weights = plot_df["EdgeWeight"].to_numpy(dtype=float)
     min_size, max_size = 18.0, 190.0
@@ -186,21 +211,23 @@ def plot_gene_metabolite_correlation_bubble_heatmap(engine, save_stem: str | Pat
     ax.set_xlim(-0.6, len(metabolite_order) - 0.4)
     ax.set_ylim(len(gene_order) - 0.4, -0.6)
     ax.set_xticks(np.arange(len(metabolite_order)))
-    ax.set_xticklabels(metabolite_order, rotation=45, ha="right")
-    ax.set_yticks(np.arange(len(gene_order)))
-    ax.set_yticklabels(gene_order, fontsize=max(4, min(8, int(260 / max(1, len(gene_order))))))
+    ax.set_xticklabels(metabolite_order, rotation=45, ha="right", fontsize=10)
+    ax.tick_params(axis="y", left=False, labelleft=False)
     ax.set_xlabel("Metabolite")
-    ax.set_ylabel("High-confidence gene")
+    ax.set_ylabel("")
     ax.set_title("High-Confidence Gene-Metabolite Correlation Bubble Heatmap")
     ax.grid(color="#e5e7eb", linewidth=0.42)
     ax.set_axisbelow(True)
+    for boundary in module_boundaries:
+        ax.axhline(boundary - 0.5, color="#9ca3af", linewidth=0.55, alpha=0.75)
+        ax_strip.axhline(boundary - 0.5, color="#ffffff", linewidth=0.65)
 
     colorbar = fig.colorbar(scatter, ax=ax, fraction=0.025, pad=0.012)
     colorbar.set_label("Spearman rho")
     for value in (0.35, 0.65, 0.95):
         ax.scatter([], [], s=min_size + value * (max_size - min_size), color="#9ca3af", edgecolors="#111827", linewidths=0.35, label=f"{value:.2f}")
     ax.legend(title="EdgeWeight", loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=False, labelspacing=1.0)
-    fig.subplots_adjust(left=0.07, right=0.86, top=0.94, bottom=0.23)
+    fig.subplots_adjust(left=0.10, right=0.86, top=0.94, bottom=0.23)
     _save_figure(fig, save_stem, cfg)
 
 
@@ -270,7 +297,7 @@ def plot_module_metabolite_bubble_plot(engine, save_stem: str | Path, cfg) -> No
     ax.set_yticks(np.arange(len(module_order)))
     ax.set_yticklabels(module_order)
     for tick_label in ax.get_yticklabels():
-        tick_label.set_color(module_to_color.get(tick_label.get_text(), "#111827"))
+        tick_label.set_color("#111827")
     ax.set_xlabel("Metabolite")
     ax.set_ylabel("Module")
     ax.set_title("Module-Metabolite Association Bubble Plot")
@@ -329,14 +356,15 @@ def plot_association_direction_summary(engine, save_stem: str | Path, cfg) -> No
     x = np.arange(len(counts.index))
     pos = counts["positive"].to_numpy(dtype=float)
     neg = counts["negative"].to_numpy(dtype=float)
-    ax.bar(x, pos, color="#dc2626", label="positive", width=0.68)
-    ax.bar(x, neg, bottom=pos, color="#2563eb", label="negative", width=0.68)
+    ax.bar(x, pos, color="#e8a29a", label="positive", width=0.68)
+    ax.bar(x, neg, bottom=pos, color="#8fb7df", label="negative", width=0.68)
     ax.set_xticks(x)
     ax.set_xticklabels(counts.index.astype(str).tolist(), rotation=35, ha="right")
     ax.set_ylabel("High-confidence edge count")
     ax.set_xlabel("Module")
     ax.set_title("Association Direction Summary by Module")
-    ax.legend(loc="upper right", frameon=False)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), borderaxespad=0.0, frameon=False)
+    fig.subplots_adjust(right=0.82)
     ax.grid(axis="y", color="#e5e7eb", linewidth=0.55)
     ax.set_axisbelow(True)
     _save_figure(fig, save_stem, cfg)
@@ -384,7 +412,15 @@ def plot_edgeweight_distribution_by_module(engine, save_stem: str | Path, cfg) -
     )
     handles, labels = ax.get_legend_handles_labels()
     if handles:
-        ax.legend(handles[:2], labels[:2], title="Direction", loc="upper right", frameon=False)
+        ax.legend(
+            handles[:2],
+            labels[:2],
+            title="Direction",
+            loc="upper left",
+            bbox_to_anchor=(1.01, 1.0),
+            borderaxespad=0.0,
+            frameon=False,
+        )
     ax.set_xlabel("Module")
     ax.set_ylabel("EdgeWeight")
     ax.set_title("High-Confidence EdgeWeight Distribution by Module")
@@ -393,6 +429,7 @@ def plot_edgeweight_distribution_by_module(engine, save_stem: str | Path, cfg) -
     ax.tick_params(axis="x", labelrotation=35)
     for label in ax.get_xticklabels():
         label.set_ha("right")
+    fig.subplots_adjust(right=0.82)
     _save_figure(fig, save_stem, cfg)
 
 
@@ -478,9 +515,22 @@ def plot_module_eigengene_metabolite_trend_panels(engine, save_stem: str | Path,
 
     n_rows = len(valid_pairs)
     n_cols = len(group1_order)
-    fig_width = max(7.0, min(22.0, 2.35 * n_cols + 1.6))
+    fig_width = max(7.0, min(24.0, 2.35 * n_cols + 3.2))
     fig_height = max(4.8, min(28.0, 1.25 * n_rows + 1.6))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, fig_height), squeeze=False)
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    grid = fig.add_gridspec(
+        n_rows,
+        n_cols + 1,
+        width_ratios=[1.0] * n_cols + [0.50],
+        wspace=0.18,
+        hspace=0.22,
+    )
+    axes = np.empty((n_rows, n_cols), dtype=object)
+    for row_idx in range(n_rows):
+        for col_idx in range(n_cols):
+            axes[row_idx, col_idx] = fig.add_subplot(grid[row_idx, col_idx])
+    legend_ax = fig.add_subplot(grid[:, -1])
+    legend_ax.axis("off")
     x_positions = np.arange(len(group2_order), dtype=float)
 
     for row_idx, (module_name, metabolite) in enumerate(valid_pairs):
@@ -534,25 +584,26 @@ def plot_module_eigengene_metabolite_trend_panels(engine, save_stem: str | Path,
                 ax.set_ylabel(f"{module_name}\n{metabolite}", fontsize=8)
             else:
                 ax.set_yticklabels([])
-    fig.legend(
+    legend_ax.legend(
         handles=[
             Line2D([0], [0], color="#111827", linewidth=1.35, marker="o", markersize=4.2, markerfacecolor="#d1d5db", markeredgecolor="white", markeredgewidth=0.35, label="Module eigengene"),
             Line2D([0], [0], color=CIRCOS_METABOLITE_COLOR, linewidth=1.35, marker="s", markersize=4.2, markerfacecolor="#d1d5db", markeredgecolor="white", markeredgewidth=0.35, label="Metabolite"),
         ],
-        loc="lower center",
-        bbox_to_anchor=(0.5, 0.018),
-        ncol=2,
+        loc="upper left",
+        bbox_to_anchor=(0.0, 1.0),
+        bbox_transform=legend_ax.transAxes,
+        ncol=1,
         frameon=False,
         handlelength=1.3,
         handletextpad=0.42,
         columnspacing=0.85,
         labelspacing=0.42,
         borderaxespad=0.0,
-        fontsize=9,
+        fontsize=10.5,
     )
 
     fig.suptitle("Module Eigengene vs Top Metabolite Trends by group1", y=0.995, fontsize=13)
-    fig.tight_layout(rect=(0.01, 0.08, 0.985, 0.965), h_pad=0.9, w_pad=0.7)
+    fig.subplots_adjust(left=0.055, right=0.985, bottom=0.075, top=0.93, wspace=0.18, hspace=0.22)
     _save_figure(fig, save_stem, cfg)
 
 

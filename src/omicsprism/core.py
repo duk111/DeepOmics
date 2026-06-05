@@ -10,7 +10,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from . import config, modules, plotting, selectors
-from .outputs import TABLE_FILE_PREFIXES
+from .outputs import OBSOLETE_TABLE_FILES, TABLE_FILE_PREFIXES
 from .utils import get_logger, log_step, safe_mkdir, write_json
 
 logger = get_logger()
@@ -342,6 +342,50 @@ class MultiOmicsEngine:
             "TargetK",
         ]
 
+    @staticmethod
+    def _analysis_network_export_columns() -> list[str]:
+        return [
+            "Source",
+            "Target",
+            "Interaction",
+            "Gene",
+            "Metabolite",
+            "PearsonR",
+            "PearsonFDR",
+            "SpearmanRho",
+            "SpearmanFDR",
+            "MIScore",
+            "ScreenSupportCount",
+            "ModelSupportCount",
+            "RRARank",
+            "EdgeWeight",
+            "Sign",
+            "EdgeTier",
+        ]
+
+    @staticmethod
+    def _gene_module_export_columns() -> list[str]:
+        return [
+            "Gene",
+            "Module",
+            "ModuleColorHex",
+            "ModuleSize",
+            "kME",
+            "IntramodularDegree",
+            "IsGrey",
+            "BestEdgeWeight",
+            "AssociatedMetaboliteCount",
+            "HighConfidenceMetaboliteCount",
+        ]
+
+    @staticmethod
+    def _module_metabolite_export_columns() -> list[str]:
+        return ["Module", "Metabolite", "SpearmanRho", "FDR"]
+
+    @staticmethod
+    def _select_existing_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+        return df.loc[:, [column for column in columns if column in df.columns]].copy()
+
     def _build_network_tables(self, gene_scores_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         if gene_scores_df.empty:
             empty_network = pd.DataFrame(columns=self._network_edge_columns())
@@ -486,6 +530,9 @@ class MultiOmicsEngine:
         metabolites = pd.Index(gene_scores_df["Metabolite"].astype(str).unique(), name="Metabolite")
         summary = pd.DataFrame(index=metabolites)
         summary["CandidateGenes"] = base_group.size().reindex(metabolites).fillna(0).astype(int)
+        summary["PCCSelectedGenes"] = base_group["In_PCC"].sum().reindex(metabolites).fillna(0).astype(int)
+        summary["SpearmanSelectedGenes"] = base_group["In_Spearman"].sum().reindex(metabolites).fillna(0).astype(int)
+        summary["MISelectedGenes"] = base_group["In_MI"].sum().reindex(metabolites).fillna(0).astype(int)
         summary["TargetK"] = base_group["TargetK"].max().reindex(metabolites).fillna(0).astype(int)
         summary["MeanScreenSupportCount"] = base_group["ScreenSupportCount"].mean().reindex(metabolites).fillna(0.0)
         summary["MeanModelSupportCount"] = base_group["ModelSupportCount"].mean().reindex(metabolites).fillna(0.0)
@@ -713,46 +760,50 @@ class MultiOmicsEngine:
 
     def save_results(self) -> None:
         out_dir = safe_mkdir(self.config.output_dir)
+        for filename in OBSOLETE_TABLE_FILES:
+            path = out_dir / filename
+            if path.exists():
+                path.unlink()
 
         gene_scores_df = self.ml_results.get("gene_scores_df", pd.DataFrame())
-        if isinstance(gene_scores_df, pd.DataFrame) and not gene_scores_df.empty:
-            gene_scores_df.to_csv(out_dir / TABLE_FILE_PREFIXES["gene_scores"], index=False)
-
-        screening_summary_df = self.ml_results.get("screening_summary_df", pd.DataFrame())
-        if isinstance(screening_summary_df, pd.DataFrame) and not screening_summary_df.empty:
-            screening_summary_df.to_csv(out_dir / TABLE_FILE_PREFIXES["screening_summary"], index=False)
-
         total_network_df = self.ml_results.get("total_association_network_df", pd.DataFrame())
-        if isinstance(total_network_df, pd.DataFrame) and not total_network_df.empty:
-            total_network_df.to_csv(out_dir / TABLE_FILE_PREFIXES["total_network"], index=False)
-
         high_confidence_network_df = self.ml_results.get("high_confidence_network_df", pd.DataFrame())
-        if isinstance(high_confidence_network_df, pd.DataFrame) and not high_confidence_network_df.empty:
-            high_confidence_network_df.to_csv(out_dir / TABLE_FILE_PREFIXES["high_confidence_network"], index=False)
-
-        key_gene_summary_df = self.ml_results.get("key_gene_summary_df", pd.DataFrame())
-        if isinstance(key_gene_summary_df, pd.DataFrame) and not key_gene_summary_df.empty:
-            key_gene_summary_df.to_csv(out_dir / TABLE_FILE_PREFIXES["key_gene_summary"], index=False)
 
         metabolite_summary = self.ml_results.get("metabolite_summary", pd.DataFrame())
         if isinstance(metabolite_summary, pd.DataFrame) and not metabolite_summary.empty:
             metabolite_summary.to_csv(out_dir / TABLE_FILE_PREFIXES["metabolite_summary"], index=False)
 
+        if isinstance(high_confidence_network_df, pd.DataFrame) and not high_confidence_network_df.empty:
+            self._select_existing_columns(
+                high_confidence_network_df,
+                self._analysis_network_export_columns(),
+            ).to_csv(out_dir / TABLE_FILE_PREFIXES["high_confidence_network"], index=False)
+
+        key_gene_summary_df = self.ml_results.get("key_gene_summary_df", pd.DataFrame())
+        if isinstance(key_gene_summary_df, pd.DataFrame) and not key_gene_summary_df.empty:
+            key_gene_summary_df.to_csv(out_dir / TABLE_FILE_PREFIXES["key_gene_summary"], index=False)
+
         gene_module_assignment_df = self.ml_results.get("gene_module_assignment_df", pd.DataFrame())
         if isinstance(gene_module_assignment_df, pd.DataFrame) and not gene_module_assignment_df.empty:
-            gene_module_assignment_df.to_csv(out_dir / TABLE_FILE_PREFIXES["gene_module_assignment"], index=False)
-
-        module_eigengenes_df = self.ml_results.get("module_eigengenes_df", pd.DataFrame())
-        if isinstance(module_eigengenes_df, pd.DataFrame) and not module_eigengenes_df.empty:
-            module_eigengenes_df.to_csv(out_dir / TABLE_FILE_PREFIXES["module_eigengenes"], index=True)
+            self._select_existing_columns(
+                gene_module_assignment_df,
+                self._gene_module_export_columns(),
+            ).to_csv(out_dir / TABLE_FILE_PREFIXES["gene_module_assignment"], index=False)
 
         module_metabolite_assoc_df = self.ml_results.get("module_metabolite_assoc_df", pd.DataFrame())
         if isinstance(module_metabolite_assoc_df, pd.DataFrame) and not module_metabolite_assoc_df.empty:
-            module_metabolite_assoc_df.to_csv(out_dir / TABLE_FILE_PREFIXES["module_metabolite_association"], index=False)
+            self._select_existing_columns(
+                module_metabolite_assoc_df,
+                self._module_metabolite_export_columns(),
+            ).to_csv(out_dir / TABLE_FILE_PREFIXES["module_metabolite_association"], index=False)
 
         module_summary_df = self.ml_results.get("module_summary_df", pd.DataFrame())
         if isinstance(module_summary_df, pd.DataFrame) and not module_summary_df.empty:
             module_summary_df.to_csv(out_dir / TABLE_FILE_PREFIXES["module_summary"], index=False)
+
+        if bool(getattr(self.config, "export_audit_tables", False)):
+            if isinstance(gene_scores_df, pd.DataFrame) and not gene_scores_df.empty:
+                gene_scores_df.to_csv(out_dir / TABLE_FILE_PREFIXES["gene_scores_audit"], index=False)
 
         self.run_metadata["n_total_association_edges"] = (
             int(len(total_network_df)) if isinstance(total_network_df, pd.DataFrame) else 0

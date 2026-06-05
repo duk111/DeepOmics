@@ -40,8 +40,9 @@ def _plot_group1_violin_box_facets(
     n_features = len(features)
     n_cols = 1 if n_features == 1 else 2 if n_features <= 8 else 3
     n_rows = int(np.ceil(n_features / n_cols))
-    fig_width = max(6.4, min(18.0, 4.3 * n_cols))
-    fig_height = max(4.2, min(26.0, 3.15 * n_rows + 0.75))
+    is_metabolite_facets = feature_col == "Metabolite"
+    fig_width = max(6.4, min(19.0 if is_metabolite_facets else 18.0, (4.6 if is_metabolite_facets else 4.3) * n_cols))
+    fig_height = max(4.2, min(28.0 if is_metabolite_facets else 26.0, (3.45 if is_metabolite_facets else 3.15) * n_rows + 0.75))
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, fig_height), squeeze=False)
     axes_flat = axes.ravel()
 
@@ -108,7 +109,11 @@ def _plot_group1_violin_box_facets(
         ax.axis("off")
 
     fig.suptitle(title, y=0.995, fontsize=13)
-    fig.tight_layout(rect=(0.01, 0.01, 0.99, 0.965), h_pad=1.3, w_pad=1.0)
+    fig.tight_layout(
+        rect=(0.01, 0.01, 0.99, 0.965),
+        h_pad=1.75 if is_metabolite_facets else 1.3,
+        w_pad=1.35 if is_metabolite_facets else 1.0,
+    )
     _save_figure(fig, save_stem, cfg)
 
 
@@ -244,7 +249,7 @@ def plot_top_metabolite_group1_violin_box(
         return
     group1_color_map = _group_color_map(group1_order)
 
-    metabolites = _top_metabolite_order(engine, metab_df, int(top_m or cfg.support_plot_top_metabolites))
+    metabolites = _top_metabolite_order(engine, metab_df, int(top_m or 12))
     if not metabolites:
         return
 

@@ -23,7 +23,7 @@ from .base import (
 from .pca import _load_pca_group_table
 
 def _build_signed_count_summary(edge_df: pd.DataFrame, node_column: str) -> pd.DataFrame:
-    """Aggregate node-level weighted degree and direction bias from T03 edges."""
+    """Aggregate node-level weighted degree and direction bias from high-confidence edges."""
     if edge_df.empty:
         return pd.DataFrame(
             columns=[
@@ -69,7 +69,7 @@ def _compute_standardized_feature_variability(feature_df: pd.DataFrame) -> pd.Se
 
 
 def _prepare_circos_node_tables(engine) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Build ordered gene/metabolite node tables strictly from T03."""
+    """Build ordered gene/metabolite node tables from the high-confidence network."""
     edge_df = engine.ml_results.get("high_confidence_network_df", pd.DataFrame())
     required_columns = {"Gene", "Metabolite", "EdgeWeight", "Sign", "ModelSupportCount"}
     if not isinstance(edge_df, pd.DataFrame) or edge_df.empty or not required_columns.issubset(edge_df.columns):
@@ -804,7 +804,7 @@ def _add_track_annotation_legend(
 
 
 def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
-    """Plot a compact static Circos figure using only T03 nodes and edges."""
+    """Plot a compact static Circos figure using high-confidence nodes and edges."""
     edge_df, gene_summary, metabolite_summary = _prepare_circos_node_tables(engine)
     if edge_df.empty or gene_summary.empty or metabolite_summary.empty:
         return
@@ -1074,7 +1074,7 @@ def plot_compressed_circos_network(engine, save_stem: str | Path, cfg) -> None:
 
 
 def plot_floating_cnet_circos_network(engine, save_stem: str | Path, cfg) -> None:
-    """Plot a T03-only circular cnetplot-style network with non-overlapping circular nodes."""
+    """Plot a high-confidence circular cnetplot-style network with non-overlapping circular nodes."""
     edge_df, gene_summary, metabolite_summary = _prepare_circos_node_tables(engine)
     if edge_df.empty or gene_summary.empty or metabolite_summary.empty:
         return

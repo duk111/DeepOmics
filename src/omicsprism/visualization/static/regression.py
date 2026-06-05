@@ -142,8 +142,8 @@ def _draw_regression_panel(
 def _regression_panel_figure(n_panels: int) -> tuple[plt.Figure, np.ndarray, int, int]:
     n_cols = 2 if n_panels > 1 else 1
     n_rows = int(np.ceil(n_panels / n_cols))
-    fig_width = 10.4 if n_cols == 2 else 5.4
-    fig_height = max(3.8, 3.35 * n_rows + 0.45)
+    fig_width = 11.0 if n_cols == 2 else 5.7
+    fig_height = max(4.2, 3.75 * n_rows + 0.65)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, fig_height))
     fig._skip_default_tight_layout = True
     return fig, np.atleast_1d(axes).ravel(), n_rows, n_cols
@@ -200,15 +200,15 @@ def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int 
             r_text = "r = NA"
 
         ax.text(
-            0.03,
-            0.97,
+            1.025,
+            0.82,
             r_text,
             transform=ax.transAxes,
             ha="left",
-            va="top",
+            va="center",
             fontsize=9.0,
             fontweight="bold",
-            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 1.5},
+            clip_on=False,
         )
         ax.set_title(f"{gene} vs {metab}", fontsize=10.2, pad=7)
         ax.set_xlabel(gene)
@@ -217,11 +217,11 @@ def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int 
     for ax in axes[n_panels:]:
         ax.axis("off")
 
-    fig.suptitle("Top Gene-Metabolite Association Pairs", y=0.992, fontsize=13)
+    fig.suptitle("Top Gene-Metabolite Association Pairs", y=0.982, fontsize=13)
     try:
-        fig.tight_layout(rect=(0.015, 0.012, 0.985, 0.962), h_pad=1.35, w_pad=2.0)
+        fig.tight_layout(rect=(0.015, 0.012, 0.96, 0.965), h_pad=1.85, w_pad=2.75)
     except Exception:
-        fig.subplots_adjust(top=0.94, hspace=0.46, wspace=0.34)
+        fig.subplots_adjust(top=0.945, right=0.96, hspace=0.58, wspace=0.46)
     _save_figure(fig, save_stem, cfg)
 
 
@@ -365,15 +365,15 @@ def plot_module_top_metabolite_regression_panels(engine, save_stem: str | Path, 
         rho_value = float(row.SpearmanRho) if pd.notna(row.SpearmanRho) else np.nan
         rho_text = f"rho = {rho_value:.2f}" if np.isfinite(rho_value) else "rho = NA"
         ax.text(
-            0.03,
-            0.97,
+            1.025,
+            0.82,
             rho_text,
             transform=ax.transAxes,
             ha="left",
-            va="top",
+            va="center",
             fontsize=9.0,
             fontweight="bold",
-            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75, "pad": 1.5},
+            clip_on=False,
         )
         ax.set_title(f"{module_name} module vs {metabolite}", fontsize=10.2, pad=7)
         ax.set_xlabel(f"{module_name} module eigengene")
@@ -382,11 +382,11 @@ def plot_module_top_metabolite_regression_panels(engine, save_stem: str | Path, 
     for ax in axes[n_panels:]:
         ax.axis("off")
 
-    fig.suptitle("Module Eigengene and Top Metabolite Associations", y=0.992, fontsize=13)
+    fig.suptitle("Module Eigengene and Top Metabolite Associations", y=0.982, fontsize=13)
     try:
-        fig.tight_layout(rect=(0.015, 0.012, 0.985, 0.962), h_pad=1.35, w_pad=2.0)
+        fig.tight_layout(rect=(0.015, 0.012, 0.96, 0.965), h_pad=1.85, w_pad=2.75)
     except Exception:
-        fig.subplots_adjust(top=0.94, hspace=0.46, wspace=0.34)
+        fig.subplots_adjust(top=0.945, right=0.96, hspace=0.58, wspace=0.46)
     _save_figure(fig, save_stem, cfg)
 
 

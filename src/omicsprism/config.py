@@ -65,6 +65,7 @@ class AnalysisConfig:
     export_pdf: bool = True
     export_svg: bool = True
     export_png: bool = True
+    export_audit_tables: bool = False
     log_level: str = "INFO"
 
     def __post_init__(self) -> None:

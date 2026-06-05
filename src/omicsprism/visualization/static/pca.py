@@ -621,7 +621,7 @@ def _plot_pca_pairs_from_matrix(
                     [0],
                     marker="o",
                     linestyle="",
-                    markersize=7.5,
+                    markersize=9.5,
                     markerfacecolor=color_map[group_name],
                     markeredgecolor="white",
                     markeredgewidth=0.9,
@@ -635,7 +635,7 @@ def _plot_pca_pairs_from_matrix(
                     [0],
                     marker=marker_map[group_name],
                     linestyle="",
-                    markersize=7.5,
+                    markersize=9.5,
                     markerfacecolor="black",
                     markeredgecolor="white",
                     markeredgewidth=0.9,
@@ -652,7 +652,7 @@ def _plot_pca_pairs_from_matrix(
                     [0],
                     marker="o",
                     linestyle="",
-                    markersize=7.5,
+                    markersize=9.5,
                     markerfacecolor=color_map[group_name],
                     markeredgecolor="white",
                     markeredgewidth=0.9,
@@ -756,10 +756,10 @@ def _plot_pca_pairs_from_matrix(
             bbox_to_anchor=(0.055, 0.06),
             ncol=legend_ncol,
             frameon=False,
-            fontsize=11,
-            handletextpad=0.45,
-            columnspacing=1.0,
-            labelspacing=0.5,
+            fontsize=13,
+            handletextpad=0.55,
+            columnspacing=1.15,
+            labelspacing=0.62,
             borderaxespad=0.0,
         )
 
@@ -780,7 +780,8 @@ def plot_sample_dendrogram(adata, save_stem: str | Path, cfg) -> None:
 
     from scipy.cluster.hierarchy import dendrogram, linkage
 
-    fig, ax = plt.subplots(figsize=(max(12, adata.n_obs * 0.12), 6))
+    fig_width = max(12.0, adata.n_obs * 0.24)
+    fig, ax = plt.subplots(figsize=(fig_width, 6))
     linkage_matrix = linkage(np.asarray(adata.X, dtype=np.float32), method="average")
     color_threshold = 0.70 * float(linkage_matrix[:, 2].max())
 
@@ -788,7 +789,7 @@ def plot_sample_dendrogram(adata, save_stem: str | Path, cfg) -> None:
         linkage_matrix,
         labels=adata.obs_names.tolist(),
         leaf_rotation=90,
-        leaf_font_size=max(4, min(9, 800 // max(1, adata.n_obs))),
+        leaf_font_size=max(4, min(9, int(fig_width * 72 / max(1, adata.n_obs) * 0.42))),
         color_threshold=color_threshold,
         above_threshold_color="#aaaaaa",
         ax=ax,

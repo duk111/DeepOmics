@@ -1055,7 +1055,7 @@ def _build_network_payload(
             module_df["IsGrey"] = 1
         engine.ml_results["gene_module_assignment_df"] = module_df
 
-    title = "T03 High-Confidence Network Explorer"
+    title = "T02 High-Confidence Network Explorer"
     gene_summary, _module_color_map = _attach_circos_module_annotations(engine, gene_summary)
     metabolite_module_core = _prepare_metabolite_module_core_map(engine)
     metabolite_summary = metabolite_summary.copy()

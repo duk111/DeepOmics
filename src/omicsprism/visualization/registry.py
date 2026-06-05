@@ -290,38 +290,37 @@ def _render_association_evidence_upset(context: VisualizationContext, save_stem:
 STATIC_FIGURE_SPECS: tuple[FigureSpec, ...] = (
     FigureSpec("sample_clustering_dendrogram", "sample_clustering_dendrogram", _render_sample_dendrogram),
     FigureSpec("transcriptome_pca", "transcriptome_pca", _render_transcriptome_pca),
-    FigureSpec("metabolome_pca", "metabolome_pca", _render_metabolome_pca),
-    FigureSpec("transcriptome_pca_pairs", "transcriptome_pca_pairs", _render_transcriptome_pca_pairs),
-    FigureSpec("metabolome_pca_pairs", "metabolome_pca_pairs", _render_metabolome_pca_pairs),
     FigureSpec(
         "transcriptome_pca_subgroups",
         "transcriptome_pca_subgroups",
         _render_transcriptome_pca_subgroups,
         enabled=_has_secondary_pca_grouping,
     ),
-    FigureSpec(
-        "metabolome_pca_subgroups",
-        "metabolome_pca_subgroups",
-        _render_metabolome_pca_subgroups,
-        enabled=_has_secondary_pca_grouping,
-    ),
+    FigureSpec("transcriptome_pca_pairs", "transcriptome_pca_pairs", _render_transcriptome_pca_pairs),
     FigureSpec(
         "transcriptome_pca_pairs_subgroups",
         "transcriptome_pca_pairs_subgroups",
         _render_transcriptome_pca_pairs_subgroups,
         enabled=_has_secondary_pca_grouping,
     ),
+    FigureSpec("metabolome_pca", "metabolome_pca", _render_metabolome_pca),
+    FigureSpec(
+        "metabolome_pca_subgroups",
+        "metabolome_pca_subgroups",
+        _render_metabolome_pca_subgroups,
+        enabled=_has_secondary_pca_grouping,
+    ),
+    FigureSpec("metabolome_pca_pairs", "metabolome_pca_pairs", _render_metabolome_pca_pairs),
     FigureSpec(
         "metabolome_pca_pairs_subgroups",
         "metabolome_pca_pairs_subgroups",
         _render_metabolome_pca_pairs_subgroups,
         enabled=_has_secondary_pca_grouping,
     ),
-    FigureSpec("top_gene_metabolite_pairs", "top_gene_metabolite_pairs", _render_top_edge_scatter_panels),
     FigureSpec(
-        "top_gene_metabolite_correlation_heatmaps",
-        "top_gene_metabolite_correlation_heatmaps",
-        _render_top_gene_metabolite_correlation_heatmaps,
+        "association_evidence_upset",
+        "association_evidence_upset",
+        _render_association_evidence_upset,
     ),
     FigureSpec(
         "gene_metabolite_correlation_bubble_heatmap",
@@ -329,14 +328,15 @@ STATIC_FIGURE_SPECS: tuple[FigureSpec, ...] = (
         _render_gene_metabolite_correlation_bubble_heatmap,
     ),
     FigureSpec(
+        "top_gene_metabolite_correlation_heatmaps",
+        "top_gene_metabolite_correlation_heatmaps",
+        _render_top_gene_metabolite_correlation_heatmaps,
+    ),
+    FigureSpec("top_gene_metabolite_pairs", "top_gene_metabolite_pairs", _render_top_edge_scatter_panels),
+    FigureSpec(
         "top_metabolite_group1_violin_box",
         "top_metabolite_group1_violin_box",
         _render_top_metabolite_group1_violin_box,
-    ),
-    FigureSpec(
-        "module_top_metabolite_regressions",
-        "module_top_metabolite_regressions",
-        _render_module_top_metabolite_regression_panels,
     ),
     FigureSpec("module_eigengene_heatmap", "module_eigengene_heatmap", _render_module_eigengene_heatmap),
     FigureSpec(
@@ -362,33 +362,33 @@ STATIC_FIGURE_SPECS: tuple[FigureSpec, ...] = (
         _render_module_eigengene_group1_violin_box,
     ),
     FigureSpec("module_kme_boxplot", "module_kme_boxplot", _render_module_kme_boxplot),
+    FigureSpec(
+        "module_metabolite_association_heatmap",
+        "module_metabolite_association_heatmap",
+        _render_module_metabolite_association_heatmap,
+    ),
     FigureSpec("module_metabolite_bubble_plot", "module_metabolite_bubble_plot", _render_module_metabolite_bubble_plot),
-    FigureSpec("association_direction_summary", "association_direction_summary", _render_association_direction_summary),
+    FigureSpec(
+        "module_top_metabolite_regressions",
+        "module_top_metabolite_regressions",
+        _render_module_top_metabolite_regression_panels,
+    ),
     FigureSpec(
         "module_eigengene_metabolite_trend_panels",
         "module_eigengene_metabolite_trend_panels",
         _render_module_eigengene_metabolite_trend_panels,
     ),
+    FigureSpec("association_direction_summary", "association_direction_summary", _render_association_direction_summary),
     FigureSpec(
         "edgeweight_distribution_by_module",
         "edgeweight_distribution_by_module",
         _render_edgeweight_distribution_by_module,
-    ),
-    FigureSpec(
-        "module_metabolite_association_heatmap",
-        "module_metabolite_association_heatmap",
-        _render_module_metabolite_association_heatmap,
     ),
     FigureSpec("compressed_circos_network", "compressed_circos_network", _render_compressed_circos_network),
     FigureSpec(
         "floating_cnet_circos_network",
         "floating_cnet_circos_network",
         _render_floating_cnet_circos_network,
-    ),
-    FigureSpec(
-        "association_evidence_upset",
-        "association_evidence_upset",
-        _render_association_evidence_upset,
     ),
 )
 

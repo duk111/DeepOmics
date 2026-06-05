@@ -1314,16 +1314,17 @@ def plot_module_eigengene_ridge_group1(
         for group_name in group1_order
     ]
     if legend_handles:
-        legend_ncol = min(len(legend_handles), max(1, int(fig_width // 1.15)))
-        fig.legend(
+        ax.legend(
             handles=legend_handles,
-            loc="lower center",
-            bbox_to_anchor=(0.5, 0.012),
-            ncol=legend_ncol,
+            loc="upper left",
+            bbox_to_anchor=(1.015, 1.0),
+            bbox_transform=ax.transAxes,
+            ncol=1,
             frameon=False,
-            fontsize=9,
+            fontsize=10.5,
             handlelength=1.5,
             columnspacing=0.9,
+            borderaxespad=0.0,
         )
 
     ax.set_yticks(np.arange(n_modules, dtype=float))
@@ -1334,7 +1335,7 @@ def plot_module_eigengene_ridge_group1(
     ax.set_ylim(-0.35, n_modules - 1 + ridge_height + 0.20)
     ax.grid(axis="x", color="#e5e7eb", linewidth=0.55)
     ax.set_axisbelow(True)
-    fig.subplots_adjust(bottom=0.14)
+    fig.subplots_adjust(right=0.76)
     _save_figure(fig, save_stem, cfg)
 
 
@@ -1450,7 +1451,15 @@ def plot_module_metabolite_association_heatmap(engine, save_stem: str | Path, cf
     )
 
     metric_label = "FDR" if significance_column == "FDR" else "P value"
-    ax.set_title(f"Module-Metabolite Association Heatmap\nColor: Spearman rho; stars: {metric_label}", pad=8)
+    colorbar = ax.collections[0].colorbar if ax.collections else None
+    if colorbar is not None:
+        colorbar.ax.set_title(
+            f"{metric_label}\n* < 0.05\n** < 0.01\n*** < 0.001",
+            fontsize=9,
+            fontweight="normal",
+            pad=8,
+        )
+    ax.set_title("Module-Metabolite Association Heatmap", pad=8)
     ax.set_xlabel("Metabolite")
     ax.set_ylabel("Module")
     ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")

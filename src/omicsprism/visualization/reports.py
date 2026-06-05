@@ -5,11 +5,55 @@ from pathlib import Path
 
 import pandas as pd
 
-from ..outputs import FIGURE_FILE_PREFIXES, TABLE_FILE_PREFIXES
+from ..outputs import FIGURE_FILE_PREFIXES, OBSOLETE_FIGURE_FILE_PREFIXES, TABLE_FILE_PREFIXES
 from ..utils import safe_mkdir
 from .context import VisualizationContext
 from .registry import iter_figure_specs
 from .static.base import set_academic_style
+
+
+MAIN_TABLE_DESCRIPTIONS = {
+    "metabolite_summary": "Metabolite-level association summary with screening counts, candidate counts, high-confidence edge counts, and top linked genes.",
+    "high_confidence_network": "High-confidence gene-metabolite network for biological interpretation and Cytoscape import.",
+    "key_gene_summary": "Key-gene summary aggregated across associated metabolites.",
+    "gene_module_assignment": "Gene module assignment with intramodular metrics and high-confidence association counts.",
+    "module_metabolite_association": "Module-metabolite Spearman association table with FDR.",
+    "module_summary": "Module-level summary including size, hub gene, and top associated metabolite.",
+}
+
+FIGURE_DESCRIPTIONS = {
+    "sample_clustering_dendrogram": "Sample clustering dendrogram.",
+    "transcriptome_pca": "Transcriptome PCA scatter plot colored by group1.",
+    "transcriptome_pca_subgroups": "Transcriptome PCA scatter plot colored by group2.",
+    "transcriptome_pca_pairs": "Transcriptome PCA pairs plot colored by group1.",
+    "transcriptome_pca_pairs_subgroups": "Transcriptome PCA pairs plot colored by group2.",
+    "metabolome_pca": "Metabolome PCA scatter plot colored by group1.",
+    "metabolome_pca_subgroups": "Metabolome PCA scatter plot colored by group2.",
+    "metabolome_pca_pairs": "Metabolome PCA pairs plot colored by group1.",
+    "metabolome_pca_pairs_subgroups": "Metabolome PCA pairs plot colored by group2.",
+    "association_evidence_upset": "Global evidence-overlap UpSet plot across candidate metabolite-gene edges.",
+    "gene_metabolite_correlation_bubble_heatmap": "High-confidence gene-metabolite bubble heatmap using Spearman rho and EdgeWeight.",
+    "top_gene_metabolite_correlation_heatmaps": "Top gene x top metabolite Pearson and Spearman heatmaps.",
+    "top_gene_metabolite_pairs": "Top gene-metabolite regression panels ranked by EdgeWeight.",
+    "top_metabolite_group1_violin_box": "Top metabolite abundance distributions by group1.",
+    "module_eigengene_heatmap": "Module eigengene heatmap with sample group annotations.",
+    "module_eigengene_heatmap_group2": "Module eigengene heatmap grouped by group2.",
+    "module_zscore_line_panels": "Module z-score line panels faceted by group1.",
+    "module_gene_zscore_line_panels": "Module gene z-score line panels with module summaries.",
+    "module_eigengene_ridge": "Module eigengene z-score ridge distributions across averaged group states.",
+    "module_eigengene_ridge_group1": "Module eigengene z-score ridge distributions overlaid by group1.",
+    "module_eigengene_group1_violin_box": "Module eigengene z-score violin and box plots by group1.",
+    "module_kme_boxplot": "Intramodular gene kME distribution by module.",
+    "module_metabolite_association_heatmap": "Module-metabolite association heatmap with significance stars.",
+    "module_metabolite_bubble_plot": "Module-metabolite bubble plot using Spearman rho and FDR-scaled point size.",
+    "module_top_metabolite_regressions": "Module eigengene regression panels against each module's top associated metabolite.",
+    "module_eigengene_metabolite_trend_panels": "Module eigengene and top metabolite z-score trends across group2 within group1.",
+    "association_direction_summary": "Positive and negative high-confidence association counts by module.",
+    "edgeweight_distribution_by_module": "High-confidence EdgeWeight distributions by module.",
+    "compressed_circos_network": "Compact T02-only Circos network overview.",
+    "floating_cnet_circos_network": "Floating circular cnetplot-style T02-only network overview.",
+}
+
 
 def _df_to_markdown(df: pd.DataFrame, max_rows: int = 20) -> str:
     if df.empty:
@@ -21,6 +65,26 @@ def _df_to_markdown(df: pd.DataFrame, max_rows: int = 20) -> str:
     sep = "| " + " | ".join(["---"] * len(columns)) + " |"
     rows = ["| " + " | ".join(str(row[col]) for col in columns) + " |" for _, row in preview.iterrows()]
     return "\n".join([header, sep, *rows])
+
+
+def _iter_enabled_figure_rows(engine, cfg) -> list[tuple[str, str]]:
+    context = VisualizationContext.from_engine(engine, cfg)
+    rows: list[tuple[str, str]] = []
+    for spec in iter_figure_specs():
+        if not spec.enabled(context):
+            continue
+        prefix = FIGURE_FILE_PREFIXES[spec.prefix_key]
+        description = FIGURE_DESCRIPTIONS.get(spec.key, spec.description or spec.key.replace("_", " ").title())
+        rows.append((f"plots/{prefix}.pdf|svg|png", description))
+    return rows
+
+
+def _main_table_rows() -> list[tuple[str, str]]:
+    return [
+        (TABLE_FILE_PREFIXES[key], description)
+        for key, description in MAIN_TABLE_DESCRIPTIONS.items()
+        if key in TABLE_FILE_PREFIXES
+    ]
 
 
 def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
@@ -37,11 +101,7 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         f"- Output directory: `{cfg.output_dir}`",
         "",
         "## Main Tables",
-        f"- `{TABLE_FILE_PREFIXES['gene_scores']}`: complete metabolite-level gene scoring table after three-way screening and two-model ranking.",
-        f"- `{TABLE_FILE_PREFIXES['total_network']}`: total gene-metabolite association network from ElasticNet top-k union XGBoost top-k.",
-        f"- `{TABLE_FILE_PREFIXES['high_confidence_network']}`: high-confidence subnetwork of the total association network after RRA and multi-evidence filtering.",
-        f"- `{TABLE_FILE_PREFIXES['key_gene_summary']}`: merged key-gene summary across metabolites.",
-        f"- `{TABLE_FILE_PREFIXES['metabolite_summary']}`: metabolite-level candidate and network summary.",
+        *[f"- `{filename}`: {description}" for filename, description in _main_table_rows()],
         "",
         "## Metabolite-Level Summary",
         _df_to_markdown(metabolite_summary, max_rows=20),
@@ -50,32 +110,7 @@ def generate_markdown_report(engine, cfg, report_path: str | Path) -> None:
         _df_to_markdown(key_gene_summary, max_rows=20),
         "",
         "## Generated Figures",
-        f"- `plots/{FIGURE_FILE_PREFIXES['sample_clustering_dendrogram']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['transcriptome_pca']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_pca']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_correlation_heatmaps']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['gene_metabolite_correlation_bubble_heatmap']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['top_metabolite_group1_violin_box']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['module_top_metabolite_regressions']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap_group2']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['module_zscore_line_panels']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['module_gene_zscore_line_panels']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_ridge']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_ridge_group1']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_group1_violin_box']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['module_kme_boxplot']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['module_metabolite_bubble_plot']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['association_direction_summary']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['module_eigengene_metabolite_trend_panels']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['edgeweight_distribution_by_module']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png`",
-        f"- `plots/{FIGURE_FILE_PREFIXES['association_evidence_upset']}.pdf|svg|png`",
+        *[f"- `{filename}`: {description}" for filename, description in _iter_enabled_figure_rows(engine, cfg)],
         "- `OmicsPrism_Interactive_Report.html`",
     ]
     Path(report_path).write_text("\n".join(lines), encoding="utf-8")
@@ -85,42 +120,15 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
     metabolite_summary = engine.ml_results.get("metabolite_summary", pd.DataFrame()).head(50)
     key_gene_summary = engine.ml_results.get("key_gene_summary_df", pd.DataFrame()).head(50)
 
-    table_rows = "".join([
-        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['gene_scores'])}</code></td><td>Complete metabolite-level gene scoring table after three-way screening and two-model ranking.</td></tr>",
-        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['total_network'])}</code></td><td>Total gene-metabolite association network from ElasticNet top-k union XGBoost top-k.</td></tr>",
-        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['high_confidence_network'])}</code></td><td>High-confidence subnetwork of the total association network after RRA and multi-evidence filtering.</td></tr>",
-        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['key_gene_summary'])}</code></td><td>Merged key-gene summary across metabolites.</td></tr>",
-        f"<tr><td><code>{html.escape(TABLE_FILE_PREFIXES['metabolite_summary'])}</code></td><td>Metabolite-level candidate and network summary.</td></tr>",
-    ])
+    table_rows = "".join(
+        f"<tr><td><code>{html.escape(filename)}</code></td><td>{html.escape(description)}</td></tr>"
+        for filename, description in _main_table_rows()
+    )
 
-    figure_rows = "".join([
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['sample_clustering_dendrogram'])}.pdf|svg|png</code></td><td>Sample clustering dendrogram.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_pca'])}.pdf|svg|png</code></td><td>Transcriptome PCA scatter plot.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_pca'])}.pdf|svg|png</code></td><td>Metabolome PCA scatter plot.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['transcriptome_pca_pairs'])}.pdf|svg|png</code></td><td>Transcriptome PCA pairs plot using the first principal components.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['metabolome_pca_pairs'])}.pdf|svg|png</code></td><td>Metabolome PCA pairs plot using the first principal components.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs'])}.pdf|svg|png</code></td><td>Top association pair scatter panels ranked by EdgeWeight.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_gene_metabolite_correlation_heatmaps'])}.pdf|svg|png</code></td><td>Top gene x top metabolite Pearson and Spearman heatmaps with gene-side module color strip.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['gene_metabolite_correlation_bubble_heatmap'])}.pdf|svg|png</code></td><td>High-confidence gene-metabolite bubble heatmap using T03 genes; color is Spearman rho and point size is EdgeWeight.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['top_metabolite_group1_violin_box'])}.pdf|svg|png</code></td><td>Top metabolite abundance violin and box plots by group1.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_top_metabolite_regressions'])}.pdf|svg|png</code></td><td>Module eigengene regression panels against each module's top associated metabolite.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_heatmap'])}.pdf|svg|png</code></td><td>Module eigengene heatmap with group2 and group1 annotation tracks using PCA group colors.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_heatmap_group2'])}.pdf|svg|png</code></td><td>Module eigengene heatmap with group1 and group2 annotation tracks, grouped by group2.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_zscore_line_panels'])}.pdf|svg|png</code></td><td>Module z-score line panels faceted by group1 with group2 color strips.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_gene_zscore_line_panels'])}.pdf|svg|png</code></td><td>Module gene z-score line panels with grey gene trajectories and black module trajectories.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_ridge'])}.pdf|svg|png</code></td><td>Module eigengene z-score ridge distribution across all averaged group states.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_ridge_group1'])}.pdf|svg|png</code></td><td>Module eigengene z-score ridge distribution overlaid by group1.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_group1_violin_box'])}.pdf|svg|png</code></td><td>Module eigengene z-score violin and box plots by group1.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_kme_boxplot'])}.pdf|svg|png</code></td><td>Intramodular gene kME boxplot by module.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_metabolite_bubble_plot'])}.pdf|svg|png</code></td><td>Module-metabolite bubble plot with Spearman rho color and FDR-scaled point size.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['association_direction_summary'])}.pdf|svg|png</code></td><td>Positive and negative high-confidence association counts by module.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_eigengene_metabolite_trend_panels'])}.pdf|svg|png</code></td><td>Module eigengene and top metabolite z-score trends across group2, faceted by group1.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['edgeweight_distribution_by_module'])}.pdf|svg|png</code></td><td>High-confidence EdgeWeight distributions by gene module.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap'])}.pdf|svg|png</code></td><td>Module-metabolite association heatmap colored by Spearman rho with significance stars.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['compressed_circos_network'])}.pdf|svg|png</code></td><td>Compact Circos overview using all unique genes and metabolites from T03 only.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['floating_cnet_circos_network'])}.pdf|svg|png</code></td><td>Floating circular cnetplot-style network using T03 only, with circular non-overlapping nodes and metabolite-colored edges.</td></tr>",
-        f"<tr><td><code>plots/{html.escape(FIGURE_FILE_PREFIXES['association_evidence_upset'])}.pdf|svg|png</code></td><td>Global UpSet plot showing overlap among PCC, Spearman, MI, ElasticNet, and XGBoost evidence for metabolite-gene candidate edges.</td></tr>",
-    ])
+    figure_rows = "".join(
+        f"<tr><td><code>{html.escape(filename)}</code></td><td>{html.escape(description)}</td></tr>"
+        for filename, description in _iter_enabled_figure_rows(engine, cfg)
+    )
 
     html_text = f"""<!DOCTYPE html>
 <html lang="en">
@@ -198,6 +206,11 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
 def generate_report_plots(engine, cfg) -> None:
     set_academic_style()
     plots_dir = safe_mkdir(Path(cfg.output_dir) / "plots")
+    for prefix in OBSOLETE_FIGURE_FILE_PREFIXES:
+        for suffix in ("pdf", "svg", "png"):
+            path = plots_dir / f"{prefix}.{suffix}"
+            if path.exists():
+                path.unlink()
     context = VisualizationContext.from_engine(engine, cfg, plots_dir=plots_dir)
 
     for figure_spec in iter_figure_specs():
@@ -205,35 +218,13 @@ def generate_report_plots(engine, cfg) -> None:
 
     notes = (
         "Recommended downstream usage:\n"
-        f"1. Use {TABLE_FILE_PREFIXES['gene_scores']} for full metabolite-level candidate scoring.\n"
-        f"2. Use {TABLE_FILE_PREFIXES['total_network']} for broad association recovery.\n"
-        f"3. Use {TABLE_FILE_PREFIXES['high_confidence_network']} for the stricter high-confidence subset of the total network.\n"
-        f"4. Use plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs']}.pdf|svg|png for the transcriptome PCA pairs overview (group1).\n"
-        f"5. Use plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs']}.pdf|svg|png for the metabolome PCA pairs overview (group1).\n"
-        f"6. Use plots/{FIGURE_FILE_PREFIXES['transcriptome_pca_pairs_subgroups']}.pdf|svg|png for the transcriptome PCA pairs overview (group2).\n"
-        f"7. Use plots/{FIGURE_FILE_PREFIXES['metabolome_pca_pairs_subgroups']}.pdf|svg|png for the metabolome PCA pairs overview (group2).\n"
-        f"8. Use plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_pairs']}.pdf|svg|png for the top regression-panel overview.\n"
-        f"9. Use plots/{FIGURE_FILE_PREFIXES['top_gene_metabolite_correlation_heatmaps']}.pdf|svg|png for top gene x top metabolite Pearson/Spearman heatmaps.\n"
-        f"10. Use plots/{FIGURE_FILE_PREFIXES['gene_metabolite_correlation_bubble_heatmap']}.pdf|svg|png for T03 gene-metabolite Spearman/EdgeWeight bubble interpretation.\n"
-        f"11. Use plots/{FIGURE_FILE_PREFIXES['top_metabolite_group1_violin_box']}.pdf|svg|png for top metabolite abundance distributions by group1.\n"
-        f"12. Use plots/{FIGURE_FILE_PREFIXES['module_top_metabolite_regressions']}.pdf|svg|png for module eigengene vs top metabolite regressions.\n"
-        f"13. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap']}.pdf|svg|png for the module eigengene heatmap with group2/group1 annotation tracks.\n"
-        f"14. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_heatmap_group2']}.pdf|svg|png for the module eigengene heatmap grouped by group2.\n"
-        f"15. Use plots/{FIGURE_FILE_PREFIXES['module_zscore_line_panels']}.pdf|svg|png for module z-score line panels faceted by group1 with group2 color strips.\n"
-        f"16. Use plots/{FIGURE_FILE_PREFIXES['module_gene_zscore_line_panels']}.pdf|svg|png for module gene z-score line panels with grey gene trajectories and black module trajectories.\n"
-        f"17. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_ridge']}.pdf|svg|png for module eigengene z-score ridge distributions across all averaged group states.\n"
-        f"18. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_ridge_group1']}.pdf|svg|png for group1-overlaid module eigengene ridge distributions.\n"
-        f"19. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_group1_violin_box']}.pdf|svg|png for module eigengene z-score distributions by group1.\n"
-        f"20. Use plots/{FIGURE_FILE_PREFIXES['module_kme_boxplot']}.pdf|svg|png for intramodular gene kME distributions by module.\n"
-        f"21. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_bubble_plot']}.pdf|svg|png for module-metabolite Spearman/FDR bubble interpretation.\n"
-        f"22. Use plots/{FIGURE_FILE_PREFIXES['association_direction_summary']}.pdf|svg|png for positive/negative association direction counts by module.\n"
-        f"23. Use plots/{FIGURE_FILE_PREFIXES['module_eigengene_metabolite_trend_panels']}.pdf|svg|png for module eigengene and top metabolite trends across group2 within each group1.\n"
-        f"24. Use plots/{FIGURE_FILE_PREFIXES['edgeweight_distribution_by_module']}.pdf|svg|png for high-confidence EdgeWeight distributions by module.\n"
-        f"25. Use plots/{FIGURE_FILE_PREFIXES['module_metabolite_association_heatmap']}.pdf|svg|png for the module-metabolite association heatmap.\n"
-        f"26. Use plots/{FIGURE_FILE_PREFIXES['compressed_circos_network']}.pdf|svg|png for the compact T03-only Circos overview.\n"
-        f"27. Use plots/{FIGURE_FILE_PREFIXES['floating_cnet_circos_network']}.pdf|svg|png for the floating circular T03-only cnetplot-style overview.\n"
-        f"28. Use plots/{FIGURE_FILE_PREFIXES['association_evidence_upset']}.pdf|svg|png for global evidence-overlap interpretation across candidate metabolite-gene edges.\n"
-        "29. Use OmicsPrism_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
+        f"1. Use {TABLE_FILE_PREFIXES['metabolite_summary']} for metabolite-level triage.\n"
+        f"2. Use {TABLE_FILE_PREFIXES['high_confidence_network']} for the main gene-metabolite network interpretation and Cytoscape import.\n"
+        f"3. Use {TABLE_FILE_PREFIXES['key_gene_summary']} for candidate key-gene prioritization.\n"
+        f"4. Use {TABLE_FILE_PREFIXES['gene_module_assignment']} and {TABLE_FILE_PREFIXES['module_summary']} for module interpretation.\n"
+        f"5. Use {TABLE_FILE_PREFIXES['module_metabolite_association']} for module-metabolite association statistics.\n"
+        "6. Use OmicsPrism_Interactive_Report.html for lightweight browser-native visualization preview and export.\n"
+        f"7. Set export_audit_tables=True to emit {TABLE_FILE_PREFIXES['gene_scores_audit']} for full scoring audit.\n"
     )
     (plots_dir / "visualization_notes.txt").write_text(notes, encoding="utf-8")
 

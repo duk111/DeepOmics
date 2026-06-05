@@ -105,9 +105,9 @@ def plot_association_evidence_upset(engine, save_stem: str | Path, cfg) -> None:
     grid = fig.add_gridspec(
         nrows=2,
         ncols=2,
-        width_ratios=[1.55, max(4.2, 0.30 * n_intersections)],
+        width_ratios=[1.85, max(4.2, 0.30 * n_intersections)],
         height_ratios=[2.15, 1.35],
-        wspace=0.08,
+        wspace=0.14,
         hspace=0.04,
     )
     ax_summary = fig.add_subplot(grid[0, 0])
@@ -191,7 +191,7 @@ def plot_association_evidence_upset(engine, save_stem: str | Path, cfg) -> None:
         "Unit: metabolite-gene edge"
     )
     ax_summary.text(
-        0.0,
+        -0.34,
         0.96,
         summary_text,
         ha="left",
@@ -199,6 +199,7 @@ def plot_association_evidence_upset(engine, save_stem: str | Path, cfg) -> None:
         fontsize=10.5,
         linespacing=1.55,
         color="#111827",
+        clip_on=False,
     )
 
     fig.subplots_adjust(left=0.11, right=0.98, top=0.90, bottom=0.13)

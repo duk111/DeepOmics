@@ -21,6 +21,7 @@ def _build_config(
     group_table: Path,
     report_formats: tuple[str, ...],
     trans_log2: bool,
+    export_audit_tables: bool,
 ) -> AnalysisConfig:
     """Build a validated analysis configuration from CLI options."""
     return AnalysisConfig(
@@ -30,6 +31,7 @@ def _build_config(
         group_table_path=str(group_table),
         report_formats=report_formats if report_formats else ("html",),
         trans_log2=trans_log2,
+        export_audit_tables=export_audit_tables,
     )
 
 
@@ -60,6 +62,7 @@ def ui(host: str, port: int) -> None:
 @click.option("--group-table", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Required sample grouping table. Required columns: sample_id, group1, group2.")
 @click.option("--report-format", "report_formats", type=click.Choice(["md", "html"], case_sensitive=False), multiple=True, help="Optional report formats. Defaults to HTML only when not set. HTML additionally emits the interactive figure studio.")
 @click.option("--trans-log2", is_flag=True, help="Apply log2(x+1) to transcriptome input.")
+@click.option("--export-audit-tables", is_flag=True, help="Export the full metabolite-gene scoring audit table as T99.")
 def run(
     genes: Path,
     metabs: Path,
@@ -69,6 +72,7 @@ def run(
     group_table: Path,
     report_formats: tuple[str, ...],
     trans_log2: bool,
+    export_audit_tables: bool,
 ) -> None:
     """Run the end-to-end OmicsPrism workflow."""
     output_dir = safe_mkdir(output)
@@ -82,6 +86,7 @@ def run(
         group_table=group_table,
         report_formats=tuple(fmt.lower() for fmt in report_formats),
         trans_log2=trans_log2,
+        export_audit_tables=export_audit_tables,
     )
 
     logger.info("Launching OmicsPrism")
