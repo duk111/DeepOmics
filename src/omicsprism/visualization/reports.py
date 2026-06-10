@@ -206,6 +206,7 @@ def generate_html_report(engine, cfg, report_path: str | Path) -> None:
 def generate_report_plots(engine, cfg) -> None:
     set_academic_style()
     plots_dir = safe_mkdir(Path(cfg.output_dir) / "plots")
+    figure_data_dir = safe_mkdir(Path(cfg.output_dir) / "figure_data")
     for prefix in OBSOLETE_FIGURE_FILE_PREFIXES:
         for suffix in ("pdf", "svg", "png"):
             path = plots_dir / f"{prefix}.{suffix}"
@@ -213,8 +214,12 @@ def generate_report_plots(engine, cfg) -> None:
                 path.unlink()
     context = VisualizationContext.from_engine(engine, cfg, plots_dir=plots_dir)
 
+    from .figure_data import export_figure_data
+
     for figure_spec in iter_figure_specs():
         figure_spec.render(context)
+        # Export figure data JSON for interactive pages
+        export_figure_data(context, figure_spec, figure_data_dir)
 
     notes = (
         "Recommended downstream usage:\n"

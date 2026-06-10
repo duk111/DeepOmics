@@ -305,6 +305,16 @@ def plot_module_metabolite_bubble_plot(engine, save_stem: str | Path, cfg) -> No
     ax.set_axisbelow(True)
     colorbar = fig.colorbar(scatter, ax=ax, fraction=0.025, pad=0.012)
     colorbar.set_label("Spearman rho")
+
+    # Size legend for -log10(FDR)
+    max_neglog = float(neglog_fdr.max()) if float(neglog_fdr.max()) > 0 else 1.0
+    for value in (0.35, 0.65, 0.95):
+        ref_size = 24.0 + value * 210.0
+        ref_neglog = value * max_neglog
+        ax.scatter([], [], s=ref_size, color="#9ca3af", edgecolors="#111827", linewidths=0.35, label=f"{ref_neglog:.1f}")
+    ax.legend(title="-log10(FDR)", loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=False, labelspacing=1.0)
+
+    fig.subplots_adjust(left=0.10, right=0.82, top=0.92, bottom=0.22)
     _save_figure(fig, save_stem, cfg)
 
 
