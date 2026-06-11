@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib import colors
-from scipy.stats import t
+from scipy.stats import spearmanr, t
 
 from .base import (
     PALETTE,
@@ -157,7 +157,11 @@ def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int 
         return
 
     top_n = int(top_n or cfg.top_pairs_plot_n)
-    ranked = edge_df.sort_values(["EdgeWeight", "RRARank"], ascending=[False, True], kind="mergesort").head(top_n)
+    ranked = (
+        edge_df.assign(_AbsSpearmanRho=pd.to_numeric(edge_df.get("SpearmanRho", np.nan), errors="coerce").abs())
+        .sort_values(["_AbsSpearmanRho", "EdgeWeight", "RRARank"], ascending=[False, False, True], kind="mergesort")
+        .head(top_n)
+    )
     if ranked.empty:
         return
 
@@ -194,10 +198,10 @@ def plot_top_edge_scatter_panels(engine, save_stem: str | Path, cfg, top_n: int 
             line_color="#111111",
         )
         if np.nanstd(x) > 0 and np.nanstd(y) > 0:
-            r_value = float(np.corrcoef(x, y)[0, 1])
-            r_text = f"r = {r_value:.2f}" if np.isfinite(r_value) else "r = NA"
+            rho_value = float(spearmanr(x, y, nan_policy="omit").statistic)
+            r_text = f"rho = {rho_value:.2f}" if np.isfinite(rho_value) else "rho = NA"
         else:
-            r_text = "r = NA"
+            r_text = "rho = NA"
 
         ax.text(
             1.025,

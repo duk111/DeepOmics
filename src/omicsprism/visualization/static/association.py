@@ -211,7 +211,7 @@ def plot_gene_metabolite_correlation_bubble_heatmap(engine, save_stem: str | Pat
     ax.set_xlim(-0.6, len(metabolite_order) - 0.4)
     ax.set_ylim(len(gene_order) - 0.4, -0.6)
     ax.set_xticks(np.arange(len(metabolite_order)))
-    ax.set_xticklabels(metabolite_order, rotation=45, ha="right", fontsize=10)
+    ax.set_xticklabels(metabolite_order, rotation=-45, ha="left", rotation_mode="anchor", fontsize=10)
     ax.tick_params(axis="y", left=False, labelleft=False)
     ax.set_xlabel("Metabolite")
     ax.set_ylabel("")
@@ -293,7 +293,7 @@ def plot_module_metabolite_bubble_plot(engine, save_stem: str | Path, cfg) -> No
         alpha=0.86,
     )
     ax.set_xticks(np.arange(len(metabolite_order)))
-    ax.set_xticklabels(metabolite_order, rotation=45, ha="right")
+    ax.set_xticklabels(metabolite_order, rotation=-45, ha="left", rotation_mode="anchor")
     ax.set_yticks(np.arange(len(module_order)))
     ax.set_yticklabels(module_order)
     for tick_label in ax.get_yticklabels():
@@ -308,13 +308,34 @@ def plot_module_metabolite_bubble_plot(engine, save_stem: str | Path, cfg) -> No
 
     # Size legend for -log10(FDR)
     max_neglog = float(neglog_fdr.max()) if float(neglog_fdr.max()) > 0 else 1.0
+    legend_handles: list[Line2D] = []
     for value in (0.35, 0.65, 0.95):
         ref_size = 24.0 + value * 210.0
         ref_neglog = value * max_neglog
-        ax.scatter([], [], s=ref_size, color="#9ca3af", edgecolors="#111827", linewidths=0.35, label=f"{ref_neglog:.1f}")
-    ax.legend(title="-log10(FDR)", loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=False, labelspacing=1.0)
-
-    fig.subplots_adjust(left=0.10, right=0.82, top=0.92, bottom=0.22)
+        legend_handles.append(
+            Line2D(
+                [],
+                [],
+                marker="o",
+                linestyle="",
+                markersize=float(np.sqrt(ref_size)),
+                markerfacecolor="#9ca3af",
+                markeredgecolor="#111827",
+                markeredgewidth=0.35,
+                label=f"{ref_neglog:.1f}",
+            )
+        )
+    colorbar.ax.legend(
+        handles=legend_handles,
+        title="-log10(FDR)",
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.06),
+        bbox_transform=colorbar.ax.transAxes,
+        frameon=False,
+        labelspacing=0.55,
+        borderaxespad=0.0,
+    )
+    fig.subplots_adjust(left=0.10, right=0.82, top=0.84, bottom=0.22)
     _save_figure(fig, save_stem, cfg)
 
 
@@ -369,7 +390,7 @@ def plot_association_direction_summary(engine, save_stem: str | Path, cfg) -> No
     ax.bar(x, pos, color="#e8a29a", label="positive", width=0.68)
     ax.bar(x, neg, bottom=pos, color="#8fb7df", label="negative", width=0.68)
     ax.set_xticks(x)
-    ax.set_xticklabels(counts.index.astype(str).tolist(), rotation=35, ha="right")
+    ax.set_xticklabels(counts.index.astype(str).tolist(), rotation=-35, ha="left")
     ax.set_ylabel("High-confidence edge count")
     ax.set_xlabel("Module")
     ax.set_title("Association Direction Summary by Module")
@@ -436,9 +457,9 @@ def plot_edgeweight_distribution_by_module(engine, save_stem: str | Path, cfg) -
     ax.set_title("High-Confidence EdgeWeight Distribution by Module")
     ax.grid(axis="y", color="#e5e7eb", linewidth=0.55)
     ax.set_axisbelow(True)
-    ax.tick_params(axis="x", labelrotation=35)
+    ax.tick_params(axis="x", labelrotation=-35)
     for label in ax.get_xticklabels():
-        label.set_ha("right")
+        label.set_ha("left")
     fig.subplots_adjust(right=0.82)
     _save_figure(fig, save_stem, cfg)
 
@@ -587,7 +608,13 @@ def plot_module_eigengene_metabolite_trend_panels(engine, save_stem: str | Path,
             ax.axhline(0, color="#9ca3af", linewidth=0.6, linestyle=(0, (4, 3)))
             ax.set_xlim(-0.35, len(group2_order) - 0.65)
             ax.set_xticks(x_positions)
-            ax.set_xticklabels(group2_order if row_idx == n_rows - 1 else [], rotation=45, ha="right", fontsize=7)
+            ax.set_xticklabels(
+                group2_order if row_idx == n_rows - 1 else [],
+                rotation=-45,
+                ha="left",
+                rotation_mode="anchor",
+                fontsize=7,
+            )
             ax.tick_params(axis="y", labelsize=7)
             ax.grid(axis="y", color="#e5e7eb", linewidth=0.45)
             if col_idx == 0:

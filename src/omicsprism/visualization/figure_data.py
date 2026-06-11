@@ -11,13 +11,11 @@ import json
 from pathlib import Path
 
 from .figure_exports import (
-    export_bar_charts,
     export_bubble_heatmap,
     export_circos,
     export_corr_heatmap,
     export_dendrogram,
     export_line_panels,
-    export_module_heatmap,
     export_pca_page,
     export_pca_pairs,
     export_pca_scatter,
@@ -46,19 +44,11 @@ EXPORT_MAP = {
     "top_metabolite_group1_violin_box": ("violin-box", export_violin_box),
     "top_gene_metabolite_correlation_heatmaps": ("corr-heatmap", export_corr_heatmap.export_gene_metabolite_heatmap),
     "module_metabolite_association_heatmap": ("corr-heatmap", export_corr_heatmap.export_module_metabolite_heatmap),
-    "module_eigengene_heatmap": ("module-heatmap", export_module_heatmap),
-    "module_eigengene_heatmap_group2": ("module-heatmap", export_module_heatmap),
-    "module_zscore_line_panels": ("line-panels", export_line_panels),
-    "module_gene_zscore_line_panels": ("line-panels", export_line_panels),
-    "module_eigengene_ridge": ("ridge", export_ridge),
     "module_eigengene_ridge_group1": ("ridge", export_ridge),
     "module_eigengene_group1_violin_box": ("violin-box", export_violin_box),
-    "module_kme_boxplot": ("violin-box", export_violin_box),
     "module_metabolite_bubble_plot": ("bubble-heatmap", export_bubble_heatmap),
     "module_top_metabolite_regressions": ("scatter-panels", export_scatter_panels),
     "module_eigengene_metabolite_trend_panels": ("line-panels", export_line_panels),
-    "association_direction_summary": ("bar-charts", export_bar_charts),
-    "edgeweight_distribution_by_module": ("bar-charts", export_bar_charts),
     "compressed_circos_network": ("circos", export_circos),
     "floating_cnet_circos_network": ("circos", export_circos),
 }
@@ -98,13 +88,26 @@ def export_figure_data(context, figure_spec, save_dir: Path) -> None:
                         list(existing["available_states"][key]) + list(vals)
                     ))
                     existing["available_states"][key] = merged
-            # Keep the first (primary) dataset; mark alternate data available
-            if "alt_data" not in existing:
-                existing["alt_data"] = {}
-            existing["alt_data"][data.get("figure_id", key)] = {
-                "plotly_spec": data.get("plotly_spec", {}),
-                "default_state": data.get("default_state", {}),
-            }
+            if page_id == "circos":
+                existing_layouts = existing.setdefault("circos_data", {}).setdefault("layouts", {})
+                new_layouts = data.get("circos_data", {}).get("layouts", {})
+                for layout_name, layout_data in new_layouts.items():
+                    if layout_data is not None:
+                        existing_layouts[layout_name] = layout_data
+                existing.setdefault("available_states", {})["layout"] = list(
+                    dict.fromkeys(
+                        list(existing.get("available_states", {}).get("layout", []))
+                        + list(data.get("available_states", {}).get("layout", []))
+                    )
+                )
+            else:
+                # Keep the first (primary) dataset; mark alternate data available
+                if "alt_data" not in existing:
+                    existing["alt_data"] = {}
+                existing["alt_data"][data.get("figure_id", key)] = {
+                    "plotly_spec": data.get("plotly_spec", {}),
+                    "default_state": data.get("default_state", {}),
+                }
             data = existing
         except Exception:
             pass  # If merge fails, overwrite with new data
@@ -124,9 +127,7 @@ __all__ = [
     "export_bubble_heatmap",
     "export_scatter_panels",
     "export_violin_box",
-    "export_module_heatmap",
     "export_line_panels",
     "export_ridge",
-    "export_bar_charts",
     "export_circos",
 ]

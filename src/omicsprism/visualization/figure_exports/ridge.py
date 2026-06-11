@@ -7,124 +7,110 @@ import numpy as np
 import pandas as pd
 
 from ...outputs import FIGURE_FILE_PREFIXES
-from ..static.base import (
-    _global_secondary_group_color_map,
-    _group_color_map,
-    _group_marker_map,
-    _ordered_unique_nonempty,
-    _ordered_unique_with_order,
+from ..static.module import (
+    _align_group_annotations_to_samples,
+    _centered_point_offsets,
+    _density_curve,
+    _module_group_orders_and_colors,
+    _prepare_module_ridge_matrix,
 )
-from .common import (
-    _base_layout,
-    _base_plotly_config,
-    _base_style,
-    _json_matrix_values,
-    _rgba,
-    _seaborn_vlag_colorscale,
-)
+from .common import _base_style
 
-def export_ridge(context, save_dir: Path, prefix_key: str) -> dict[str, Any]:
-    """Export ridge distribution data for interactive page 'ridge'."""
-    style = _base_style()
+
+def export_ridge(context, save_dir: Path, prefix_key: str) -> dict[str, Any] | None:
+    """Export F20 grouped module eigengene ridge data for the interactive page 'ridge'."""
+    if "group1" not in prefix_key.lower():
+        return None
+
     engine = context.engine
     group_df = context.pca_group_df
-
-    from ..static.module import (_coerce_module_eigengene_df, _module_order_from_summary,
-                                _align_group_annotations_to_samples, _module_group_orders_and_colors, _row_zscore)
-
-    eigengenes_df = _coerce_module_eigengene_df(engine.ml_results.get("module_eigengenes_df", pd.DataFrame()))
-    if eigengenes_df.empty:
+    zscore_df, module_order = _prepare_module_ridge_matrix(engine)
+    if zscore_df.empty or not module_order:
         return None
 
-    module_order_list = _module_order_from_summary(
-        engine.ml_results.get("module_summary_df", pd.DataFrame()),
-        eigengenes_df.columns.astype(str).tolist(),
+    sample_names = zscore_df.index.astype(str).tolist()
+    annotation = _align_group_annotations_to_samples(sample_names, group_df)
+    if annotation.empty:
+        return None
+    annotation = annotation.reindex(sample_names)
+
+    group_orders = annotation["_group_table_order"].astype(int).tolist()
+    group_orders_by_col, color_maps_by_col = _module_group_orders_and_colors(
+        group_df,
+        annotation["group1"].astype(str).tolist(),
+        annotation["group2"].astype(str).tolist(),
+        group_orders,
     )
-    module_order_list = [m for m in module_order_list if m in eigengenes_df.columns]
-    if not module_order_list:
+    group1_order = group_orders_by_col.get("group1", [])
+    group1_color_map = color_maps_by_col.get("group1", {})
+    if not group1_order:
         return None
 
-    zscore_df = _row_zscore(eigengenes_df.loc[:, module_order_list].T).T
-    is_grouped = "group1" in prefix_key.lower()
+    finite_values = zscore_df.to_numpy(dtype=float, copy=False)
+    finite_values = finite_values[np.isfinite(finite_values)]
+    if finite_values.size < 2:
+        return None
+    x_min = float(np.nanmin(finite_values))
+    x_max = float(np.nanmax(finite_values))
+    if np.isclose(x_min, x_max):
+        x_min -= 1.0
+        x_max += 1.0
+    x_pad = max(0.25, 0.10 * (x_max - x_min))
+    x_grid = np.linspace(x_min - x_pad, x_max + x_pad, 256)
 
-    from scipy.stats import gaussian_kde
-
-    x_grid = np.linspace(float(np.nanmin(zscore_df.values)), float(np.nanmax(zscore_df.values)), 200).tolist()
-
-    ridges = []
-    mod_color_map = {}
-    # Get module colors
-    from ..static.module import _module_color_map_from_results
-    mod_color_map = _module_color_map_from_results(engine, module_order_list)
-
-    group1_colors = {}
-    group1_order = []
-    if is_grouped:
-        samples = zscore_df.index.astype(str).tolist()
-        annotation = _align_group_annotations_to_samples(samples, group_df)
-        if not annotation.empty:
-            annotation = annotation.reindex(samples)
-            group_orders = annotation["_group_table_order"].astype(int).tolist()
-            orders_by_col, colors_by_col = _module_group_orders_and_colors(
-                group_df,
-                annotation["group1"].astype(str).tolist(),
-                annotation["group2"].astype(str).tolist(),
-                group_orders,
+    group_offsets = _centered_point_offsets(len(group1_order), width=0.12)
+    ridges: list[dict[str, Any]] = []
+    n_modules = len(module_order)
+    for row_idx, module_name in enumerate(module_order):
+        y_base = float(n_modules - row_idx - 1)
+        groups: list[dict[str, Any]] = []
+        for group_idx, group1_name in enumerate(group1_order):
+            group_samples = annotation.index[
+                annotation["group1"].astype(str).eq(str(group1_name))
+            ].astype(str).tolist()
+            values = (
+                pd.to_numeric(zscore_df.loc[group_samples, module_name], errors="coerce")
+                .dropna()
+                .to_numpy(dtype=float)
             )
-            group1_order = orders_by_col.get("group1", [])
-            group1_colors = colors_by_col.get("group1", {})
-
-    for mod in reversed(module_order_list):
-        ridge_data = {"module": str(mod), "color": mod_color_map.get(str(mod), "#9ca3af")}
-        if is_grouped and group1_order:
-            groups = []
-            for g_name in group1_order:
-                g_samples = annotation.index[annotation["group1"].astype(str).eq(g_name)].tolist()
-                values = zscore_df.loc[[s for s in g_samples if s in zscore_df.index], mod].dropna().values
-                if len(values) >= 2:
-                    try:
-                        density = gaussian_kde(values)(x_grid).tolist()
-                    except Exception:
-                        density = None
-                    rug = values.tolist()
-                else:
-                    density = None
-                    rug = values.tolist() if len(values) > 0 else []
-                groups.append({
-                    "group": str(g_name),
-                    "color": group1_colors.get(str(g_name), "#9ca3af"),
-                    "density": density,
-                    "rug": rug,
-                })
-            ridge_data["groups"] = groups
-        else:
-            values = zscore_df[mod].dropna().values
-            try:
-                density = gaussian_kde(values)(x_grid).tolist() if len(values) >= 2 else None
-            except Exception:
-                density = None
-            ridge_data["density"] = density
-            ridge_data["rug"] = values.tolist()
-        ridges.append(ridge_data)
+            density = _density_curve(values, x_grid)
+            groups.append({
+                "group": str(group1_name),
+                "color": group1_color_map.get(str(group1_name), "#9ca3af"),
+                "density": density.tolist() if density is not None else None,
+                "rug": values.tolist(),
+                "rug_offset": float(group_offsets[group_idx]),
+            })
+        ridges.append({
+            "module": str(module_name),
+            "y_base": y_base,
+            "groups": groups,
+        })
 
     static_prefix = FIGURE_FILE_PREFIXES.get(prefix_key, prefix_key)
     return {
-        "figure_id": f"module_ridge_{'grouped' if is_grouped else 'plain'}",
-        "title": f"Module Eigengene Ridge {'by group1' if is_grouped else 'Distribution'}",
+        "figure_id": "module_ridge_grouped",
+        "title": "Module Eigengene Ridge Distribution by group1",
         "chart_type": "ridge",
         "interactive_page_id": "ridge",
         "static_files": {"png": f"plots/{static_prefix}.png", "svg": f"plots/{static_prefix}.svg"},
-        "ridge_data": {"ridges": ridges, "x_grid": x_grid, "group1_order": group1_order, "group1_colors": group1_colors},
-        "default_state": {"grouped": is_grouped, "bandwidth": 1.0, "fill_alpha": 0.42},
-        "available_states": {"grouped": [False, True]},
-        "style": style,
+        "ridge_data": {
+            "ridges": ridges,
+            "x_grid": x_grid.tolist(),
+            "module_order": module_order,
+            "group1_order": group1_order,
+            "group1_colors": group1_color_map,
+            "ridge_height": 0.72,
+            "rug_height": 0.072,
+        },
+        "default_state": {
+            "visible_groups": group1_order,
+        },
+        "available_states": {
+            "visible_groups": group1_order,
+        },
+        "style": _base_style(),
     }
 
 
-# ---------------------------------------------------------------------------
-# Bar Charts (F27, F28)
-# ---------------------------------------------------------------------------
-
-__all__ = [
-    "export_ridge",
-]
+__all__ = ["export_ridge"]

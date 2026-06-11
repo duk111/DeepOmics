@@ -14,6 +14,7 @@ from ...outputs import FIGURE_FILE_PREFIXES
 from ..static.base import _gene_expression_df, _metabolomics_df
 from ..static.correlation import (
     _correlation_matrix,
+    _gene_metabolite_significance_matrix,
     _top_gene_order,
     _top_metabolite_order,
 )
@@ -112,12 +113,35 @@ def export_gene_metabolite_heatmap(context, save_dir: Path, prefix_key: str) -> 
     gene_to_module, gene_to_color, _module_to_color = _module_annotation_maps(engine)
     gene_colors = [gene_to_color.get(gene, "#d1d5db") for gene in genes]
 
+    _, significance_label, sig_matrix = _gene_metabolite_significance_matrix(engine, genes, metabolites)
+
     finite_values = spearman_df.to_numpy(dtype=float, copy=False).ravel()
     finite_values = finite_values[np.isfinite(finite_values)]
     vmax = max(0.25, float(np.nanmax(np.abs(finite_values))) if finite_values.size else 1.0)
 
+    # Build annotation stars and customdata for hover
+    annotation_rows: list[dict[str, Any]] = []
+    customdata_values: list[list[float | None]] = []
+    for row_idx, gene_name in enumerate(genes):
+        row_customdata: list[float | None] = []
+        for col_idx, metabolite_name in enumerate(metabolites):
+            raw_sig = (
+                sig_matrix.at[gene_name, metabolite_name]
+                if sig_matrix is not None and gene_name in sig_matrix.index and metabolite_name in sig_matrix.columns
+                else np.nan
+            )
+            star = _significance_star(raw_sig)
+            if star:
+                annotation_rows.append({"row": row_idx, "col": col_idx, "text": star})
+            row_customdata.append(float(raw_sig) if np.isfinite(float(raw_sig)) else None)
+        customdata_values.append(row_customdata)
+
     static_prefix = FIGURE_FILE_PREFIXES.get(prefix_key, prefix_key)
     z_values = _json_matrix_values(spearman_df)
+
+    colorbar_title = "Spearman rho"
+    if significance_label is not None:
+        colorbar_title = f"Spearman rho<br><sup>{significance_label}<br>* < 0.05, ** < 0.01, *** < 0.001</sup>"
 
     return {
         "figure_id": "top_gene_metabolite_correlation_heatmaps",
@@ -136,16 +160,22 @@ def export_gene_metabolite_heatmap(context, save_dir: Path, prefix_key: str) -> 
                     "zmid": 0.0,
                     "zmin": -vmax,
                     "zmax": vmax,
-                    "colorbar": {"title": "Correlation"},
-                    "hovertemplate": "Gene: %{y}<br>Metabolite: %{x}<br>Spearman ρ: %{z:.3f}<extra></extra>",
+                    "colorbar": {"title": {"text": colorbar_title}},
+                    "customdata": customdata_values,
+                    "hovertemplate": (
+                        "Gene: %{y}<br>Metabolite: %{x}<br>Spearman ρ: %{z:.3f}<br>"
+                        + (significance_label or "P value")
+                        + ": %{customdata:.2e}<extra></extra>"
+                    ),
                 }
             ],
             "layout": {
                 **_base_layout(f"Top {len(genes)} Genes × Top {len(metabolites)} Metabolites", style),
-                "xaxis": {"tickangle": 45},
+                "xaxis": {"tickangle": 45, "automargin": True},
                 "yaxis": {"autorange": "reversed"},
             },
             "config": _base_plotly_config(),
+            "annotations": annotation_rows,
             "y_colors": gene_colors,
         },
         "default_state": {
@@ -156,7 +186,7 @@ def export_gene_metabolite_heatmap(context, save_dir: Path, prefix_key: str) -> 
         },
         "available_states": {
             "view": ["gene-metabolite", "module-metabolite"],
-            "color_scheme": ["vlag", "RdBu_r", "RdBu", "RdYlBu_r", "coolwarm", "viridis"],
+            "color_scheme": ["vlag"],
         },
         "style": style,
     }
@@ -317,7 +347,7 @@ def export_module_metabolite_heatmap(context, save_dir: Path, prefix_key: str) -
             ],
             "layout": {
                 **_base_layout("Module-Metabolite Association Heatmap", style),
-                "xaxis": {"tickangle": 45},
+                "xaxis": {"tickangle": 45, "automargin": True},
                 "yaxis": {"autorange": "reversed"},
             },
             "config": _base_plotly_config(),
@@ -331,7 +361,7 @@ def export_module_metabolite_heatmap(context, save_dir: Path, prefix_key: str) -
         },
         "available_states": {
             "view": ["gene-metabolite", "module-metabolite"],
-            "color_scheme": ["vlag", "RdBu_r", "RdBu", "RdYlBu_r", "coolwarm", "viridis"],
+            "color_scheme": ["vlag"],
         },
         "style": style,
     }

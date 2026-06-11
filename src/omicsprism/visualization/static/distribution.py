@@ -101,9 +101,9 @@ def _plot_group1_violin_box_facets(
         ax.set_ylabel(y_label)
         ax.grid(axis="y", color="#e5e7eb", linewidth=0.55)
         ax.set_axisbelow(True)
-        ax.tick_params(axis="x", labelrotation=35)
+        ax.tick_params(axis="x", labelrotation=-35)
         for label in ax.get_xticklabels():
-            label.set_ha("right")
+            label.set_ha("left")
 
     for ax in axes_flat[n_features:]:
         ax.axis("off")
@@ -369,9 +369,9 @@ def plot_module_kme_boxplot(
     ax.set_ylabel("kME")
     ax.grid(axis="y", color="#e5e7eb", linewidth=0.55)
     ax.set_axisbelow(True)
-    ax.tick_params(axis="x", labelrotation=35)
+    ax.tick_params(axis="x", labelrotation=-35)
     for label in ax.get_xticklabels():
-        label.set_ha("right")
+        label.set_ha("left")
     _save_figure(fig, save_stem, cfg)
 
 

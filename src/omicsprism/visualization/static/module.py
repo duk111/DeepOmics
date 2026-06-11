@@ -1462,7 +1462,7 @@ def plot_module_metabolite_association_heatmap(engine, save_stem: str | Path, cf
     ax.set_title("Module-Metabolite Association Heatmap", pad=8)
     ax.set_xlabel("Metabolite")
     ax.set_ylabel("Module")
-    ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=-45, ha="left", rotation_mode="anchor")
     ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
     _save_figure(fig, save_stem, cfg)
 

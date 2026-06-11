@@ -12,6 +12,18 @@ from .base import _gene_expression_df, _metabolomics_df, _save_figure
 from .regression import _module_annotation_maps
 
 
+def _significance_star(value: float) -> str:
+    if not np.isfinite(value):
+        return ""
+    if value <= 0.001:
+        return "***"
+    if value <= 0.01:
+        return "**"
+    if value <= 0.05:
+        return "*"
+    return ""
+
+
 def _top_gene_order(engine, gene_df: pd.DataFrame, top_n: int) -> list[str]:
     summary_df = engine.ml_results.get("key_gene_summary_df", pd.DataFrame())
     if isinstance(summary_df, pd.DataFrame) and not summary_df.empty and "Gene" in summary_df.columns:
@@ -76,6 +88,55 @@ def _correlation_matrix(
     return pd.DataFrame(rows).reindex(index=genes, columns=metabolites).astype(float)
 
 
+def _gene_metabolite_significance_matrix(
+    engine,
+    genes: list[str],
+    metabolites: list[str],
+) -> tuple[pd.DataFrame | None, str | None, pd.DataFrame | None]:
+    for table_key in ("total_association_network_df", "high_confidence_network_df"):
+        edge_df = engine.ml_results.get(table_key, pd.DataFrame())
+        if not isinstance(edge_df, pd.DataFrame) or edge_df.empty:
+            continue
+        if not {"Gene", "Metabolite"}.issubset(edge_df.columns):
+            continue
+        significance_column = next(
+            (column for column in ("SpearmanFDR", "FDR", "SpearmanP", "PValue") if column in edge_df.columns),
+            None,
+        )
+        if significance_column is None:
+            continue
+
+        work = edge_df.loc[:, ["Gene", "Metabolite", significance_column]].copy()
+        work["Gene"] = work["Gene"].astype(str).str.strip()
+        work["Metabolite"] = work["Metabolite"].astype(str).str.strip()
+        work[significance_column] = pd.to_numeric(work[significance_column], errors="coerce")
+        work = work.loc[
+            work["Gene"].isin(genes)
+            & work["Metabolite"].isin(metabolites)
+            & work[significance_column].notna()
+        ].copy()
+        if work.empty:
+            continue
+
+        work = (
+            work.sort_values(significance_column, ascending=True, kind="mergesort")
+            .drop_duplicates(["Gene", "Metabolite"], keep="first")
+        )
+        sig_matrix = (
+            work.pivot(index="Gene", columns="Metabolite", values=significance_column)
+            .reindex(index=genes, columns=metabolites)
+        )
+        annotation_matrix = (
+            sig_matrix.map(_significance_star)
+            if hasattr(sig_matrix, "map")
+            else sig_matrix.applymap(_significance_star)
+        )
+        metric_label = "FDR" if "FDR" in significance_column.upper() else "P value"
+        return annotation_matrix, metric_label, sig_matrix
+
+    return None, None, None
+
+
 def plot_top_gene_metabolite_correlation_heatmaps(
     engine,
     save_stem: str | Path,
@@ -110,6 +171,7 @@ def plot_top_gene_metabolite_correlation_heatmaps(
     spearman_df = _correlation_matrix(gene_df, metab_df, genes, metabolites, method="spearman")
     if spearman_df.empty:
         return
+    annotation_matrix, significance_label, _ = _gene_metabolite_significance_matrix(engine, genes, metabolites)
 
     gene_to_module, gene_to_color, _module_to_color = _module_annotation_maps(engine)
     gene_colors = [gene_to_color.get(gene, "#d1d5db") for gene in genes]
@@ -158,22 +220,34 @@ def plot_top_gene_metabolite_correlation_heatmaps(
     sns.heatmap(
         spearman_df,
         ax=ax_spearman,
-        cbar_kws={"label": "Correlation"},
+        annot=annotation_matrix if annotation_matrix is not None else False,
+        fmt="",
+        annot_kws={"fontsize": 9},
+        cbar_kws={"label": "Spearman rho"},
         **heatmap_kwargs,
     )
 
-    ax_spearman.set_title("Spearman")
+    colorbar = ax_spearman.collections[0].colorbar if ax_spearman.collections else None
+    if colorbar is not None and significance_label is not None:
+        colorbar.ax.set_title(
+            f"{significance_label}\n* < 0.05\n** < 0.01\n*** < 0.001",
+            fontsize=9,
+            fontweight="normal",
+            pad=8,
+        )
+
+    ax_spearman.set_title("Top Gene-Metabolite Spearman Correlation Heatmap", fontweight="bold", pad=8)
     ax_spearman.set_xlabel("Metabolite")
     ax_spearman.set_ylabel("")
     ax_spearman.tick_params(axis="y", left=False, labelleft=False, right=False, labelright=False)
-    ax_spearman.set_xticklabels(ax_spearman.get_xticklabels(), rotation=45, ha="right")
-
-    fig.suptitle(
-        f"Top {len(genes)} Genes x Top {len(metabolites)} Metabolites",
-        y=0.99,
-        fontsize=13,
+    ax_spearman.set_xticklabels(
+        ax_spearman.get_xticklabels(),
+        rotation=-45,
+        ha="left",
+        rotation_mode="anchor",
     )
-    fig.subplots_adjust(left=0.10, right=0.98, top=0.90, bottom=0.22)
+
+    fig.subplots_adjust(left=0.10, right=0.98, top=0.92, bottom=0.22)
     _save_figure(fig, save_stem, cfg)
 
 
