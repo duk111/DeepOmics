@@ -22,6 +22,7 @@ class AnalysisConfig:
     missing_feature_threshold: float = 0.5
     knn_neighbors: int = 5
     trans_log2: bool = False
+    metab_log2: bool = True
 
     screen_top_k_per_method: int = 1000
     fdr_alpha: float = 0.05

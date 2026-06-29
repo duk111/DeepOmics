@@ -274,8 +274,9 @@ def preprocess_adata(
     missing_feature_threshold: float = 0.5,
     knn_neighbors: int = 5,
     trans_log2: bool = False,
+    metab_log2: bool = True,
 ) -> ad.AnnData:
-    """Apply filtering, optional transcriptome log transformation, KNN imputation, variance filtering, and scaling."""
+    """Apply filtering, optional log transformation, KNN imputation, variance filtering, and scaling."""
     if "metabolomics" not in adata.obsm:
         raise KeyError("adata.obsm['metabolomics'] is required.")
 
@@ -338,18 +339,27 @@ def preprocess_adata(
         label="Metabolomics",
         missing_feature_threshold=missing_feature_threshold,
     )
-    metab_df = _apply_log2p1(metab_df, label="Metabolomics")
+    if metab_log2:
+        metab_df = _apply_log2p1(metab_df, label="Metabolomics")
+        metab_log_info = {
+            "label": "Metabolomics",
+            "applied": True,
+            "method": "log2(x+1)",
+            "stage": "after_high_missing_filter_before_knn_imputation",
+        }
+    else:
+        logger.info("Skipped log2(x+1) transformation for Metabolomics.")
+        metab_log_info = {
+            "label": "Metabolomics",
+            "applied": False,
+            "method": "none",
+            "stage": "after_high_missing_filter_before_knn_imputation",
+        }
     metab_df, metab_impute_info = _impute_missing_with_knn(
         metab_df,
         label="Metabolomics",
         n_neighbors=knn_neighbors,
     )
-    metab_log_info = {
-        "label": "Metabolomics",
-        "applied": True,
-        "method": "log2(x+1)",
-        "stage": "after_high_missing_filter_before_knn_imputation",
-    }
 
     metab_var = np.nanvar(metab_df.to_numpy(dtype=np.float32, copy=False), axis=0)
     keep_metabs = metab_var > 0
@@ -390,7 +400,7 @@ def preprocess_adata(
         "scaled": bool(scale),
         "log_transform": {
             "transcriptome": bool(trans_log2),
-            "metabolomics": True,
+            "metabolomics": bool(metab_log2),
         },
         "missing_feature_threshold": float(missing_feature_threshold),
         "knn_neighbors": int(knn_neighbors),

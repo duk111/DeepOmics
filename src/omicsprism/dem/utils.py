@@ -123,6 +123,12 @@ def validate_inputs(
     if compare_field not in metadata.columns:
         raise ValueError(f"--compare-field does not exist in metadata: {compare_field}")
 
+    if compare_field in same_fields:
+        raise ValueError(
+            "--same-fields must not include --compare-field. "
+            "Use --same-fields only for blocking variables that should be matched within each contrast."
+        )
+
     missing_same_fields = [field for field in same_fields if field not in metadata.columns]
     if missing_same_fields:
         raise ValueError(f"--same-fields contains fields missing from metadata: {missing_same_fields}")

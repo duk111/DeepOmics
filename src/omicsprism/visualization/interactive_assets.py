@@ -518,6 +518,7 @@ def _interactive_html_template() -> str:
       if (viewId === "association") return getAssociationDataset();
       if (viewId === "module_heatmap") return report.datasets.module_heatmap || null;
       if (viewId === "network_explorer") return getNetworkDataset();
+      if (viewId === "upset") return report.datasets.upset || null;
       return null;
     }
 
@@ -1926,6 +1927,315 @@ def _interactive_html_template() -> str:
       return legend;
     }
 
+    function addSvgTitle(node, text) {
+      const title = svgEl("title");
+      title.textContent = text;
+      node.appendChild(title);
+      return node;
+    }
+
+    function sortedUpSetIntersections(dataset, controls) {
+      const intersections = Array.isArray(dataset.intersections) ? [...dataset.intersections] : [];
+      const sortBy = controls.sortBy || "size";
+      const evidenceKeys = (dataset.sets || []).map(item => item.key);
+      const pattern = row => row.pattern || evidenceKeys.map(key => row[key] ? "1" : "0").join("");
+
+      intersections.sort((a, b) => {
+        if (sortBy === "degree") {
+          return Number(b.support || 0) - Number(a.support || 0)
+            || Number(b.count || 0) - Number(a.count || 0)
+            || pattern(a).localeCompare(pattern(b));
+        }
+        if (sortBy === "combination") {
+          return pattern(a).localeCompare(pattern(b))
+            || Number(b.count || 0) - Number(a.count || 0);
+        }
+        return Number(b.count || 0) - Number(a.count || 0)
+          || Number(b.support || 0) - Number(a.support || 0)
+          || pattern(a).localeCompare(pattern(b));
+      });
+
+      const maxIntersections = clamp(
+        Math.round(Number(controls.maxIntersections || dataset.defaults?.maxIntersections || 30)),
+        1,
+        Math.max(1, intersections.length)
+      );
+      return intersections.slice(0, maxIntersections);
+    }
+
+    function renderUpSetChart(dataset, controls) {
+      const baseWidth = clamp(Number(controls.width || 1120), 760, 2400);
+      const baseHeight = clamp(Number(controls.height || 680), 520, 1600);
+      const zoom = clamp(Number(controls.zoom || 1), 0.5, 3);
+      const width = Math.round(baseWidth * zoom);
+      const height = Math.round(baseHeight * zoom);
+      const viewWidth = baseWidth;
+      const viewHeight = baseHeight;
+      const sets = Array.isArray(dataset.sets) ? dataset.sets : [];
+      const intersections = sortedUpSetIntersections(dataset, controls);
+      const evidenceKeys = sets.map(item => item.key);
+
+      const svg = svgEl("svg", {
+        width,
+        height,
+        viewBox: `0 0 ${viewWidth} ${viewHeight}`,
+        role: "img",
+        "aria-label": dataset.title || "Association Evidence Overlap"
+      });
+
+      if (!sets.length || !intersections.length) {
+        svg.appendChild(svgEl("rect", { x: 0, y: 0, width: viewWidth, height: viewHeight, fill: "#ffffff" }));
+        const text = svgEl("text", {
+          x: viewWidth / 2,
+          y: viewHeight / 2,
+          "text-anchor": "middle",
+          "font-size": 13,
+          fill: "#64748b"
+        });
+        text.textContent = "No evidence-overlap data available.";
+        svg.appendChild(text);
+        return { svg, intersections, sets, zoom };
+      }
+
+      const margin = { top: 18, right: 26, bottom: 24, left: 20 };
+      const titleH = 30;
+      const leftW = 190;
+      const gapX = 28;
+      const gapY = 26;
+      const rightW = Math.max(420, viewWidth - margin.left - margin.right - leftW - gapX);
+      const topH = Math.max(205, Math.round((viewHeight - margin.top - margin.bottom - titleH - gapY) * 0.58));
+      const bottomH = Math.max(150, viewHeight - margin.top - margin.bottom - titleH - gapY - topH);
+
+      const summaryX = margin.left;
+      const summaryY = margin.top + titleH;
+      const barX = margin.left + leftW + gapX;
+      const barY = margin.top + titleH;
+      const setX = margin.left;
+      const setY = margin.top + titleH + topH + gapY;
+      const matX = margin.left + leftW + gapX;
+      const matY = setY;
+
+      const barPad = { top: 16, right: 18, bottom: 22, left: 54 };
+      const barPlotW = rightW - barPad.left - barPad.right;
+      const barPlotH = topH - barPad.top - barPad.bottom;
+      const barColW = barPlotW / Math.max(1, intersections.length);
+      const counts = intersections.map(row => Number(row.count || 0));
+      const maxCount = Math.max(1, ...counts);
+
+      const setPad = { top: 26, right: 20, bottom: 12, left: 8 };
+      const setPlotW = leftW - setPad.left - setPad.right;
+      const setPlotH = bottomH - setPad.top - setPad.bottom;
+      const setRowH = setPlotH / Math.max(1, sets.length);
+      const maxSetSize = Math.max(1, ...sets.map(item => Number(item.size || 0)));
+
+      const matPad = { top: 26, right: 16, bottom: 12, left: 62 };
+      const matPlotW = rightW - matPad.left - matPad.right;
+      const matPlotH = bottomH - matPad.top - matPad.bottom;
+      const matColW = matPlotW / Math.max(1, intersections.length);
+      const matRowH = matPlotH / Math.max(1, sets.length);
+
+      svg.appendChild(svgEl("rect", { x: 0, y: 0, width: viewWidth, height: viewHeight, fill: "#ffffff" }));
+
+      const title = svgEl("text", {
+        x: barX + rightW / 2,
+        y: margin.top + 18,
+        "text-anchor": "middle",
+        "font-size": 15,
+        "font-weight": 700,
+        fill: "#111827"
+      });
+      title.textContent = dataset.title || "Association Evidence Overlap";
+      svg.appendChild(title);
+
+      const summary = svgEl("g", { transform: `translate(${summaryX + 14}, ${summaryY + 18})` });
+      const summaryLines = [
+        `Evidence-positive edges: ${Number(dataset.summary?.evidencePositiveEdges || 0).toLocaleString()}`,
+        `Displayed intersections: ${intersections.length}`,
+        "Unit: metabolite-gene edge"
+      ];
+      summaryLines.forEach((line, idx) => {
+        const text = svgEl("text", {
+          x: 0,
+          y: idx * 22,
+          "font-size": idx === 0 ? 12 : 11,
+          "font-weight": idx === 0 ? 700 : 400,
+          fill: idx === 0 ? "#111827" : "#475569"
+        });
+        text.textContent = line;
+        summary.appendChild(text);
+      });
+      svg.appendChild(summary);
+
+      const barGroup = svgEl("g", { transform: `translate(${barX + barPad.left}, ${barY + barPad.top})` });
+      for (let i = 0; i <= 4; i += 1) {
+        const y = barPlotH * (1 - i / 4);
+        barGroup.appendChild(svgEl("line", {
+          x1: 0, y1: y, x2: barPlotW, y2: y,
+          stroke: "#e5e7eb", "stroke-width": 0.8
+        }));
+        const tick = svgEl("text", {
+          x: -6,
+          y: y + 3,
+          "text-anchor": "end",
+          "font-size": 9,
+          fill: "#64748b"
+        });
+        tick.textContent = String(Math.round(maxCount * (i / 4)));
+        barGroup.appendChild(tick);
+      }
+      counts.forEach((count, idx) => {
+        const barH = (count / maxCount) * barPlotH;
+        const x = idx * barColW + barColW * 0.14;
+        const barW = Math.max(2, barColW * 0.72);
+        const row = intersections[idx];
+        const patternLabels = sets.filter(item => row[item.key]).map(item => item.label).join(" + ") || "None";
+        const rect = addSvgTitle(svgEl("rect", {
+          x,
+          y: barPlotH - barH,
+          width: barW,
+          height: barH,
+          fill: "#374151"
+        }), `Count: ${count}\nPattern: ${patternLabels}`);
+        barGroup.appendChild(rect);
+        if ((intersections.length <= 36 || idx % 2 === 0) && barH > 13) {
+          const label = svgEl("text", {
+            x: x + barW / 2,
+            y: barPlotH - barH - 5,
+            "text-anchor": "middle",
+            "font-size": 8,
+            fill: "#374151"
+          });
+          label.textContent = String(count);
+          barGroup.appendChild(label);
+        }
+      });
+      const barAxis = svgEl("text", {
+        x: 16,
+        y: barPlotH / 2,
+        transform: `rotate(-90 16 ${barPlotH / 2})`,
+        "text-anchor": "middle",
+        "font-size": 11,
+        fill: "#475569"
+      });
+      barAxis.textContent = "Candidate edges";
+      barGroup.appendChild(barAxis);
+      svg.appendChild(barGroup);
+
+      const setGroup = svgEl("g", { transform: `translate(${setX + setPad.left}, ${setY + setPad.top})` });
+      const setTitle = svgEl("text", {
+        x: setPlotW / 2,
+        y: -9,
+        "text-anchor": "middle",
+        "font-size": 11,
+        "font-weight": 700,
+        fill: "#334155"
+      });
+      setTitle.textContent = "Set size";
+      setGroup.appendChild(setTitle);
+      sets.forEach((set, idx) => {
+        const y = idx * setRowH;
+        if (idx % 2 === 0) {
+          setGroup.appendChild(svgEl("rect", { x: 0, y, width: setPlotW, height: setRowH, fill: "#f8fafc" }));
+        }
+        const size = Number(set.size || 0);
+        const barW = (size / maxSetSize) * setPlotW;
+        const barY = y + setRowH * 0.22;
+        const barH = setRowH * 0.56;
+        const rect = addSvgTitle(svgEl("rect", {
+          x: 0,
+          y: barY,
+          width: barW,
+          height: barH,
+          fill: set.color || "#9ca3af"
+        }), `${set.label}: ${size.toLocaleString()} edges`);
+        setGroup.appendChild(rect);
+        const name = svgEl("text", {
+          x: 0,
+          y: y + setRowH / 2 + 3.5,
+          "font-size": 10,
+          fill: "#111827"
+        });
+        name.textContent = set.label;
+        setGroup.appendChild(name);
+        const value = svgEl("text", {
+          x: Math.min(setPlotW - 4, barW + 6),
+          y: barY + barH * 0.72,
+          "font-size": 9,
+          fill: "#334155"
+        });
+        value.textContent = size.toLocaleString();
+        setGroup.appendChild(value);
+      });
+      svg.appendChild(setGroup);
+
+      const matGroup = svgEl("g", { transform: `translate(${matX + matPad.left}, ${matY + matPad.top})` });
+      const matrixTitle = svgEl("text", {
+        x: matPlotW / 2,
+        y: -9,
+        "text-anchor": "middle",
+        "font-size": 11,
+        "font-weight": 700,
+        fill: "#334155"
+      });
+      matrixTitle.textContent = `Top ${intersections.length} evidence intersections`;
+      matGroup.appendChild(matrixTitle);
+      sets.forEach((set, rowIdx) => {
+        const y = rowIdx * matRowH;
+        if (rowIdx % 2 === 0) {
+          matGroup.appendChild(svgEl("rect", { x: 0, y, width: matPlotW, height: matRowH, fill: "#f8fafc" }));
+        }
+        const label = svgEl("text", {
+          x: -10,
+          y: y + matRowH / 2 + 3.5,
+          "text-anchor": "end",
+          "font-size": 10,
+          fill: "#111827"
+        });
+        label.textContent = set.label;
+        matGroup.appendChild(label);
+      });
+      intersections.forEach((row, colIdx) => {
+        const activeRows = evidenceKeys.map((key, rowIdx) => row[key] ? rowIdx : -1).filter(rowIdx => rowIdx >= 0);
+        const x = colIdx * matColW + matColW / 2;
+        if (activeRows.length > 1) {
+          matGroup.appendChild(svgEl("line", {
+            x1: x,
+            y1: activeRows[0] * matRowH + matRowH / 2,
+            x2: x,
+            y2: activeRows[activeRows.length - 1] * matRowH + matRowH / 2,
+            stroke: "#111827",
+            "stroke-width": 1.1,
+            "stroke-linecap": "round"
+          }));
+        }
+        sets.forEach((set, rowIdx) => {
+          const active = Boolean(row[set.key]);
+          const circle = addSvgTitle(svgEl("circle", {
+            cx: x,
+            cy: rowIdx * matRowH + matRowH / 2,
+            r: active ? 5.5 : 4,
+            fill: active ? (set.color || "#4c78a8") : "#d1d5db",
+            stroke: active ? "#111827" : "none",
+            "stroke-width": active ? 0.35 : 0
+          }), `${set.label}: ${Number(row.count || 0).toLocaleString()} edges`);
+          matGroup.appendChild(circle);
+        });
+      });
+      svg.appendChild(matGroup);
+
+      return { svg, intersections, sets, zoom };
+    }
+
+    function renderUpSetSummary(dataset, rendered, controls) {
+      const legend = el("div", { className: "legend" });
+      legend.appendChild(el("span", { className: "legend-item", text: `Intersections shown: ${rendered.intersections.length}/${(dataset.intersections || []).length}` }));
+      legend.appendChild(el("span", { className: "legend-item", text: `Evidence sets: ${rendered.sets.length}` }));
+      legend.appendChild(el("span", { className: "legend-item", text: `Edges: ${Number(dataset.summary?.evidencePositiveEdges || 0).toLocaleString()}` }));
+      legend.appendChild(el("span", { className: "legend-item", text: `Sort: ${controls.sortBy || "size"}` }));
+      legend.appendChild(el("span", { className: "legend-item", text: `Zoom: ${Number(rendered.zoom || 1).toFixed(1)}x` }));
+      return legend;
+    }
+
     function normalizeSearch(value) {
       return String(value || "").trim().toLowerCase();
     }
@@ -2664,6 +2974,90 @@ def _interactive_html_template() -> str:
       return panel;
     }
 
+    function renderUpSetView(view) {
+      const dataset = report.datasets.upset || null;
+      const controls = getViewControls(view.id);
+      const panel = el("section", { className: "panel" });
+      panel.appendChild(el("div", { className: "panel-head" }, [
+        el("h2", { className: "panel-title", text: dataset ? dataset.title : view.title }),
+        el("p", {
+          className: "panel-note",
+          text: "Inspect overlap patterns across association evidence sources. Sort intersections, limit the displayed combinations, and export the current SVG."
+        })
+      ]));
+
+      const schema = report.schemas[view.schema_id];
+      const controlsRow = el("div", { className: "controls" });
+      for (const control of schema.controls || []) {
+        controlsRow.appendChild(renderControlField(view, control));
+      }
+      panel.appendChild(controlsRow);
+
+      const actionBar = el("div", { className: "action-bar" }, [
+        el("button", { text: "Export SVG", onclick: () => {
+          const svg = chartShell.querySelector("svg");
+          if (svg) downloadSvg(svg, "association_evidence_upset.svg");
+        }}),
+        el("button", { text: "Reset", onclick: () => resetControls(view.id) })
+      ]);
+      panel.appendChild(actionBar);
+
+      const chartWrap = el("div", {
+        className: "chart-wrap",
+        style: "cursor:grab; user-select:none;"
+      });
+      const chartShell = el("div", { className: "chart-shell" });
+      if (dataset) {
+        const rendered = renderUpSetChart(dataset, controls);
+        if (rendered && rendered.svg) {
+          chartShell.appendChild(rendered.svg);
+          chartWrap.appendChild(chartShell);
+
+          let isDragging = false;
+          let originX = 0;
+          let originY = 0;
+          let originLeft = 0;
+          let originTop = 0;
+          chartWrap.addEventListener("mousedown", event => {
+            if (event.button !== 0) return;
+            isDragging = true;
+            originX = event.clientX;
+            originY = event.clientY;
+            originLeft = chartWrap.scrollLeft;
+            originTop = chartWrap.scrollTop;
+            chartWrap.style.cursor = "grabbing";
+          });
+          chartWrap.addEventListener("mousemove", event => {
+            if (!isDragging) return;
+            chartWrap.scrollLeft = originLeft - (event.clientX - originX);
+            chartWrap.scrollTop = originTop - (event.clientY - originY);
+          });
+          const stopDragging = () => {
+            isDragging = false;
+            chartWrap.style.cursor = "grab";
+          };
+          chartWrap.addEventListener("mouseup", stopDragging);
+          chartWrap.addEventListener("mouseleave", stopDragging);
+          chartWrap.addEventListener("wheel", event => {
+            event.preventDefault();
+            const current = clamp(Number(getViewControls(view.id).zoom || 1), 0.5, 3);
+            const next = clamp(current + (event.deltaY > 0 ? -0.1 : 0.1), 0.5, 3);
+            setControl(view.id, "zoom", Number(next.toFixed(1)));
+          }, { passive: false });
+
+          panel.appendChild(chartWrap);
+          panel.appendChild(renderUpSetSummary(dataset, rendered, controls));
+        } else {
+          chartWrap.appendChild(el("div", { className: "placeholder", text: "No UpSet intersections are available." }));
+          panel.appendChild(chartWrap);
+        }
+      } else {
+        chartWrap.appendChild(el("div", { className: "placeholder", text: "No association evidence payload available." }));
+        panel.appendChild(chartWrap);
+      }
+      return panel;
+    }
+
     function renderNetworkView(view) {
       const dataset = getNetworkDataset();
       const controls = getViewControls(view.id);
@@ -2733,6 +3127,8 @@ def _interactive_html_template() -> str:
         main.appendChild(renderAssociationView(view));
       } else if (view.kind === "module_heatmap") {
         main.appendChild(renderModuleHeatmapView(view));
+      } else if (view.kind === "upset") {
+        main.appendChild(renderUpSetView(view));
       } else if (view.kind === "network") {
         main.appendChild(renderNetworkView(view));
       } else {

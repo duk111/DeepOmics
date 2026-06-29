@@ -20,6 +20,7 @@ from .interactive_schemas import (
     _build_network_schema,
     _build_pca_schema,
     _build_placeholder_schema,
+    _build_upset_schema,
 )
 from .registry import iter_figure_specs
 from .static.base import PALETTE as STATIC_PALETTE
@@ -44,6 +45,7 @@ from .static.network import (
 from .static.pca import _compute_pca_result, _load_pca_group_table
 from .static.regression import _module_annotation_maps
 from .static.module import _coerce_module_eigengene_df, _module_order_from_summary
+from .static.upset import EVIDENCE_SPECS, _build_evidence_intersection_table
 
 
 PALETTE = {
@@ -185,8 +187,8 @@ _FIGURE_GALLERY_META: dict[str, dict[str, Any]] = {
         "title": "Association Evidence UpSet",
         "category": "Evidence",
         "description": "Evidence-overlap UpSet plot for candidate metabolite-gene edges.",
-        "interactiveViewId": None,
-        "interactiveControls": {},
+        "interactiveViewId": "upset",
+        "interactiveControls": {"sortBy": "size", "maxIntersections": 30},
     },
 }
 
@@ -1224,6 +1226,59 @@ def _build_network_payload(
     }
 
 
+def _build_upset_payload(engine, cfg) -> dict[str, Any] | None:
+    gene_scores_df = engine.ml_results.get("gene_scores_df", pd.DataFrame())
+    if not isinstance(gene_scores_df, pd.DataFrame) or gene_scores_df.empty:
+        return None
+
+    max_intersections = int(getattr(cfg, "upset_plot_top_intersections", 30))
+    intersections, set_sizes, n_edges = _build_evidence_intersection_table(
+        gene_scores_df,
+        max_intersections=max(max_intersections, 50),
+    )
+    if intersections.empty:
+        return None
+
+    evidence_columns = [column for column, _, _ in EVIDENCE_SPECS]
+    sets = [
+        {
+            "key": column,
+            "label": label,
+            "size": int(set_sizes.get(column, 0)),
+            "color": color,
+        }
+        for column, label, color in EVIDENCE_SPECS
+    ]
+
+    rows: list[dict[str, Any]] = []
+    for row in intersections.itertuples(index=False):
+        payload = {
+            column: bool(getattr(row, column))
+            for column in evidence_columns
+        }
+        payload["count"] = int(getattr(row, "Count", 0))
+        payload["support"] = int(getattr(row, "SupportCount", 0))
+        payload["pattern"] = "".join("1" if payload[column] else "0" for column in evidence_columns)
+        rows.append(payload)
+
+    return {
+        "id": "association_evidence_upset",
+        "title": "Association Evidence Overlap",
+        "kind": "upset",
+        "sets": sets,
+        "intersections": rows,
+        "summary": {
+            "evidencePositiveEdges": int(n_edges),
+            "sets": len(sets),
+            "intersections": len(rows),
+        },
+        "defaults": {
+            "maxIntersections": int(min(max_intersections, len(rows))),
+            "sortBy": "size",
+        },
+    }
+
+
 def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
     context = VisualizationContext.from_engine(engine, cfg)
     summary = _build_summary_payload(engine, cfg)
@@ -1250,6 +1305,7 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
     gene_metabolite_payload = _build_gene_metabolite_regression_payload(engine, cfg)
     module_metabolite_payload = _build_module_metabolite_regression_payload(engine, cfg)
     module_heatmap_payload = _build_module_heatmap_payload(engine, cfg)
+    upset_payload = _build_upset_payload(engine, cfg)
     network_high_payload = _build_network_payload(
         engine,
         cfg,
@@ -1266,6 +1322,7 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
         "association.gene_metabolite": gene_metabolite_payload,
         "association.module_metabolite": module_metabolite_payload,
         "module_heatmap": module_heatmap_payload,
+        "upset": upset_payload,
         "network.high_confidence": network_high_payload,
     }
 
@@ -1314,6 +1371,15 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
             data_key="module_heatmap",
         ),
         InteractiveViewSpec(
+            id="upset",
+            title="UpSet Explorer",
+            kind="upset",
+            schema_id="upset.overlap",
+            enabled=upset_payload is not None,
+            description="Evidence overlap view for candidate metabolite-gene edges.",
+            data_key="upset",
+        ),
+        InteractiveViewSpec(
             id="network_explorer",
             title="Network Explorer",
             kind="network",
@@ -1345,6 +1411,9 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
         "network.explorer": _build_network_schema(
             int((network_high_payload or {"defaults": {"topEdges": 120}})["defaults"]["topEdges"]),
         ),
+        "upset.overlap": _build_upset_schema(
+            int((upset_payload or {"defaults": {"maxIntersections": 30}})["defaults"]["maxIntersections"]),
+        ),
         "placeholder.network_explorer": _build_placeholder_schema("placeholder.network_explorer", "Network Explorer"),
     }
 
@@ -1353,7 +1422,7 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
         "colorBy": "group1",
         "xComponent": 1,
         "yComponent": 2,
-        "showGroupEnvelope": True,
+        "showGroupEnvelope": False,
         "pointSize": 5,
         "showLabels": False,
         "width": 900,
@@ -1396,6 +1465,13 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
                 "height": 760,
                 "selectedNodeId": "",
             },
+            "upset": {
+                "sortBy": "size",
+                "maxIntersections": int((upset_payload or {"defaults": {"maxIntersections": 30}})["defaults"]["maxIntersections"]),
+                "zoom": 1.0,
+                "width": 1120,
+                "height": 680,
+            },
         },
     }
 
@@ -1409,6 +1485,10 @@ def _build_interactive_report_model(engine, cfg) -> InteractiveReportModel:
         implemented_views.append("network_explorer")
     else:
         placeholder_views.append("network_explorer")
+    if upset_payload is not None:
+        implemented_views.append("upset")
+    else:
+        placeholder_views.append("upset")
 
     meta = {
         **summary,
@@ -1446,11 +1526,13 @@ __all__ = [
     "_build_module_heatmap_payload",
     "_build_network_payload",
     "_build_pca_payload",
+    "_build_upset_payload",
     "_build_association_schema",
     "_build_module_heatmap_schema",
     "_build_network_schema",
     "_build_pca_schema",
     "_build_placeholder_schema",
+    "_build_upset_schema",
     "_build_summary_payload",
     "_interactive_html_template",
     "_json_default",

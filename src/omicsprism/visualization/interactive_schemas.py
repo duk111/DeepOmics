@@ -54,12 +54,6 @@ def _build_pca_schema(default_dataset: str) -> dict[str, Any]:
                 ],
             },
             {
-                "id": "showGroupEnvelope",
-                "type": "toggle",
-                "label": "Group envelope",
-                "default": True,
-            },
-            {
                 "id": "pointSize",
                 "type": "range",
                 "label": "Point size",
@@ -330,6 +324,66 @@ def _build_network_schema(default_top_edges: int) -> dict[str, Any]:
     }
 
 
+def _build_upset_schema(default_max_intersections: int) -> dict[str, Any]:
+    return {
+        "id": "upset.overlap",
+        "title": "UpSet Explorer",
+        "controls": [
+            {
+                "id": "sortBy",
+                "type": "select",
+                "label": "Sort by",
+                "default": "size",
+                "options": [
+                    {"value": "size", "label": "Size"},
+                    {"value": "degree", "label": "Support degree"},
+                    {"value": "combination", "label": "Combination"},
+                ],
+            },
+            {
+                "id": "maxIntersections",
+                "type": "select",
+                "label": "Max intersections",
+                "default": int(default_max_intersections),
+                "options": [
+                    {"value": 10, "label": "10"},
+                    {"value": 20, "label": "20"},
+                    {"value": 30, "label": "30"},
+                    {"value": 40, "label": "40"},
+                    {"value": 50, "label": "50"},
+                ],
+            },
+            {
+                "id": "zoom",
+                "type": "range",
+                "label": "Zoom",
+                "default": 1.0,
+                "min": 0.5,
+                "max": 3.0,
+                "step": 0.1,
+            },
+            {
+                "id": "width",
+                "type": "number",
+                "label": "Width",
+                "default": 1120,
+                "min": 760,
+                "max": 2400,
+                "step": 20,
+            },
+            {
+                "id": "height",
+                "type": "number",
+                "label": "Height",
+                "default": 680,
+                "min": 520,
+                "max": 1600,
+                "step": 20,
+            },
+        ],
+    }
+
+
 def _build_placeholder_schema(schema_id: str, title: str) -> dict[str, Any]:
     return {
         "id": schema_id,
@@ -345,4 +399,5 @@ __all__ = [
     "_build_network_schema",
     "_build_pca_schema",
     "_build_placeholder_schema",
+    "_build_upset_schema",
 ]

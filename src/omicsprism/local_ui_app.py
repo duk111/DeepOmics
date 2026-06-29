@@ -44,6 +44,8 @@ def _build_config(
     generate_reports: bool,
     n_threads: int,
     export_audit_tables: bool,
+    trans_log2: bool,
+    metab_log2: bool,
 ) -> AnalysisConfig:
     return AnalysisConfig(
         output_dir=str(output_dir),
@@ -51,6 +53,8 @@ def _build_config(
         report_formats=report_formats,
         generate_reports=generate_reports,
         n_threads=n_threads,
+        trans_log2=trans_log2,
+        metab_log2=metab_log2,
         export_audit_tables=export_audit_tables,
     )
 
@@ -72,6 +76,7 @@ def _run_analysis(
         missing_feature_threshold=cfg.missing_feature_threshold,
         knn_neighbors=cfg.knn_neighbors,
         trans_log2=cfg.trans_log2,
+        metab_log2=cfg.metab_log2,
     )
     engine = MultiOmicsEngine(adata, cfg)
     engine.run_all(generate_plots=cfg.generate_reports)
@@ -105,6 +110,8 @@ def main() -> None:
             html_report = st.checkbox("HTML report", value=True)
             md_report = st.checkbox("Markdown report", value=False)
             export_audit_tables = st.checkbox("Export audit table T99", value=False)
+            trans_log2 = st.checkbox("Log2 transform transcriptome", value=False)
+            metab_log2 = st.checkbox("Log2 transform metabolome", value=True)
 
     report_formats = tuple(fmt for fmt, enabled in (("html", html_report), ("md", md_report)) if enabled)
     output_dir = output_root / _safe_filename(output_name, "omicsprism_ui_run")
@@ -131,6 +138,8 @@ def main() -> None:
                 generate_reports=generate_reports,
                 n_threads=int(n_threads),
                 export_audit_tables=bool(export_audit_tables),
+                trans_log2=bool(trans_log2),
+                metab_log2=bool(metab_log2),
             )
 
             with st.spinner("Running OmicsPrism analysis. This may take several minutes."):
