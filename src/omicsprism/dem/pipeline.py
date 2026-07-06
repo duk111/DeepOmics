@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from omicsprism.differential_plots import plot_dem_joint_scatter, plot_differential_sankey, plot_differential_upset
+from omicsprism.differential_plots import plot_dem_joint_scatter, plot_differential_upset
 
 from .utils import (
     align_metabolites_and_metadata,
@@ -31,6 +31,13 @@ def _ensure_plot_dir(out_dir: Path, name: str) -> Path:
     plot_dir = out_dir / "plots" / name
     plot_dir.mkdir(parents=True, exist_ok=True)
     return plot_dir
+
+
+def _save_static_figure(fig: plt.Figure, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300)
+    if output_path.suffix.lower() != ".svg":
+        fig.savefig(output_path.with_suffix(".svg"), format="svg")
 
 
 def _benjamini_hochberg(pvalues: pd.Series) -> pd.Series:
@@ -276,7 +283,7 @@ def _plot_volcano(
     ax.legend(frameon=False, loc="best")
     ax.grid(True, color="#E5E5E5", linewidth=0.7)
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300)
+    _save_static_figure(fig, output_path)
     plt.close(fig)
 
 
@@ -306,7 +313,7 @@ def _plot_vip(
     ax.set_title(f"Top VIP Metabolites: {comparison}")
     ax.grid(True, axis="x", color="#E5E5E5", linewidth=0.7)
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300)
+    _save_static_figure(fig, output_path)
     plt.close(fig)
 
 
@@ -346,7 +353,7 @@ def _plot_scores(
     ax.legend(frameon=False, loc="best")
     ax.grid(True, color="#E5E5E5", linewidth=0.7)
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300)
+    _save_static_figure(fig, output_path)
     plt.close(fig)
 
 
@@ -406,7 +413,7 @@ def _plot_differential_metabolite_counts(counts_df: pd.DataFrame, output_path: P
     max_abs = max(float(np.abs(down_values).max()), float(np.abs(up_values).max()), 1.0)
     ax.set_ylim(-max_abs * 1.15, max_abs * 1.15)
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300)
+    _save_static_figure(fig, output_path)
     plt.close(fig)
 
 
@@ -613,7 +620,6 @@ def run_pipeline(
     score_plot_dir = _ensure_plot_dir(out_dir, "oplsda_scores")
     count_plot_dir = _ensure_plot_dir(out_dir, "dem_counts")
     upset_plot_dir = _ensure_plot_dir(out_dir, "upset")
-    sankey_plot_dir = _ensure_plot_dir(out_dir, "sankey")
 
     metabolites_feature_sample = load_metabolites(metabs_path)
     metadata = load_metadata(metadata_path)
@@ -723,20 +729,6 @@ def run_pipeline(
     _plot_differential_metabolite_counts(
         counts_df=dem_counts,
         output_path=count_plot_dir / "differential_metabolite_counts.bar.png",
-    )
-    plot_differential_sankey(
-        dem_counts,
-        contrasts,
-        same_fields=same_fields,
-        same_field_orders={
-            field: metadata_aligned[field].astype(str).drop_duplicates().tolist()
-            for field in same_fields
-        },
-        tested_level_order=tested_levels,
-        tested_level_count=len(tested_levels),
-        title="Differential Metabolite Count Flow",
-        output_html=sankey_plot_dir / "differential_sankey.html",
-        output_png=sankey_plot_dir / "differential_sankey.png",
     )
 
     union = _build_union_significant_metabolites(sig_results)

@@ -33,6 +33,13 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({red}, {green}, {blue}, {alpha})"
 
 
+def _save_static_figure(fig: plt.Figure, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300)
+    if output_path.suffix.lower() != ".svg":
+        fig.savefig(output_path.with_suffix(".svg"), format="svg")
+
+
 def plot_differential_upset(
     sig_results: list[pd.DataFrame],
     *,
@@ -190,9 +197,8 @@ def plot_differential_upset(
         color="#111827",
     )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.subplots_adjust(left=0.13, right=0.98, top=0.90, bottom=0.14)
-    fig.savefig(output_path, dpi=300)
+    _save_static_figure(fig, output_path)
     plt.close(fig)
 
 
@@ -366,9 +372,8 @@ def plot_dem_joint_scatter(
         color="#374151",
     )
     ax.grid(True, color="#E5E5E5", linewidth=0.7)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.subplots_adjust(left=0.12, right=0.74, top=0.90, bottom=0.14)
-    fig.savefig(output_path, dpi=300)
+    _save_static_figure(fig, output_path)
     plt.close(fig)
 
 
