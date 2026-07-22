@@ -61,9 +61,6 @@ dev = [
     "pytest-cov>=4.1.0",
     "ruff>=0.5.0",
 ]
-ui = [
-    "streamlit>=1.32.0",
-]
 
 [project.urls]
 Homepage = "https://github.com/yourname/omicsprism"
@@ -72,7 +69,6 @@ Issues = "https://github.com/yourname/omicsprism/issues"
 
 [project.scripts]
 omicsprism = "omicsprism.cli:main"
-omicsprism-ui = "omicsprism.local_ui:main"
 
 [tool.setuptools]
 include-package-data = true

@@ -43,19 +43,6 @@ def main() -> None:
 
 
 @main.command()
-@click.option("--host", default="127.0.0.1", show_default=True, help="Local interface host.")
-@click.option("--port", default=8501, show_default=True, type=int, help="Local interface port.")
-def ui(host: str, port: int) -> None:
-    """Launch the local browser UI."""
-    try:
-        from .local_ui import launch_ui
-
-        launch_ui(host=host, port=port)
-    except RuntimeError as exc:
-        raise click.ClickException(str(exc)) from exc
-
-
-@main.command()
 @click.option("--genes", "-g", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Transcriptome matrix CSV (features x samples).")
 @click.option("--metabs", "-m", required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path), help="Metabolome matrix CSV (features x samples).")
 @click.option("--output", "-o", default="results", show_default=True, type=click.Path(file_okay=False, path_type=Path), help="Output directory.")
