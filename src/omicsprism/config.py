@@ -24,11 +24,11 @@ class AnalysisConfig:
     trans_log2: bool = False
     metab_log2: bool = True
 
-    screen_top_k_per_method: int = 1000
+    screen_top_k_per_method: int = 300
     fdr_alpha: float = 0.05
 
-    xgb_n_estimators: int = 200
-    xgb_max_depth: int = 6
+    xgb_n_estimators: int = 100
+    xgb_max_depth: int = 4
     xgb_learning_rate: float = 0.10
     xgb_subsample: float = 0.80
     xgb_colsample_bytree: float = 0.80

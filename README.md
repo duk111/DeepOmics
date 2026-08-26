@@ -241,7 +241,7 @@ S3,Treatment,T1
 - Spearman 相关。
 - Mutual Information。
 
-每种方法保留前 `screen_top_k_per_method` 个候选，默认 1000。候选基因表会记录：
+每种方法保留前 `screen_top_k_per_method` 个候选，默认 300。候选基因表会记录：
 
 - `In_PCC`
 - `In_Spearman`
@@ -452,7 +452,7 @@ T02_High_Confidence_Network.csv
 | `missing_feature_threshold` | 0.5 | 缺失比例过滤阈值。 |
 | `knn_neighbors` | 5 | KNN 填补邻居数。 |
 | `trans_log2` | True | 是否对转录组做 log2 转换。 |
-| `screen_top_k_per_method` | 1000 | 每种筛选方法保留的候选基因数。 |
+| `screen_top_k_per_method` | 300 | 每种筛选方法保留的候选基因数。 |
 | `fdr_alpha` | 0.05 | FDR 阈值。 |
 | `selection_ratio` | 0.20 | 每个代谢物最终目标特征数比例。 |
 | `min_features` | 10 | 每个代谢物至少选择的特征数。 |
